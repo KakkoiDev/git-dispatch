@@ -305,6 +305,83 @@ test_help() {
     assert_contains "$output" "TRAILERS" "help shows trailers"
 }
 
+test_sync_auto_detect_from_poc() {
+    echo "=== test: sync auto-detect from POC branch ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Add a new commit to POC for task-3
+    git checkout poc/feature -q
+    echo "auto" > auto.txt; git add auto.txt
+    git commit -m "Auto detect fix$(printf '\n\nTask-Id: 3')" -q
+
+    local before
+    before=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
+
+    # Sync WITHOUT specifying POC -- should auto-detect from current branch
+    bash "$DISPATCH" sync
+
+    local after
+    after=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
+
+    assert_eq "$((before + 1))" "$after" "auto-detect from POC synced commit"
+
+    teardown
+}
+
+test_sync_auto_detect_from_child() {
+    echo "=== test: sync auto-detect from child branch ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Add a commit to POC for task-4
+    git checkout poc/feature -q
+    echo "child-auto" > child-auto.txt; git add child-auto.txt
+    git commit -m "Child auto fix$(printf '\n\nTask-Id: 4')" -q
+
+    # Switch to child branch, sync without args
+    git checkout feat/task-4 -q
+
+    local before
+    before=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+
+    bash "$DISPATCH" sync
+
+    local after
+    after=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+
+    assert_eq "$((before + 1))" "$after" "auto-detect from child synced commit"
+
+    teardown
+}
+
+test_sync_adds_trailer() {
+    echo "=== test: sync child→POC adds Task-Id trailer ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Commit on child WITHOUT Task-Id trailer
+    git checkout feat/task-3 -q
+    echo "no-trailer" > notrailer.txt; git add notrailer.txt
+    git commit --no-verify -m "Fix without trailer" -q
+
+    bash "$DISPATCH" sync poc/feature feat/task-3
+
+    # Check the cherry-picked commit on POC has Task-Id trailer
+    local trailer
+    trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" poc/feature | tr -d '[:space:]')
+
+    assert_eq "3" "$trailer" "Task-Id trailer added on child→POC sync"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -317,6 +394,9 @@ test_tree
 test_sync_poc_to_child
 test_sync_child_to_poc
 test_sync_worktree
+test_sync_auto_detect_from_poc
+test_sync_auto_detect_from_child
+test_sync_adds_trailer
 test_hook
 test_help
 

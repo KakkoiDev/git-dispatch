@@ -28,9 +28,13 @@ Verify after: `git dispatch tree <base>` to confirm stack structure.
 git cherry -v <child> <poc>    # POC → child (+ = needs sync)
 git cherry -v <poc> <child>    # Child → POC (+ = needs sync)
 
-# Execute sync
-git dispatch sync <poc> [child]
+# Execute sync (auto-detects POC from current branch)
+git dispatch sync              # sync all children
+git dispatch sync [poc]        # explicit POC
+git dispatch sync [poc] child  # sync one child
 ```
+
+Child→POC sync automatically adds `Task-Id` trailer if missing.
 
 **Check status** (current state):
 ```bash

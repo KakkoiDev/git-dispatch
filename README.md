@@ -30,8 +30,8 @@ git dispatch split poc/feature --base master --name feat/feature
 #     └── feat/feature/task-4
 #         └── feat/feature/task-5
 
-# Continue working, then sync
-git dispatch sync poc/feature
+# Continue working, then sync (auto-detects POC from current branch)
+git dispatch sync
 ```
 
 ## Commands
@@ -40,8 +40,9 @@ git dispatch sync poc/feature
 |---------|-------------|
 | `git dispatch split <poc> --name <prefix> --base <base>` | Split POC into stacked branches by Task-Id |
 | `git dispatch split <poc> --name <prefix> --dry-run` | Preview split without creating branches |
-| `git dispatch sync <poc>` | Sync all task branches bidirectionally |
-| `git dispatch sync <poc> <child>` | Sync one specific task branch |
+| `git dispatch sync` | Auto-detect POC, sync all task branches bidirectionally |
+| `git dispatch sync [poc]` | Sync all task branches for a specific POC |
+| `git dispatch sync [poc] <child>` | Sync one specific task branch |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
 | `git dispatch help` | Show usage guide |
@@ -91,17 +92,20 @@ git dispatch split cyril/poc/po-transactions --base master --name cyril/feat/po-
 
 ### 3. Sync
 
-Sync is always bidirectional. New commits on POC flow to the right child branch, fixes on child branches flow back to POC:
+Sync is always bidirectional. New commits on POC flow to the right child branch, fixes on child branches flow back to POC. If a child commit is missing a `Task-Id` trailer, it gets added automatically on sync.
 
 ```bash
-# Sync all children
+# Auto-detect POC from current branch (works from POC or any child)
+git dispatch sync
+
+# Explicit POC, sync all children
 git dispatch sync cyril/poc/po-transactions
 
 # Sync one child
 git dispatch sync cyril/poc/po-transactions cyril/feat/po-transactions/task-4
 ```
 
-Uses `git cherry` (patch-id comparison) to detect what's already applied -- no duplicate cherry-picks.
+POC is auto-detected from the current branch: if you're on the POC branch or any child branch, `git dispatch sync` figures out what to sync. Uses `git cherry` (patch-id comparison) to detect what's already applied -- no duplicate cherry-picks.
 
 ### 4. View stack
 

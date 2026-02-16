@@ -77,20 +77,47 @@ worktree_for_branch() {
 }
 
 # Cherry-pick into a branch, worktree-aware
+# Optional --trailer "Key=Value" as first args (before branch name)
 cherry_pick_into() {
+    local -a trailers=()
+    while [[ "$1" == --trailer ]]; do
+        trailers+=("$2"); shift 2
+    done
+
     local branch="$1"; shift
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
 
-    if [[ -n "$wt" ]]; then
-        git -C "$wt" cherry-pick -x "${hashes[@]}"
+    if [[ ${#trailers[@]} -gt 0 ]]; then
+        # Cherry-pick one at a time, amending each with trailer
+        for h in "${hashes[@]}"; do
+            if [[ -n "$wt" ]]; then
+                git -C "$wt" cherry-pick -x "$h"
+                for t in "${trailers[@]}"; do
+                    git -C "$wt" commit --amend --no-edit --trailer "$t" --quiet
+                done
+            else
+                local orig
+                orig=$(current_branch)
+                git checkout "$branch" --quiet
+                git cherry-pick -x "$h"
+                for t in "${trailers[@]}"; do
+                    git commit --amend --no-edit --trailer "$t" --quiet
+                done
+                git checkout "$orig" --quiet
+            fi
+        done
     else
-        local orig
-        orig=$(current_branch)
-        git checkout "$branch" --quiet
-        git cherry-pick -x "${hashes[@]}"
-        git checkout "$orig" --quiet
+        if [[ -n "$wt" ]]; then
+            git -C "$wt" cherry-pick -x "${hashes[@]}"
+        else
+            local orig
+            orig=$(current_branch)
+            git checkout "$branch" --quiet
+            git cherry-pick -x "${hashes[@]}"
+            git checkout "$orig" --quiet
+        fi
     fi
 }
 
@@ -187,57 +214,88 @@ cmd_split() {
 
 # ---------- sync ----------
 
+# Resolve POC branch from current context
+# Priority: explicit arg > current branch is POC > current branch is child (read dispatchpoc)
+resolve_poc() {
+    local explicit="$1"
+    if [[ -n "$explicit" ]]; then
+        echo "$explicit"
+        return
+    fi
+
+    local cur
+    cur=$(current_branch)
+
+    # Is current branch a POC for any child?
+    local is_poc
+    is_poc=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        local cpoc
+        cpoc=$(git config "branch.${b}.dispatchpoc" 2>/dev/null || true)
+        if [[ "$cpoc" == "$cur" ]]; then echo "$cur"; break; fi
+    done)
+    if [[ -n "$is_poc" ]]; then
+        echo "$is_poc"
+        return
+    fi
+
+    # Is current branch a child? Read its dispatchpoc
+    local cpoc
+    cpoc=$(git config "branch.${cur}.dispatchpoc" 2>/dev/null || true)
+    if [[ -n "$cpoc" ]]; then
+        echo "$cpoc"
+        return
+    fi
+
+    die "Cannot detect POC branch. Run from a POC or child branch, or pass it explicitly."
+}
+
+# Find all dispatch children for a given POC
+find_dispatch_children() {
+    local poc="$1"
+    local -a found=()
+
+    while IFS= read -r ref; do
+        local bname="${ref#refs/heads/}"
+        local cpoc
+        cpoc=$(git config "branch.${bname}.dispatchpoc" 2>/dev/null || true)
+        [[ "$cpoc" == "$poc" ]] && found+=("$bname")
+    done < <(git for-each-ref --format='%(refname)' refs/heads/)
+
+    printf '%s\n' "${found[@]}"
+}
+
 cmd_sync() {
-    local poc="" child="" continuing=false
+    local poc_arg="" child="" continuing=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --continue) continuing=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)
-                if [[ -z "$poc" ]]; then poc="$1"
+                if [[ -z "$poc_arg" ]]; then poc_arg="$1"
                 elif [[ -z "$child" ]]; then child="$1"
                 fi
                 shift ;;
         esac
     done
 
-    [[ -n "$poc" ]] || die "Usage: git dispatch sync <poc-branch> [child-branch]"
+    local poc
+    poc=$(resolve_poc "$poc_arg")
 
     # Resolve child branches to sync
     local -a targets=()
     if [[ -n "$child" ]]; then
         targets=("$child")
     else
-        # Find all dispatch children recursively from base
-        _collect_dispatch_children() {
-            local branch="$1"
-            local children
-            children=$(get_children "$branch")
-            [[ -z "$children" ]] && return
-            while IFS= read -r c; do
-                local cpoc
-                cpoc=$(git config "branch.${c}.dispatchpoc" 2>/dev/null || true)
-                [[ "$cpoc" == "$poc" ]] && targets+=("$c")
-                _collect_dispatch_children "$c"
-            done <<< "$children"
-        }
-        # Walk from all branches that might be roots
-        local base
-        base=$(git merge-base --octopus "$poc" HEAD 2>/dev/null || echo "master")
-        _collect_dispatch_children "$base"
-        # Also check branches that directly reference this POC
-        while IFS= read -r ref; do
-            local bname="${ref#refs/heads/}"
-            local cpoc
-            cpoc=$(git config "branch.${bname}.dispatchpoc" 2>/dev/null || true)
-            if [[ "$cpoc" == "$poc" ]] && ! printf '%s\n' "${targets[@]}" | grep -q "^${bname}$"; then
-                targets+=("$bname")
-            fi
-        done < <(git for-each-ref --format='%(refname)' refs/heads/)
+        while IFS= read -r c; do
+            [[ -n "$c" ]] && targets+=("$c")
+        done < <(find_dispatch_children "$poc")
     fi
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+
+    echo -e "${CYAN}POC:${NC} $poc"
+    echo ""
 
     for child_branch in "${targets[@]}"; do
         echo -e "${CYAN}Syncing:${NC} $child_branch"
@@ -264,16 +322,29 @@ cmd_sync() {
         fi
 
         # Child → POC: commits in child not yet in POC
+        # Add Task-Id trailer if missing or different
         local -a child_to_poc=()
+        local -a child_needs_trailer=()
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash="${line:2:40}"
             child_to_poc+=("$hash")
+            # Check if commit already has the right Task-Id
+            local tid
+            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            if [[ "$tid" != "$task_id" ]]; then
+                child_needs_trailer+=("$hash")
+            fi
         done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
 
         if [[ ${#child_to_poc[@]} -gt 0 ]]; then
-            info "  Child → POC: ${#child_to_poc[@]} commit(s)"
-            cherry_pick_into "$poc" "${child_to_poc[@]}"
+            if [[ ${#child_needs_trailer[@]} -gt 0 ]]; then
+                info "  Child → POC: ${#child_to_poc[@]} commit(s) (adding Task-Id: $task_id)"
+                cherry_pick_into --trailer "Task-Id=$task_id" "$poc" "${child_to_poc[@]}"
+            else
+                info "  Child → POC: ${#child_to_poc[@]} commit(s)"
+                cherry_pick_into "$poc" "${child_to_poc[@]}"
+            fi
         else
             echo "  Child → POC: up to date"
         fi
@@ -337,7 +408,8 @@ WORKFLOW
        git dispatch split cyril/poc/feature --base master --name cyril/feat/feature
 
   3. Continue working on POC or child branches, then sync:
-       git dispatch sync cyril/poc/feature                    # sync all children
+       git dispatch sync                                      # auto-detect POC, sync all
+       git dispatch sync cyril/poc/feature                    # explicit POC, sync all
        git dispatch sync cyril/poc/feature child/task-3       # sync one child
 
   4. View the stack:
@@ -348,10 +420,11 @@ COMMANDS
       Parse Task-Id trailers from <poc>, group commits by task, create stacked
       branches named <prefix>/task-N. Each branch stacks on the previous.
 
-  sync <poc> [child-branch]
+  sync [poc] [child-branch]
       Bidirectional sync using git cherry (patch-id comparison).
       POC→child: new commits for the task appear in the child branch.
-      Child→POC: direct fixes on child appear back in the POC.
+      Child→POC: direct fixes on child appear back in the POC (Task-Id added).
+      If <poc> is omitted, auto-detects from current branch context.
 
   tree [branch]
       Show the dispatch stack hierarchy.
