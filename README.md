@@ -67,65 +67,149 @@ Install the hook to enforce trailers on every commit:
 git dispatch hook install
 ```
 
-## Workflow
+## Example: TRD to Stacked PRs
 
-### 1. Code on POC
+The full workflow starts with a TRD (Technical Refinement Document). Task numbers in the TRD become `Task-Id` trailers in commits, which become stacked branches and PRs.
 
-Work on your POC branch as usual. Tag each commit with the task it belongs to:
+See [`trd-template.md`](trd-template.md) for the full template.
+
+### The TRD
+
+```markdown
+# TRD - Purchase Order Transaction Registration
+
+## Tasks
+
+### Part 1 - Backend Infrastructure
+#### 3. (Schema) Add PurchaseOrder to TransactionLineSource enum
+#### 4. (BE) Create GET /transactions/by-purchase-order/:id endpoint
+#### 5. (BE) Implement Purchase Order validation in transaction service
+
+### Part 2 - Frontend
+#### 9. (FE) Add transaction status to PO Detail header
+#### 10. (FE) Add menu item with confirmation dialog
+#### 11. (FE) Create transaction registration page
+```
+
+### Step 1: Vibe-code the POC
+
+Code the whole feature on one branch. Tag every commit with its TRD task number:
 
 ```bash
 git checkout -b cyril/poc/po-transactions master
-git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
-git commit -m "Create GET endpoint"       --trailer "Task-Id=4"
-git commit -m "Add DTOs"                  --trailer "Task-Id=4"
-git commit -m "Implement validation"      --trailer "Task-Id=5"
+git dispatch hook install
+
+# Task 3 - Schema
+git commit -m "Add PurchaseOrder to TransactionLineSource enum" --trailer "Task-Id=3"
+
+# Task 4 - GET endpoint
+git commit -m "Create DTOs for purchase order transaction"      --trailer "Task-Id=4"
+git commit -m "Add controller and service methods"              --trailer "Task-Id=4"
+git commit -m "Add tax mapping logic for debit side"            --trailer "Task-Id=4"
+
+# Task 5 - Validation
+git commit -m "Implement PO validation in transaction service"  --trailer "Task-Id=5"
+git commit -m "Add optimistic locking and permission checks"    --trailer "Task-Id=5"
+
+# Task 9 - FE status header
+git commit -m "Add transaction status to PO detail header"      --trailer "Task-Id=9"
+
+# Task 10 - FE menu item
+git commit -m "Add menu item with confirmation dialog"          --trailer "Task-Id=10"
 ```
 
-### 2. Split
+The POC branch is demo-able. Show it to PM, get feedback, iterate.
 
-Preview first, then split:
+### Step 2: Split into stacked branches
 
 ```bash
-git dispatch split cyril/poc/po-transactions --base master --name cyril/feat/po-transactions --dry-run
-git dispatch split cyril/poc/po-transactions --base master --name cyril/feat/po-transactions
+# Preview first
+git dispatch split cyril/poc/po-transactions \
+  --base master --name cyril/feat/po-transactions --dry-run
+
+# Split
+git dispatch split cyril/poc/po-transactions \
+  --base master --name cyril/feat/po-transactions
 ```
 
-### 3. Sync
+Result:
+```
+master
+└── cyril/feat/po-transactions/task-3   (1 commit)
+    └── cyril/feat/po-transactions/task-4   (3 commits)
+        └── cyril/feat/po-transactions/task-5   (2 commits)
+            └── cyril/feat/po-transactions/task-9   (1 commit)
+                └── cyril/feat/po-transactions/task-10  (1 commit)
+```
 
-Sync is always bidirectional. New commits on POC flow to the right child branch, fixes on child branches flow back to POC. If a child commit is missing a `Task-Id` trailer, it gets added automatically on sync.
+Each branch contains only its task's commits, stacked on top of the previous task. Reviewer reads one branch = one TRD task.
+
+### Step 3: Create stacked PRs
 
 ```bash
-# Auto-detect POC from current branch (works from POC or any child)
+gh pr create --base master                                  --head cyril/feat/po-transactions/task-3  --title "feat(schema): Add PurchaseOrder to TransactionLineSource enum"
+gh pr create --base cyril/feat/po-transactions/task-3       --head cyril/feat/po-transactions/task-4  --title "feat(be): Create GET /transactions/by-purchase-order endpoint"
+gh pr create --base cyril/feat/po-transactions/task-4       --head cyril/feat/po-transactions/task-5  --title "feat(be): Implement PO validation in transaction service"
+gh pr create --base cyril/feat/po-transactions/task-5       --head cyril/feat/po-transactions/task-9  --title "feat(fe): Add transaction status to PO detail header"
+gh pr create --base cyril/feat/po-transactions/task-9       --head cyril/feat/po-transactions/task-10 --title "feat(fe): Add menu item with confirmation dialog"
+```
+
+### Step 4: Keep iterating
+
+Fix something on the POC? Sync pushes it to the right child:
+
+```bash
+git checkout cyril/poc/po-transactions
+git commit -m "Fix tax mapping edge case" --trailer "Task-Id=4"
 git dispatch sync
-
-# Explicit POC, sync all children
-git dispatch sync cyril/poc/po-transactions
-
-# Sync one child
-git dispatch sync cyril/poc/po-transactions cyril/feat/po-transactions/task-4
 ```
 
-POC is auto-detected from the current branch: if you're on the POC branch or any child branch, `git dispatch sync` figures out what to sync. Uses `git cherry` (patch-id comparison) to detect what's already applied -- no duplicate cherry-picks.
-
-### 4. View stack
+Fix something on a child branch? Sync pushes it back to POC:
 
 ```bash
-git dispatch tree master
-# master
-# └── cyril/feat/po-transactions/task-3
-#     └── cyril/feat/po-transactions/task-4
-#         └── cyril/feat/po-transactions/task-5
+git checkout cyril/feat/po-transactions/task-5
+git commit -m "Fix permission check"
+git dispatch sync
+# Task-Id=5 trailer added automatically, synced back to POC
 ```
 
-### 5. Create PRs
+POC stays demo-able. PRs stay clean. Reviewer reads commit-by-commit.
 
-Create PRs manually with correct `--base` for each branch:
+## Commands Reference
+
+### split
 
 ```bash
-gh pr create --base master                                --head cyril/feat/po-transactions/task-3
-gh pr create --base cyril/feat/po-transactions/task-3     --head cyril/feat/po-transactions/task-4
-gh pr create --base cyril/feat/po-transactions/task-4     --head cyril/feat/po-transactions/task-5
+git dispatch split <poc> --name <prefix> [--base <base>] [--dry-run]
 ```
+
+Parse `Task-Id` trailers from POC, group commits by task, create stacked branches named `<prefix>/task-N`. Each branch stacks on the previous.
+
+### sync
+
+```bash
+git dispatch sync                    # auto-detect POC, sync all
+git dispatch sync [poc]              # explicit POC, sync all
+git dispatch sync [poc] <child>      # sync one child
+```
+
+Bidirectional sync using `git cherry` (patch-id comparison). POC->child: new commits for the task appear in the child. Child->POC: fixes flow back (Task-Id trailer added if missing). Auto-detects POC from current branch context.
+
+### tree
+
+```bash
+git dispatch tree [branch]
+```
+
+Show the dispatch stack hierarchy.
+
+### hook install
+
+```bash
+git dispatch hook install
+```
+
+Install `commit-msg` hook that rejects commits without a `Task-Id` trailer.
 
 ## Worktree Support
 
