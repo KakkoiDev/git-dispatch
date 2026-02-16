@@ -209,7 +209,21 @@ Show the dispatch stack hierarchy.
 git dispatch hook install
 ```
 
-Install `commit-msg` hook that rejects commits without a `Task-Id` trailer.
+Install `commit-msg` hook that rejects commits without a `Task-Id` trailer. This is per-repo.
+
+To enforce `Task-Id` globally across all repos:
+
+```bash
+mkdir -p ~/.git-hooks
+cp hooks/commit-msg ~/.git-hooks/
+git config --global core.hooksPath ~/.git-hooks
+```
+
+This will reject commits without `Task-Id` in every repo, including ones that don't use git-dispatch. To bypass when needed:
+
+```bash
+git commit --no-verify -m "message without trailer"
+```
 
 ## Worktree Support
 
