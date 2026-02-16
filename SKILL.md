@@ -1,11 +1,13 @@
 ---
 name: git-dispatch
-description: POC-to-stacked-branches workflow tool. Split a POC branch into task-based stacked branches and keep them in sync bidirectionally. Use when preparing clean PRs from a POC branch.
+description: TRD-to-stacked-PRs workflow tool. Write a TRD with numbered tasks, vibe-code a POC with Task-Id trailers, split into stacked branches, create PRs, sync bidirectionally. Use when preparing clean PRs from a POC branch or writing TRDs.
 ---
 
-# git-dispatch - POC to Stacked Branches
+# git-dispatch - TRD to Stacked PRs
 
-Split a POC branch into clean stacked task branches. Bidirectional sync via patch-id comparison.
+Write TRD -> vibe-code POC -> split into branches -> create PRs -> sync both ways.
+
+**TRD task number = Task-Id trailer = branch name = PR**
 
 ## Commands
 
@@ -22,34 +24,44 @@ Split a POC branch into clean stacked task branches. Bidirectional sync via patc
 
 ## Task-Id Trailers
 
-Every commit needs a `Task-Id` trailer:
+Every commit needs a `Task-Id` trailer matching its TRD task number:
 ```bash
-git commit -m "Add feature" --trailer "Task-Id=3"
+git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 ```
 
-Parse trailers:
-```bash
-git log --format="%H %(trailers:key=Task-Id,valueonly)" master..poc
-```
+Child→POC sync adds missing trailers automatically.
 
-## Typical Workflow
+## Full Workflow
 
 ```bash
-# 1. Code on POC with trailers
-git checkout -b poc/feature master
-git commit -m "Add enum" --trailer "Task-Id=3"
-git commit -m "Add endpoint" --trailer "Task-Id=4"
-git commit -m "Add DTOs" --trailer "Task-Id=4"
+# 1. Write TRD with numbered tasks (see trd-template.md)
 
-# 2. Split into stacked branches
-git dispatch split poc/feature --base master --name feat/feature
+# 2. Vibe-code POC, tagging commits with TRD task numbers
+git checkout -b cyril/poc/feature master
+git dispatch hook install
+git commit -m "Add PurchaseOrder to enum"      --trailer "Task-Id=3"
+git commit -m "Create GET endpoint"            --trailer "Task-Id=4"
+git commit -m "Add DTOs"                       --trailer "Task-Id=4"
+git commit -m "Implement validation"           --trailer "Task-Id=5"
 
-# 3. Sync after more POC work (auto-detects POC from current branch)
+# 3. Split into stacked branches (one per TRD task)
+git dispatch split cyril/poc/feature --base master --name cyril/feat/feature
+
+# 4. Create stacked PRs (each PR = one TRD task)
+gh pr create --base master                      --head cyril/feat/feature/task-3
+gh pr create --base cyril/feat/feature/task-3   --head cyril/feat/feature/task-4
+gh pr create --base cyril/feat/feature/task-4   --head cyril/feat/feature/task-5
+
+# 5. Keep iterating -- sync from anywhere
 git dispatch sync
 
-# 4. View stack
-git dispatch tree master
+# 6. View stack
+git dispatch tree
 ```
+
+## TRD Template
+
+Available at `trd-template.md`. Key: task numbers become Task-Id trailer values.
 
 ## Stack Metadata
 
