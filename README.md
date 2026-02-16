@@ -43,6 +43,9 @@ git dispatch sync
 | `git dispatch sync` | Auto-detect POC, sync all task branches bidirectionally |
 | `git dispatch sync [poc]` | Sync all task branches for a specific POC |
 | `git dispatch sync [poc] <child>` | Sync one specific task branch |
+| `git dispatch status [poc]` | Show pending sync counts without applying |
+| `git dispatch pr [poc] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch reset [poc] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
 | `git dispatch help` | Show usage guide |
@@ -147,11 +150,11 @@ Each branch contains only its task's commits, stacked on top of the previous tas
 ### Step 3: Create stacked PRs
 
 ```bash
-gh pr create --base master                                  --head cyril/feat/po-transactions/task-3  --title "feat(schema): Add PurchaseOrder to TransactionLineSource enum"
-gh pr create --base cyril/feat/po-transactions/task-3       --head cyril/feat/po-transactions/task-4  --title "feat(be): Create GET /transactions/by-purchase-order endpoint"
-gh pr create --base cyril/feat/po-transactions/task-4       --head cyril/feat/po-transactions/task-5  --title "feat(be): Implement PO validation in transaction service"
-gh pr create --base cyril/feat/po-transactions/task-5       --head cyril/feat/po-transactions/task-9  --title "feat(fe): Add transaction status to PO detail header"
-gh pr create --base cyril/feat/po-transactions/task-9       --head cyril/feat/po-transactions/task-10 --title "feat(fe): Add menu item with confirmation dialog"
+# Preview what would be created
+git dispatch pr --dry-run
+
+# Push branches and create PRs
+git dispatch pr --push
 ```
 
 ### Step 4: Keep iterating
@@ -194,6 +197,37 @@ git dispatch sync [poc] <child>      # sync one child
 ```
 
 Bidirectional sync using `git cherry` (patch-id comparison). POC->child: new commits for the task appear in the child. Child->POC: fixes flow back (Task-Id trailer added if missing). Auto-detects POC from current branch context.
+
+### status
+
+```bash
+git dispatch status              # auto-detect POC
+git dispatch status [poc]        # explicit POC
+```
+
+Show pending sync counts per child branch without applying changes. Quick preview before running `sync`.
+
+### pr
+
+```bash
+git dispatch pr                  # auto-detect, create all PRs
+git dispatch pr [poc]            # explicit POC
+git dispatch pr --push           # push branches first, then create PRs
+git dispatch pr --dry-run        # show what would be created
+```
+
+Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title is taken from the first commit subject of each task. Requires `gh` CLI.
+
+### reset
+
+```bash
+git dispatch reset               # auto-detect POC, clean metadata
+git dispatch reset [poc]         # explicit POC
+git dispatch reset --branches    # also delete task branches
+git dispatch reset --force       # skip confirmation prompt
+```
+
+Clean up dispatch metadata (`dispatchpoc`, `dispatchchildren`) from git config. Use when re-splitting or abandoning a dispatch stack.
 
 ### tree
 

@@ -386,6 +386,176 @@ test_sync_adds_trailer() {
     teardown
 }
 
+test_status() {
+    echo "=== test: status ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Add a commit to POC for task-4
+    git checkout poc/feature -q
+    echo "status-fix" > status-fix.txt; git add status-fix.txt
+    git commit -m "Status fix$(printf '\n\nTask-Id: 4')" -q
+
+    # Add a commit directly on child task-3
+    git checkout feat/task-3 -q
+    echo "child-fix" > child-fix.txt; git add child-fix.txt
+    git commit -m "Child fix$(printf '\n\nTask-Id: 3')" -q
+
+    local output
+    output=$(bash "$DISPATCH" status poc/feature)
+
+    assert_contains "$output" "poc/feature" "status shows POC"
+    assert_contains "$output" "feat/task-3" "status shows task-3"
+    assert_contains "$output" "feat/task-4" "status shows task-4"
+    assert_contains "$output" "feat/task-5" "status shows task-5"
+    # task-4 should have 1 pending POC -> child
+    assert_contains "$output" "1 pending" "status shows pending count"
+    # task-5 should show up to date
+    assert_contains "$output" "up to date" "status shows up to date"
+
+    teardown
+}
+
+test_status_auto_detect() {
+    echo "=== test: status auto-detect ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Run status from POC branch without explicit arg
+    git checkout poc/feature -q
+    local output
+    output=$(bash "$DISPATCH" status)
+
+    assert_contains "$output" "poc/feature" "auto-detect status shows POC"
+    assert_contains "$output" "feat/task-3" "auto-detect status shows children"
+
+    teardown
+}
+
+test_pr_dry_run() {
+    echo "=== test: pr --dry-run ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run poc/feature)
+
+    assert_contains "$output" "gh pr create --base master --head feat/task-3" "PR for task-3 with correct base"
+    assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
+    assert_contains "$output" "gh pr create --base feat/task-4 --head feat/task-5" "PR for task-5 with correct base"
+
+    # Verify titles from first commit subjects
+    assert_contains "$output" "Add enum" "PR title from first commit of task-3"
+    assert_contains "$output" "Create GET endpoint" "PR title from first commit of task-4"
+    assert_contains "$output" "Implement validation" "PR title from first commit of task-5"
+
+    teardown
+}
+
+test_pr_dry_run_push() {
+    echo "=== test: pr --dry-run --push ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run --push poc/feature)
+
+    assert_contains "$output" "git push -u origin feat/task-3" "push command for task-3"
+    assert_contains "$output" "git push -u origin feat/task-4" "push command for task-4"
+    assert_contains "$output" "git push -u origin feat/task-5" "push command for task-5"
+
+    teardown
+}
+
+test_reset() {
+    echo "=== test: reset ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    bash "$DISPATCH" reset --force poc/feature
+
+    # Verify config cleaned
+    local poc3
+    poc3=$(git config branch.feat/task-3.dispatchpoc 2>/dev/null || true)
+    assert_eq "" "$poc3" "task-3 dispatchpoc removed"
+
+    local poc4
+    poc4=$(git config branch.feat/task-4.dispatchpoc 2>/dev/null || true)
+    assert_eq "" "$poc4" "task-4 dispatchpoc removed"
+
+    local children_master
+    children_master=$(git config --get-all branch.master.dispatchchildren 2>/dev/null || true)
+    assert_eq "" "$children_master" "master dispatchchildren removed"
+
+    local children_3
+    children_3=$(git config --get-all branch.feat/task-3.dispatchchildren 2>/dev/null || true)
+    assert_eq "" "$children_3" "task-3 dispatchchildren removed"
+
+    local children_4
+    children_4=$(git config --get-all branch.feat/task-4.dispatchchildren 2>/dev/null || true)
+    assert_eq "" "$children_4" "task-4 dispatchchildren removed"
+
+    # Branches should still exist
+    assert_branch_exists "feat/task-3" "task-3 still exists after reset"
+    assert_branch_exists "feat/task-4" "task-4 still exists after reset"
+    assert_branch_exists "feat/task-5" "task-5 still exists after reset"
+
+    teardown
+}
+
+test_reset_branches() {
+    echo "=== test: reset --branches ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    git checkout master -q
+    bash "$DISPATCH" reset --force --branches poc/feature
+
+    # Branches should be deleted
+    if git rev-parse --verify "feat/task-3" >/dev/null 2>&1; then
+        echo -e "  ${RED}FAIL${NC} task-3 should be deleted"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} task-3 branch deleted"
+        PASS=$((PASS + 1))
+    fi
+
+    if git rev-parse --verify "feat/task-4" >/dev/null 2>&1; then
+        echo -e "  ${RED}FAIL${NC} task-4 should be deleted"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} task-4 branch deleted"
+        PASS=$((PASS + 1))
+    fi
+
+    if git rev-parse --verify "feat/task-5" >/dev/null 2>&1; then
+        echo -e "  ${RED}FAIL${NC} task-5 should be deleted"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} task-5 branch deleted"
+        PASS=$((PASS + 1))
+    fi
+
+    # Config should also be clean
+    local poc3
+    poc3=$(git config branch.feat/task-3.dispatchpoc 2>/dev/null || true)
+    assert_eq "" "$poc3" "config cleaned after reset --branches"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -401,6 +571,12 @@ test_sync_worktree
 test_sync_auto_detect_from_poc
 test_sync_auto_detect_from_child
 test_sync_adds_trailer
+test_status
+test_status_auto_detect
+test_pr_dry_run
+test_pr_dry_run_push
+test_reset
+test_reset_branches
 test_hook
 test_help
 

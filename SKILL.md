@@ -18,6 +18,9 @@ Write TRD -> vibe-code POC -> split into branches -> create PRs -> sync both way
 | `git dispatch sync` | Auto-detect POC, sync all task branches bidirectionally |
 | `git dispatch sync [poc]` | Sync all task branches for a specific POC |
 | `git dispatch sync [poc] <child>` | Sync one specific task branch |
+| `git dispatch status [poc]` | Show pending sync counts without applying |
+| `git dispatch pr [poc] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch reset [poc] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
 | `git dispatch help` | Show usage guide |
@@ -48,15 +51,17 @@ git commit -m "Implement validation"           --trailer "Task-Id=5"
 git dispatch split cyril/poc/feature --base master --name cyril/feat/feature
 
 # 4. Create stacked PRs (each PR = one TRD task)
-gh pr create --base master                      --head cyril/feat/feature/task-3
-gh pr create --base cyril/feat/feature/task-3   --head cyril/feat/feature/task-4
-gh pr create --base cyril/feat/feature/task-4   --head cyril/feat/feature/task-5
+git dispatch pr --push
 
-# 5. Keep iterating -- sync from anywhere
+# 5. Keep iterating -- check status, then sync
+git dispatch status
 git dispatch sync
 
 # 6. View stack
 git dispatch tree
+
+# 7. Cleanup when done
+git dispatch reset --force
 ```
 
 ## TRD Template

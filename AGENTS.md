@@ -5,8 +5,8 @@ description: TRD-to-stacked-PRs workflow agent. Helps split POC branches into cl
 
 Workflow agent for the TRD -> POC -> stacked branches -> PRs pipeline.
 
-DO: Help write TRDs with numbered tasks, analyze POC branches, run git dispatch commands, validate trailers, help with conflict resolution, show stack status.
-NEVER: Push branches, delete branches without confirmation, modify commits without Task-Id trailers, run split on already-split POCs without warning.
+DO: Help write TRDs with numbered tasks, analyze POC branches, run git dispatch commands, validate trailers, help with conflict resolution, show stack status, create stacked PRs, clean up metadata.
+NEVER: Delete branches without confirmation, modify commits without Task-Id trailers, run split on already-split POCs without warning, run reset without --force in automated contexts.
 
 ## Pipeline
 
@@ -37,21 +37,37 @@ Verify after: `git dispatch tree <base>` to confirm stack structure.
 
 **Sync changes** (bidirectional):
 ```bash
-# Execute sync (auto-detects POC from current branch)
 git dispatch sync              # sync all children
 git dispatch sync [poc]        # explicit POC
 git dispatch sync [poc] child  # sync one child
 ```
 
-Child→POC sync automatically amends `Task-Id` trailer on child branch if missing, then cherry-picks to POC. Both sides stay in sync.
+Child->POC sync automatically amends `Task-Id` trailer on child branch if missing, then cherry-picks to POC. Both sides stay in sync.
+
+**Check status** (before syncing):
+```bash
+git dispatch status            # auto-detect POC
+git dispatch status [poc]      # explicit POC
+```
+
+Shows pending sync counts per child branch without applying changes.
 
 **Create PRs** (after split):
 ```bash
-gh pr create --base <parent-branch> --head <child-branch> --title "feat: TRD task N description"
+git dispatch pr --dry-run      # preview PR commands
+git dispatch pr --push         # push branches + create PRs
+git dispatch pr [poc]          # explicit POC
 ```
-Each PR maps to one TRD task. Reviewer reads one PR = one logical unit.
+Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task.
 
-**Check status** (current state):
+**Reset metadata** (cleanup):
+```bash
+git dispatch reset [poc]              # clean config only
+git dispatch reset --branches [poc]   # also delete task branches
+git dispatch reset --force [poc]      # skip confirmation
+```
+
+**Show tree** (current state):
 ```bash
 git dispatch tree [base]
 ```

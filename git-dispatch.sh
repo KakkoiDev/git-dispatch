@@ -281,6 +281,17 @@ find_dispatch_children() {
     printf '%s\n' "${found[@]}"
 }
 
+# Find the parent branch in the dispatch stack for a given child
+find_stack_parent() {
+    local child="$1"
+    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        if get_children "$b" | grep -q "^${child}$"; then
+            echo "$b"
+            break
+        fi
+    done
+}
+
 cmd_sync() {
     local poc_arg="" child="" continuing=false
 
@@ -376,6 +387,234 @@ cmd_sync() {
     done
 }
 
+# ---------- status ----------
+
+cmd_status() {
+    local poc_arg=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*) die "Unknown flag: $1" ;;
+            *)  poc_arg="$1"; shift ;;
+        esac
+    done
+
+    local poc
+    poc=$(resolve_poc "$poc_arg")
+
+    local -a targets=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && targets+=("$c")
+    done < <(find_dispatch_children "$poc")
+
+    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+
+    echo -e "${CYAN}POC:${NC} $poc"
+    echo ""
+
+    for child_branch in "${targets[@]}"; do
+        local task_id="${child_branch##*/task-}"
+
+        # POC -> child: commits in POC for this task not yet in child
+        local poc_to_child=0
+        while IFS= read -r line; do
+            [[ "$line" == +* ]] || continue
+            local hash="${line:2:40}"
+            local tid
+            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" == "$task_id" ]] && poc_to_child=$((poc_to_child + 1))
+        done < <(git cherry -v "$child_branch" "$poc" 2>/dev/null || true)
+
+        # Child -> POC: commits in child not yet in POC
+        local child_to_poc=0
+        while IFS= read -r line; do
+            [[ "$line" == +* ]] || continue
+            child_to_poc=$((child_to_poc + 1))
+        done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
+
+        echo -e "  ${YELLOW}$child_branch${NC}"
+        if [[ $poc_to_child -gt 0 ]]; then
+            echo -e "    POC -> child: ${GREEN}${poc_to_child} pending${NC}"
+        else
+            echo "    POC -> child: 0 pending"
+        fi
+        if [[ $child_to_poc -gt 0 ]]; then
+            echo -e "    Child -> POC: ${GREEN}${child_to_poc} pending${NC}"
+        else
+            echo "    Child -> POC: 0 pending (up to date)"
+        fi
+        echo ""
+    done
+}
+
+# ---------- pr ----------
+
+cmd_pr() {
+    local poc_arg="" push=false dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --push)    push=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            -*)        die "Unknown flag: $1" ;;
+            *)         poc_arg="$1"; shift ;;
+        esac
+    done
+
+    local poc
+    poc=$(resolve_poc "$poc_arg")
+
+    local -a children=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && children+=("$c")
+    done < <(find_dispatch_children "$poc")
+
+    [[ ${#children[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+
+    if ! $dry_run && ! command -v gh &>/dev/null; then
+        die "gh CLI is required. Install: https://cli.github.com"
+    fi
+
+    # Find base branch (parent of first child that isn't itself a dispatch child)
+    local base=""
+    for child in "${children[@]}"; do
+        local parent
+        parent=$(find_stack_parent "$child")
+        local parent_is_child=false
+        for c in "${children[@]}"; do
+            [[ "$c" == "$parent" ]] && { parent_is_child=true; break; }
+        done
+        if ! $parent_is_child; then
+            base="$parent"
+            break
+        fi
+    done
+
+    [[ -n "$base" ]] || die "Cannot determine base branch"
+
+    # Walk from base through dispatch children in stack order
+    local -a ordered=()
+    local current="$base"
+    while true; do
+        local next=""
+        for c in "${children[@]}"; do
+            if get_children "$current" | grep -q "^${c}$"; then
+                next="$c"
+                break
+            fi
+        done
+        [[ -n "$next" ]] || break
+        ordered+=("$next")
+        current="$next"
+    done
+
+    echo -e "${CYAN}POC:${NC} $poc"
+    echo ""
+
+    for child_branch in "${ordered[@]}"; do
+        local parent
+        parent=$(find_stack_parent "$child_branch")
+
+        # First commit subject as PR title
+        local title
+        title=$(git log --reverse --format="%s" "${parent}..${child_branch}" | head -1)
+
+        if $push; then
+            if $dry_run; then
+                echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $child_branch"
+            else
+                git push -u origin "$child_branch" 2>/dev/null || warn "  Push failed for $child_branch"
+            fi
+        fi
+
+        if $dry_run; then
+            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $child_branch --title \"$title\""
+        else
+            local url
+            url=$(gh pr create --base "$parent" --head "$child_branch" --title "$title" --body "" 2>&1) || {
+                warn "  PR creation failed for $child_branch: $url"
+                continue
+            }
+            info "  Created PR: $url"
+        fi
+    done
+}
+
+# ---------- reset ----------
+
+cmd_reset() {
+    local poc_arg="" delete_branches=false force=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --branches) delete_branches=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          poc_arg="$1"; shift ;;
+        esac
+    done
+
+    local poc
+    poc=$(resolve_poc "$poc_arg")
+
+    local -a children=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && children+=("$c")
+    done < <(find_dispatch_children "$poc")
+
+    [[ ${#children[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+
+    echo -e "${CYAN}POC:${NC} $poc"
+    echo "Children: ${children[*]}"
+    if $delete_branches; then
+        warn "Will also delete task branches"
+    fi
+
+    if ! $force; then
+        echo ""
+        read -p "Reset dispatch metadata? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+    fi
+
+    # Collect parent-child pairs before modifying config
+    local -a parents=()
+    for child in "${children[@]}"; do
+        parents+=("$(find_stack_parent "$child")")
+    done
+
+    for i in "${!children[@]}"; do
+        local child="${children[$i]}"
+        local parent="${parents[$i]}"
+
+        # Remove dispatchpoc from child
+        git config --unset "branch.${child}.dispatchpoc" 2>/dev/null || true
+
+        # Remove child from parent's dispatchchildren
+        if [[ -n "$parent" ]]; then
+            stack_remove "$child" "$parent"
+        fi
+
+        # Remove any dispatchchildren on this child itself
+        git config --unset-all "branch.${child}.dispatchchildren" 2>/dev/null || true
+
+        if $delete_branches; then
+            local cur
+            cur=$(current_branch)
+            if [[ "$cur" == "$child" ]]; then
+                warn "  Skipping delete of $child (currently checked out)"
+            else
+                git branch -D "$child" 2>/dev/null || warn "  Could not delete $child"
+                info "  Deleted $child"
+            fi
+        else
+            info "  Cleaned $child"
+        fi
+    done
+
+    echo ""
+    info "Reset complete."
+}
+
 # ---------- tree ----------
 
 cmd_tree() {
@@ -445,9 +684,23 @@ COMMANDS
 
   sync [poc] [child-branch]
       Bidirectional sync using git cherry (patch-id comparison).
-      POC→child: new commits for the task appear in the child branch.
-      Child→POC: direct fixes on child appear back in the POC (Task-Id added).
+      POC->child: new commits for the task appear in the child branch.
+      Child->POC: direct fixes on child appear back in the POC (Task-Id added).
       If <poc> is omitted, auto-detects from current branch context.
+
+  status [poc]
+      Show pending sync counts per child branch without applying changes.
+      Quick check before running sync.
+
+  pr [poc] [--push] [--dry-run]
+      Create stacked PRs with correct --base flags via gh CLI.
+      Walks the dispatch stack in order. --push pushes branches first.
+      --dry-run shows what would be created without doing it.
+
+  reset [poc] [--branches] [--force]
+      Clean up dispatch metadata from git config.
+      --branches also deletes the task branches.
+      --force skips confirmation prompt.
 
   tree [branch]
       Show the dispatch stack hierarchy.
@@ -476,6 +729,9 @@ main() {
     case "$cmd" in
         split)        cmd_split "$@" ;;
         sync)         cmd_sync "$@" ;;
+        status)       cmd_status "$@" ;;
+        pr)           cmd_pr "$@" ;;
+        reset)        cmd_reset "$@" ;;
         tree)         cmd_tree "$@" ;;
         hook)
             [[ "${1:-}" == "install" ]] || die "Usage: git dispatch hook install"
