@@ -76,48 +76,65 @@ worktree_for_branch() {
     '
 }
 
-# Cherry-pick into a branch, worktree-aware
-# Optional --trailer "Key=Value" as first args (before branch name)
-cherry_pick_into() {
-    local -a trailers=()
-    while [[ "$1" == --trailer ]]; do
-        trailers+=("$2"); shift 2
+# Amend commits on a branch to add Task-Id trailer (rewrites history)
+_amend_trailers_on_branch() {
+    local branch="$1" task_id="$2"; shift 2
+    local hashes=("$@")
+    local wt
+    wt=$(worktree_for_branch "$branch")
+    local git_cmd=(git)
+    local orig=""
+
+    if [[ -n "$wt" ]]; then
+        git_cmd=(git -C "$wt")
+    else
+        orig=$(current_branch)
+        git checkout "$branch" --quiet
+    fi
+
+    for hash in "${hashes[@]}"; do
+        local tid
+        tid=$("${git_cmd[@]}" log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$tid" != "$task_id" ]]; then
+            # Rewrite this commit with the trailer using filter-branch on just this commit
+            # Simpler: interactive rebase is not an option, so use commit --amend via rebase --exec
+            # Even simpler: if it's the tip, just amend directly
+            local tip
+            tip=$("${git_cmd[@]}" rev-parse HEAD)
+            if [[ "$hash" == "$tip" ]]; then
+                "${git_cmd[@]}" commit --amend --no-edit --trailer "Task-Id=$task_id" --quiet
+            else
+                # For non-tip commits, use rebase with GIT_SEQUENCE_EDITOR
+                local parent
+                parent=$("${git_cmd[@]}" rev-parse "$hash^")
+                GIT_SEQUENCE_EDITOR="sed -i.bak 's/^pick $( echo "$hash" | cut -c1-7)/edit ${hash:0:7}/'" \
+                    "${git_cmd[@]}" rebase -i "$parent" --quiet 2>/dev/null || true
+                "${git_cmd[@]}" commit --amend --no-edit --trailer "Task-Id=$task_id" --quiet
+                "${git_cmd[@]}" rebase --continue --quiet 2>/dev/null || true
+            fi
+        fi
     done
 
+    if [[ -z "$wt" && -n "$orig" ]]; then
+        git checkout "$orig" --quiet
+    fi
+}
+
+# Cherry-pick into a branch, worktree-aware
+cherry_pick_into() {
     local branch="$1"; shift
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
 
-    if [[ ${#trailers[@]} -gt 0 ]]; then
-        # Cherry-pick one at a time, amending each with trailer
-        for h in "${hashes[@]}"; do
-            if [[ -n "$wt" ]]; then
-                git -C "$wt" cherry-pick -x "$h"
-                for t in "${trailers[@]}"; do
-                    git -C "$wt" commit --amend --no-edit --trailer "$t" --quiet
-                done
-            else
-                local orig
-                orig=$(current_branch)
-                git checkout "$branch" --quiet
-                git cherry-pick -x "$h"
-                for t in "${trailers[@]}"; do
-                    git commit --amend --no-edit --trailer "$t" --quiet
-                done
-                git checkout "$orig" --quiet
-            fi
-        done
+    if [[ -n "$wt" ]]; then
+        git -C "$wt" cherry-pick -x "${hashes[@]}"
     else
-        if [[ -n "$wt" ]]; then
-            git -C "$wt" cherry-pick -x "${hashes[@]}"
-        else
-            local orig
-            orig=$(current_branch)
-            git checkout "$branch" --quiet
-            git cherry-pick -x "${hashes[@]}"
-            git checkout "$orig" --quiet
-        fi
+        local orig
+        orig=$(current_branch)
+        git checkout "$branch" --quiet
+        git cherry-pick -x "${hashes[@]}"
+        git checkout "$orig" --quiet
     fi
 }
 
@@ -322,29 +339,35 @@ cmd_sync() {
         fi
 
         # Child → POC: commits in child not yet in POC
-        # Add Task-Id trailer if missing or different
+        # First, amend any child commits missing Task-Id on the child branch itself
         local -a child_to_poc=()
-        local -a child_needs_trailer=()
+        local needs_trailer=false
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash="${line:2:40}"
-            child_to_poc+=("$hash")
-            # Check if commit already has the right Task-Id
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
             if [[ "$tid" != "$task_id" ]]; then
-                child_needs_trailer+=("$hash")
+                needs_trailer=true
             fi
+            child_to_poc+=("$hash")
         done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
 
         if [[ ${#child_to_poc[@]} -gt 0 ]]; then
-            if [[ ${#child_needs_trailer[@]} -gt 0 ]]; then
-                info "  Child → POC: ${#child_to_poc[@]} commit(s) (adding Task-Id: $task_id)"
-                cherry_pick_into --trailer "Task-Id=$task_id" "$poc" "${child_to_poc[@]}"
-            else
-                info "  Child → POC: ${#child_to_poc[@]} commit(s)"
-                cherry_pick_into "$poc" "${child_to_poc[@]}"
+            # Amend commits on child branch to add Task-Id before cherry-picking
+            if $needs_trailer; then
+                info "  Fixing Task-Id on child commits..."
+                _amend_trailers_on_branch "$child_branch" "$task_id" "${child_to_poc[@]}"
+                # Re-read hashes after rewrite
+                child_to_poc=()
+                while IFS= read -r line; do
+                    [[ "$line" == +* ]] || continue
+                    local hash="${line:2:40}"
+                    child_to_poc+=("$hash")
+                done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
             fi
+            info "  Child → POC: ${#child_to_poc[@]} commit(s)"
+            cherry_pick_into "$poc" "${child_to_poc[@]}"
         else
             echo "  Child → POC: up to date"
         fi

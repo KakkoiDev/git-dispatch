@@ -373,11 +373,15 @@ test_sync_adds_trailer() {
 
     bash "$DISPATCH" sync poc/feature feat/task-3
 
-    # Check the cherry-picked commit on POC has Task-Id trailer
-    local trailer
-    trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" poc/feature | tr -d '[:space:]')
+    # Check trailer was added on child branch commit (amended in-place)
+    local child_trailer
+    child_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/task-3 | tr -d '[:space:]')
+    assert_eq "3" "$child_trailer" "Task-Id trailer added on child branch commit"
 
-    assert_eq "3" "$trailer" "Task-Id trailer added on child→POC sync"
+    # Check the cherry-picked commit on POC also has Task-Id trailer
+    local poc_trailer
+    poc_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" poc/feature | tr -d '[:space:]')
+    assert_eq "3" "$poc_trailer" "Task-Id trailer present on POC after sync"
 
     teardown
 }
