@@ -1,0 +1,11 @@
+#!/bin/bash
+# git-dispatch commit-msg hook: enforces Task-Id trailer on every commit
+# Install with: git dispatch hook install
+
+msg_file="$1"
+
+if ! grep -q "^Task-Id:" "$msg_file"; then
+    echo "Error: Missing Task-Id trailer."
+    echo "Use: git commit --trailer 'Task-Id=N'"
+    exit 1
+fi
