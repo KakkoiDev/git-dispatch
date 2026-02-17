@@ -19,7 +19,7 @@ Write TRD -> vibe-code POC -> split into branches -> create PRs -> sync both way
 | `git dispatch sync [poc]` | Sync all task branches for a specific POC |
 | `git dispatch sync [poc] <child>` | Sync one specific task branch |
 | `git dispatch status [poc]` | Show pending sync counts without applying |
-| `git dispatch pr [poc] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch pr [poc] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [poc] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |

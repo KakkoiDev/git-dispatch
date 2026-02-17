@@ -57,8 +57,10 @@ Shows pending sync counts per child branch without applying changes.
 git dispatch pr --dry-run      # preview PR commands
 git dispatch pr --push         # push branches + create PRs
 git dispatch pr [poc]          # explicit POC
+git dispatch pr --branch feat/task-4                   # target single branch
+git dispatch pr --title "My PR" --body "Description"   # custom title/body
 ```
-Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task.
+Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task. `--branch` targets a single branch. `--title`/`--body` override auto-generated values.
 
 **Reset metadata** (cleanup):
 ```bash

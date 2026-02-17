@@ -44,7 +44,7 @@ git dispatch sync
 | `git dispatch sync [poc]` | Sync all task branches for a specific POC |
 | `git dispatch sync [poc] <child>` | Sync one specific task branch |
 | `git dispatch status [poc]` | Show pending sync counts without applying |
-| `git dispatch pr [poc] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch pr [poc] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [poc] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
@@ -212,11 +212,13 @@ Show pending sync counts per child branch without applying changes. Quick previe
 ```bash
 git dispatch pr                  # auto-detect, create all PRs
 git dispatch pr [poc]            # explicit POC
+git dispatch pr --branch feat/task-4   # target a single branch
+git dispatch pr --title "My PR" --body "Description"  # custom title/body
 git dispatch pr --push           # push branches first, then create PRs
 git dispatch pr --dry-run        # show what would be created
 ```
 
-Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title is taken from the first commit subject of each task. Requires `gh` CLI.
+Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title defaults to the first commit subject of each task. `--branch` targets a single branch instead of all children. `--title` and `--body` override the auto-generated title and empty body. Requires `gh` CLI.
 
 ### reset
 
