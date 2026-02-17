@@ -463,11 +463,15 @@ cmd_status() {
 
 cmd_pr() {
     local poc_arg="" push=false dry_run=false
+    local branch_filter="" custom_title="" custom_body=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --push)    push=true; shift ;;
             --dry-run) dry_run=true; shift ;;
+            --branch)  branch_filter="$2"; shift 2 ;;
+            --title)   custom_title="$2"; shift 2 ;;
+            --body)    custom_body="$2"; shift 2 ;;
             -*)        die "Unknown flag: $1" ;;
             *)         poc_arg="$1"; shift ;;
         esac
@@ -520,6 +524,19 @@ cmd_pr() {
         current="$next"
     done
 
+    # Filter to single branch if --branch is set
+    if [[ -n "$branch_filter" ]]; then
+        local found=false
+        for c in "${ordered[@]}"; do
+            if [[ "$c" == "$branch_filter" ]]; then
+                found=true
+                break
+            fi
+        done
+        $found || die "Branch '$branch_filter' not found in dispatch stack"
+        ordered=("$branch_filter")
+    fi
+
     echo -e "${CYAN}POC:${NC} $poc"
     echo ""
 
@@ -527,9 +544,19 @@ cmd_pr() {
         local parent
         parent=$(find_stack_parent "$child_branch")
 
-        # First commit subject as PR title
+        # PR title: custom or first commit subject
         local title
-        title=$(git log --reverse --format="%s" "${parent}..${child_branch}" | head -1)
+        if [[ -n "$custom_title" ]]; then
+            title="$custom_title"
+        else
+            title=$(git log --reverse --format="%s" "${parent}..${child_branch}" | head -1)
+        fi
+
+        # PR body: custom or empty
+        local body=""
+        if [[ -n "$custom_body" ]]; then
+            body="$custom_body"
+        fi
 
         if $push; then
             if $dry_run; then
@@ -540,10 +567,10 @@ cmd_pr() {
         fi
 
         if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $child_branch --title \"$title\""
+            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $child_branch --title \"$title\" --body \"$body\""
         else
             local url
-            url=$(gh pr create --base "$parent" --head "$child_branch" --title "$title" --body "" 2>&1) || {
+            url=$(gh pr create --base "$parent" --head "$child_branch" --title "$title" --body "$body" 2>&1) || {
                 warn "  PR creation failed for $child_branch: $url"
                 continue
             }
@@ -710,9 +737,11 @@ COMMANDS
       Show pending sync counts per child branch without applying changes.
       Quick check before running sync.
 
-  pr [poc] [--push] [--dry-run]
+  pr [poc] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]
       Create stacked PRs with correct --base flags via gh CLI.
       Walks the dispatch stack in order. --push pushes branches first.
+      --branch targets a single branch instead of all children.
+      --title and --body override the auto-generated PR title and empty body.
       --dry-run shows what would be created without doing it.
 
   reset [poc] [--branches] [--force]

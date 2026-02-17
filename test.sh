@@ -769,6 +769,72 @@ test_install_chmod() {
     rm -rf "$install_dir"
 }
 
+test_pr_single_branch() {
+    echo "=== test: pr --branch targets single branch ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-4 poc/feature)
+
+    assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
+
+    # Should NOT contain task-3 or task-5 PR creation
+    if [[ "$output" == *"--head feat/task-3"* ]]; then
+        echo -e "  ${RED}FAIL${NC} should not create PR for task-3"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} no PR for task-3"
+        PASS=$((PASS + 1))
+    fi
+
+    if [[ "$output" == *"--head feat/task-5"* ]]; then
+        echo -e "  ${RED}FAIL${NC} should not create PR for task-5"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} no PR for task-5"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_pr_custom_title_body() {
+    echo "=== test: pr --title and --body in dry-run ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-3 --title "Custom PR Title" --body "Custom body text" poc/feature)
+
+    assert_contains "$output" "Custom PR Title" "custom title appears in dry-run"
+    assert_contains "$output" "Custom body text" "custom body appears in dry-run"
+
+    teardown
+}
+
+test_pr_branch_not_found() {
+    echo "=== test: pr --branch nonexistent errors ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    local output
+    if output=$(bash "$DISPATCH" pr --dry-run --branch nonexistent poc/feature 2>&1); then
+        echo -e "  ${RED}FAIL${NC} should fail for nonexistent branch"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "not found in dispatch stack" "error mentions branch not found"
+    fi
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -801,6 +867,9 @@ test_split_already_exists
 test_resolve_poc_error_message
 test_split_non_numeric_task_id
 test_install_chmod
+test_pr_single_branch
+test_pr_custom_title_body
+test_pr_branch_not_found
 
 echo ""
 echo "======================="
