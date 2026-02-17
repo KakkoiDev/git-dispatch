@@ -633,6 +633,142 @@ test_reset_branches() {
     teardown
 }
 
+test_sync_cherry_pick_conflict() {
+    echo "=== test: sync cherry-pick conflict ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Create conflicting commit on POC for task-3 (modifies file.txt which task-3 created)
+    git checkout poc/feature -q
+    echo "conflict" > file.txt; git add file.txt
+    git commit -m "Conflict change$(printf '\n\nTask-Id: 3')" -q
+
+    # Create conflicting commit on task-3 (different content in same file)
+    git checkout feat/task-3 -q
+    echo "different" > file.txt; git add file.txt
+    git commit -m "Conflicting fix$(printf '\n\nTask-Id: 3')" -q
+
+    # Sync should fail with error message
+    local output
+    if output=$(bash "$DISPATCH" sync poc/feature feat/task-3 2>&1); then
+        echo -e "  ${RED}FAIL${NC} sync should fail on cherry-pick conflict"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Cherry-pick into" "error mentions cherry-pick failure"
+    fi
+
+    # Branch should be clean (cherry-pick aborted)
+    git checkout feat/task-3 -q 2>/dev/null || true
+    local status
+    status=$(git status --porcelain)
+    assert_eq "" "$status" "branch left clean after failed cherry-pick"
+
+    teardown
+}
+
+test_split_no_commits() {
+    echo "=== test: split with no commits ==="
+    setup
+
+    # Create a branch with no commits beyond master
+    git checkout -b poc/empty master -q
+
+    local output
+    if output=$(bash "$DISPATCH" split poc/empty --base master --name feat 2>&1); then
+        echo -e "  ${RED}FAIL${NC} split should fail with no commits"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "No commits found" "error mentions no commits"
+    fi
+
+    teardown
+}
+
+test_split_already_exists() {
+    echo "=== test: split when branch already exists ==="
+    setup
+    create_poc
+
+    # Pre-create a branch that split would create
+    git branch feat/task-3 master
+
+    local output
+    if output=$(bash "$DISPATCH" split poc/feature --base master --name feat 2>&1); then
+        echo -e "  ${RED}FAIL${NC} split should fail when branch exists"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "already exists" "error mentions branch already exists"
+    fi
+
+    teardown
+}
+
+test_resolve_poc_error_message() {
+    echo "=== test: resolve_poc error includes branch name ==="
+    setup
+
+    # Create a branch that's not a POC or child
+    git checkout -b random/branch master -q
+
+    local output
+    if output=$(bash "$DISPATCH" sync 2>&1); then
+        echo -e "  ${RED}FAIL${NC} sync should fail on non-dispatch branch"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "random/branch" "error includes current branch name"
+    fi
+
+    teardown
+}
+
+test_split_non_numeric_task_id() {
+    echo "=== test: non-numeric task ID rejected ==="
+    setup
+    create_poc
+
+    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+
+    # Manually create a dispatch child with non-numeric task ID
+    git branch feat/task-abc master
+    git config "branch.feat/task-abc.dispatchpoc" "poc/feature"
+
+    local output
+    if output=$(bash "$DISPATCH" sync poc/feature feat/task-abc 2>&1); then
+        echo -e "  ${RED}FAIL${NC} sync should reject non-numeric task ID"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Invalid task ID" "error mentions invalid task ID"
+    fi
+
+    teardown
+}
+
+test_install_chmod() {
+    echo "=== test: install.sh makes script executable ==="
+    local install_dir
+    install_dir=$(mktemp -d)
+    cp "$SCRIPT_DIR/git-dispatch.sh" "$install_dir/"
+    cp "$SCRIPT_DIR/install.sh" "$install_dir/"
+
+    # Remove execute permission
+    chmod -x "$install_dir/git-dispatch.sh"
+
+    # Run install with isolated HOME to avoid polluting global gitconfig
+    HOME="$install_dir" bash "$install_dir/install.sh" >/dev/null
+
+    if [[ -x "$install_dir/git-dispatch.sh" ]]; then
+        echo -e "  ${GREEN}PASS${NC} install.sh makes script executable"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} install.sh did not make script executable"
+        FAIL=$((FAIL + 1))
+    fi
+
+    rm -rf "$install_dir"
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -659,6 +795,12 @@ test_hook_install_respects_hooks_path_relative
 test_hook_install_respects_hooks_path_absolute
 test_hook_install_default_without_hooks_path
 test_help
+test_sync_cherry_pick_conflict
+test_split_no_commits
+test_split_already_exists
+test_resolve_poc_error_message
+test_split_non_numeric_task_id
+test_install_chmod
 
 echo ""
 echo "======================="

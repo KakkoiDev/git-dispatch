@@ -9,7 +9,6 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-STATE_FILE=".git/dispatch-state.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------- helpers ----------
@@ -29,7 +28,7 @@ get_children() {
 # Add a child branch to the dispatch stack
 stack_add() {
     local child="$1" parent="$2"
-    if get_children "$parent" | grep -q "^${child}$"; then
+    if get_children "$parent" | grep -Fxq "$child"; then
         return 0
     fi
     git config --add "branch.${parent}.dispatchchildren" "$child"
@@ -39,7 +38,7 @@ stack_add() {
 stack_remove() {
     local child="$1" parent="$2"
     local children
-    children=$(get_children "$parent" | grep -v "^${child}$" || true)
+    children=$(get_children "$parent" | grep -Fxv "$child" || true)
     git config --unset-all "branch.${parent}.dispatchchildren" 2>/dev/null || true
     if [[ -n "$children" ]]; then
         while IFS= read -r c; do
@@ -108,9 +107,15 @@ _amend_trailers_on_branch() {
                 local parent
                 parent=$("${git_cmd[@]}" rev-parse "$hash^")
                 GIT_SEQUENCE_EDITOR="sed -i.bak 's/^pick $( echo "$hash" | cut -c1-7)/edit ${hash:0:7}/'" \
-                    "${git_cmd[@]}" rebase -i "$parent" --quiet 2>/dev/null || true
+                    "${git_cmd[@]}" rebase -i "$parent" --quiet 2>/dev/null || {
+                    "${git_cmd[@]}" rebase --abort 2>/dev/null || true
+                    die "Rebase failed while amending trailer on $hash in $branch. Resolve manually."
+                }
                 "${git_cmd[@]}" commit --amend --no-edit --trailer "Task-Id=$task_id" --quiet
-                "${git_cmd[@]}" rebase --continue --quiet 2>/dev/null || true
+                "${git_cmd[@]}" rebase --continue --quiet 2>/dev/null || {
+                    "${git_cmd[@]}" rebase --abort 2>/dev/null || true
+                    die "Rebase --continue failed on $branch. Resolve manually."
+                }
             fi
         fi
     done
@@ -128,27 +133,21 @@ cherry_pick_into() {
     wt=$(worktree_for_branch "$branch")
 
     if [[ -n "$wt" ]]; then
-        git -C "$wt" cherry-pick -x "${hashes[@]}"
+        if ! git -C "$wt" cherry-pick -x "${hashes[@]}"; then
+            git -C "$wt" cherry-pick --abort 2>/dev/null || true
+            die "Cherry-pick into $branch failed. Retry manually: git -C $wt cherry-pick -x ${hashes[*]}"
+        fi
     else
         local orig
         orig=$(current_branch)
         git checkout "$branch" --quiet
-        git cherry-pick -x "${hashes[@]}"
+        if ! git cherry-pick -x "${hashes[@]}"; then
+            git cherry-pick --abort 2>/dev/null || true
+            git checkout "$orig" --quiet
+            die "Cherry-pick into $branch failed. Retry manually: git checkout $branch && git cherry-pick -x ${hashes[*]}"
+        fi
         git checkout "$orig" --quiet
     fi
-}
-
-# Save state for conflict recovery
-state_save() {
-    local cmd="$1"; shift
-    printf '{"command":"%s","args":%s}\n' "$cmd" "$(printf '%s\n' "$@" | jq -R . | jq -s .)" > "$STATE_FILE"
-}
-
-state_clear() { rm -f "$STATE_FILE"; }
-
-state_load() {
-    [[ -f "$STATE_FILE" ]] || die "No dispatch state found. Nothing to continue."
-    cat "$STATE_FILE"
 }
 
 # ---------- split ----------
@@ -179,7 +178,7 @@ cmd_split() {
     trap "rm -f '$commit_file'" RETURN
 
     git log --reverse --format="%H %(trailers:key=Task-Id,valueonly)" "$base..$poc" \
-        | grep -v '^$' > "$commit_file"
+        | grep -v '^$' > "$commit_file" || true
 
     [[ -s "$commit_file" ]] || die "No commits found between $base and $poc"
 
@@ -263,7 +262,7 @@ resolve_poc() {
         return
     fi
 
-    die "Cannot detect POC branch. Run from a POC or child branch, or pass it explicitly."
+    die "Cannot detect POC branch (current: '${cur}'). Run from a POC or child branch, or pass it explicitly."
 }
 
 # Find all dispatch children for a given POC
@@ -285,7 +284,7 @@ find_dispatch_children() {
 find_stack_parent() {
     local child="$1"
     git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        if get_children "$b" | grep -q "^${child}$"; then
+        if get_children "$b" | grep -Fxq "$child"; then
             echo "$b"
             break
         fi
@@ -330,17 +329,21 @@ cmd_sync() {
 
         # Extract task-id from branch name (last segment after task-)
         local task_id="${child_branch##*/task-}"
+        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${child_branch}'"
 
         # POC → child: commits in POC for this task not yet in child
         local -a poc_to_child=()
+        local cherry_out
+        cherry_out=$(git cherry -v "$child_branch" "$poc" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
-            local hash="${line:2:40}"
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
             # Check if this commit has matching Task-Id
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
             [[ "$tid" == "$task_id" ]] && poc_to_child+=("$hash")
-        done < <(git cherry -v "$child_branch" "$poc" 2>/dev/null || true)
+        done <<< "$cherry_out"
 
         if [[ ${#poc_to_child[@]} -gt 0 ]]; then
             info "  POC → child: ${#poc_to_child[@]} commit(s)"
@@ -353,16 +356,18 @@ cmd_sync() {
         # First, amend any child commits missing Task-Id on the child branch itself
         local -a child_to_poc=()
         local needs_trailer=false
+        cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
-            local hash="${line:2:40}"
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
             if [[ "$tid" != "$task_id" ]]; then
                 needs_trailer=true
             fi
             child_to_poc+=("$hash")
-        done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
+        done <<< "$cherry_out"
 
         if [[ ${#child_to_poc[@]} -gt 0 ]]; then
             # Amend commits on child branch to add Task-Id before cherry-picking
@@ -371,11 +376,13 @@ cmd_sync() {
                 _amend_trailers_on_branch "$child_branch" "$task_id" "${child_to_poc[@]}"
                 # Re-read hashes after rewrite
                 child_to_poc=()
+                cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
                 while IFS= read -r line; do
                     [[ "$line" == +* ]] || continue
-                    local hash="${line:2:40}"
+                    local hash
+                    hash=$(echo "$line" | awk '{print $2}')
                     child_to_poc+=("$hash")
-                done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
+                done <<< "$cherry_out"
             fi
             info "  Child → POC: ${#child_to_poc[@]} commit(s)"
             cherry_pick_into "$poc" "${child_to_poc[@]}"
@@ -414,23 +421,28 @@ cmd_status() {
 
     for child_branch in "${targets[@]}"; do
         local task_id="${child_branch##*/task-}"
+        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${child_branch}'"
 
         # POC -> child: commits in POC for this task not yet in child
         local poc_to_child=0
+        local cherry_out
+        cherry_out=$(git cherry -v "$child_branch" "$poc" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
-            local hash="${line:2:40}"
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
             [[ "$tid" == "$task_id" ]] && poc_to_child=$((poc_to_child + 1))
-        done < <(git cherry -v "$child_branch" "$poc" 2>/dev/null || true)
+        done <<< "$cherry_out"
 
         # Child -> POC: commits in child not yet in POC
         local child_to_poc=0
+        cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             child_to_poc=$((child_to_poc + 1))
-        done < <(git cherry -v "$poc" "$child_branch" 2>/dev/null || true)
+        done <<< "$cherry_out"
 
         echo -e "  ${YELLOW}$child_branch${NC}"
         if [[ $poc_to_child -gt 0 ]]; then
@@ -498,7 +510,7 @@ cmd_pr() {
     while true; do
         local next=""
         for c in "${children[@]}"; do
-            if get_children "$current" | grep -q "^${c}$"; then
+            if get_children "$current" | grep -Fxq "$c"; then
                 next="$c"
                 break
             fi
@@ -628,13 +640,13 @@ cmd_tree() {
             # Walk up to find the base
             local parent
             parent=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                if get_children "$b" | grep -q "^${branch}$"; then echo "$b"; break; fi
+                if get_children "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
             done)
             # Find root of the stack
             while [[ -n "$parent" ]]; do
                 local gp
                 gp=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                    if get_children "$b" | grep -q "^${parent}$"; then echo "$b"; break; fi
+                    if get_children "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
                 done)
                 [[ -z "$gp" ]] && break
                 parent="$gp"

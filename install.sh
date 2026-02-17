@@ -10,6 +10,7 @@ if [[ ! -f "$SCRIPT" ]]; then
 fi
 
 # Set up git alias
+chmod +x "$SCRIPT"
 git config --global alias.dispatch "!bash $SCRIPT"
 echo "Installed: git dispatch → $SCRIPT"
 echo ""
