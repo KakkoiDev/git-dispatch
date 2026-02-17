@@ -296,6 +296,83 @@ test_hook() {
     teardown
 }
 
+test_hook_install_respects_hooks_path_relative() {
+    echo "=== test: hook install respects core.hooksPath (relative) ==="
+    setup
+
+    git config core.hooksPath .husky
+
+    bash "$DISPATCH" hook install
+
+    local expected_dir
+    expected_dir="$(git rev-parse --show-toplevel)/.husky"
+
+    if [[ -f "$expected_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook installed to .husky/commit-msg"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook not found at $expected_dir/commit-msg"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # Should NOT be in .git/hooks
+    local git_hooks
+    git_hooks="$(git rev-parse --git-dir)/hooks"
+    if [[ -f "$git_hooks/commit-msg" ]]; then
+        echo -e "  ${RED}FAIL${NC} hook should not be in .git/hooks when core.hooksPath set"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} .git/hooks/commit-msg correctly absent"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_hook_install_respects_hooks_path_absolute() {
+    echo "=== test: hook install respects core.hooksPath (absolute) ==="
+    setup
+
+    local abs_hook_dir
+    abs_hook_dir="$TMPDIR/custom-hooks"
+    git config core.hooksPath "$abs_hook_dir"
+
+    bash "$DISPATCH" hook install
+
+    if [[ -f "$abs_hook_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook installed to absolute custom path"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook not found at $abs_hook_dir/commit-msg"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_hook_install_default_without_hooks_path() {
+    echo "=== test: hook install defaults to .git/hooks ==="
+    setup
+
+    # Ensure core.hooksPath is NOT set
+    git config --unset core.hooksPath 2>/dev/null || true
+
+    bash "$DISPATCH" hook install
+
+    local git_hooks
+    git_hooks="$(git rev-parse --git-dir)/hooks"
+
+    if [[ -f "$git_hooks/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook installed to .git/hooks (default)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook not found at $git_hooks/commit-msg"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
 test_help() {
     echo "=== test: help ==="
     local output
@@ -578,6 +655,9 @@ test_pr_dry_run_push
 test_reset
 test_reset_branches
 test_hook
+test_hook_install_respects_hooks_path_relative
+test_hook_install_respects_hooks_path_absolute
+test_hook_install_default_without_hooks_path
 test_help
 
 echo ""

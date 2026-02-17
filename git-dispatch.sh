@@ -649,7 +649,13 @@ cmd_tree() {
 
 cmd_hook_install() {
     local hook_dir
-    hook_dir="$(git rev-parse --git-dir)/hooks"
+    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
+    if [[ -z "$hook_dir" ]]; then
+        hook_dir="$(git rev-parse --git-dir)/hooks"
+    elif [[ "$hook_dir" != /* ]]; then
+        # Resolve relative paths (e.g. ".husky") against repo root
+        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
+    fi
     mkdir -p "$hook_dir"
     cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
     chmod +x "$hook_dir/commit-msg"
