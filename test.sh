@@ -64,9 +64,9 @@ assert_branch_exists() {
     fi
 }
 
-# Create a POC branch with trailer-tagged commits
-create_poc() {
-    git checkout -b poc/feature master -q
+# Create a source branch with trailer-tagged commits
+create_source() {
+    git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
     git commit -m "Add enum$(printf '\n\nTask-Id: 3')" -q
 
@@ -85,9 +85,9 @@ create_poc() {
 test_split() {
     echo "=== test: split ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat
+    bash "$DISPATCH" split source/feature --base master --name feat
 
     assert_branch_exists "feat/task-3" "task-3 branch created"
     assert_branch_exists "feat/task-4" "task-4 branch created"
@@ -109,22 +109,22 @@ test_split() {
     assert_eq "4" "$count5" "task-5 has 4 commits (stacked)"
 
     # Stack config
-    local children_master
-    children_master=$(git config --get-all branch.master.dispatchchildren 2>/dev/null || true)
-    assert_eq "feat/task-3" "$children_master" "master has task-3 as child"
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-3" "$tasks_master" "master has task-3 in stack"
 
-    local children_3
-    children_3=$(git config --get-all branch.feat/task-3.dispatchchildren 2>/dev/null || true)
-    assert_eq "feat/task-4" "$children_3" "task-3 has task-4 as child"
+    local tasks_3
+    tasks_3=$(git config --get-all branch.feat/task-3.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-4" "$tasks_3" "task-3 has task-4 in stack"
 
-    local children_4
-    children_4=$(git config --get-all branch.feat/task-4.dispatchchildren 2>/dev/null || true)
-    assert_eq "feat/task-5" "$children_4" "task-4 has task-5 as child"
+    local tasks_4
+    tasks_4=$(git config --get-all branch.feat/task-4.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-5" "$tasks_4" "task-4 has task-5 in stack"
 
-    # POC association
-    local poc3
-    poc3=$(git config branch.feat/task-3.dispatchpoc 2>/dev/null || true)
-    assert_eq "poc/feature" "$poc3" "task-3 linked to POC"
+    # Source association
+    local src3
+    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    assert_eq "source/feature" "$src3" "task-3 linked to source"
 
     teardown
 }
@@ -132,10 +132,10 @@ test_split() {
 test_split_dry_run() {
     echo "=== test: split --dry-run ==="
     setup
-    create_poc
+    create_source
 
     local output
-    output=$(bash "$DISPATCH" split poc/feature --base master --name feat --dry-run)
+    output=$(bash "$DISPATCH" split source/feature --base master --name feat --dry-run)
 
     assert_contains "$output" "[dry-run]" "dry-run output shown"
     assert_contains "$output" "feat/task-3" "task-3 in dry-run output"
@@ -156,9 +156,9 @@ test_split_dry_run() {
 test_tree() {
     echo "=== test: tree ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local tree
     tree=$(bash "$DISPATCH" tree master)
@@ -172,27 +172,27 @@ test_tree() {
     teardown
 }
 
-test_sync_poc_to_child() {
-    echo "=== test: sync POC → child ==="
+test_sync_source_to_task() {
+    echo "=== test: sync source → task ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add a new commit to POC for task-4
-    git checkout poc/feature -q
+    # Add a new commit to source for task-4
+    git checkout source/feature -q
     echo "fix" > fix.txt; git add fix.txt
     git commit -m "Fix DTO validation$(printf '\n\nTask-Id: 4')" -q
 
     local before
     before=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync poc/feature feat/task-4
+    bash "$DISPATCH" sync source/feature feat/task-4
 
     local after
     after=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
 
-    assert_eq "$((before + 1))" "$after" "new POC commit cherry-picked into child"
+    assert_eq "$((before + 1))" "$after" "new source commit cherry-picked into task"
 
     # Verify the file landed
     if git show feat/task-4:fix.txt >/dev/null 2>&1; then
@@ -206,34 +206,34 @@ test_sync_poc_to_child() {
     teardown
 }
 
-test_sync_child_to_poc() {
-    echo "=== test: sync child → POC ==="
+test_sync_task_to_source() {
+    echo "=== test: sync task → source ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add a commit directly on child task-3
+    # Add a commit directly on task-3
     git checkout feat/task-3 -q
     echo "hotfix" > hotfix.txt; git add hotfix.txt
     git commit -m "Hotfix alignment$(printf '\n\nTask-Id: 3')" -q
 
     local before
-    before=$(git log --oneline master..poc/feature | wc -l | tr -d ' ')
+    before=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync poc/feature feat/task-3
+    bash "$DISPATCH" sync source/feature feat/task-3
 
     local after
-    after=$(git log --oneline master..poc/feature | wc -l | tr -d ' ')
+    after=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
 
-    assert_eq "$((before + 1))" "$after" "child commit cherry-picked into POC"
+    assert_eq "$((before + 1))" "$after" "task commit cherry-picked into source"
 
     # Verify the file landed
-    if git show poc/feature:hotfix.txt >/dev/null 2>&1; then
-        echo -e "  ${GREEN}PASS${NC} hotfix.txt exists in POC"
+    if git show source/feature:hotfix.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} hotfix.txt exists in source"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} hotfix.txt missing from POC"
+        echo -e "  ${RED}FAIL${NC} hotfix.txt missing from source"
         FAIL=$((FAIL + 1))
     fi
 
@@ -243,19 +243,19 @@ test_sync_child_to_poc() {
 test_sync_worktree() {
     echo "=== test: sync with worktree ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     # Create worktree for task-4
     git worktree add ../wt-task4 feat/task-4 -q
 
-    # Add commit to POC for task-4
-    git checkout poc/feature -q
+    # Add commit to source for task-4
+    git checkout source/feature -q
     echo "wt-fix" > wt-fix.txt; git add wt-fix.txt
     git commit -m "Worktree fix$(printf '\n\nTask-Id: 4')" -q
 
-    bash "$DISPATCH" sync poc/feature feat/task-4
+    bash "$DISPATCH" sync source/feature feat/task-4
 
     # Verify via worktree
     if [[ -f "../wt-task4/wt-fix.txt" ]]; then
@@ -382,45 +382,45 @@ test_help() {
     assert_contains "$output" "TRAILERS" "help shows trailers"
 }
 
-test_sync_auto_detect_from_poc() {
-    echo "=== test: sync auto-detect from POC branch ==="
+test_sync_auto_detect_from_source() {
+    echo "=== test: sync auto-detect from source branch ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add a new commit to POC for task-3
-    git checkout poc/feature -q
+    # Add a new commit to source for task-3
+    git checkout source/feature -q
     echo "auto" > auto.txt; git add auto.txt
     git commit -m "Auto detect fix$(printf '\n\nTask-Id: 3')" -q
 
     local before
     before=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
 
-    # Sync WITHOUT specifying POC -- should auto-detect from current branch
+    # Sync WITHOUT specifying source -- should auto-detect from current branch
     bash "$DISPATCH" sync
 
     local after
     after=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
 
-    assert_eq "$((before + 1))" "$after" "auto-detect from POC synced commit"
+    assert_eq "$((before + 1))" "$after" "auto-detect from source synced commit"
 
     teardown
 }
 
-test_sync_auto_detect_from_child() {
-    echo "=== test: sync auto-detect from child branch ==="
+test_sync_auto_detect_from_task() {
+    echo "=== test: sync auto-detect from task branch ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add a commit to POC for task-4
-    git checkout poc/feature -q
-    echo "child-auto" > child-auto.txt; git add child-auto.txt
-    git commit -m "Child auto fix$(printf '\n\nTask-Id: 4')" -q
+    # Add a commit to source for task-4
+    git checkout source/feature -q
+    echo "task-auto" > task-auto.txt; git add task-auto.txt
+    git commit -m "Task auto fix$(printf '\n\nTask-Id: 4')" -q
 
-    # Switch to child branch, sync without args
+    # Switch to task branch, sync without args
     git checkout feat/task-4 -q
 
     local before
@@ -431,34 +431,34 @@ test_sync_auto_detect_from_child() {
     local after
     after=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
 
-    assert_eq "$((before + 1))" "$after" "auto-detect from child synced commit"
+    assert_eq "$((before + 1))" "$after" "auto-detect from task synced commit"
 
     teardown
 }
 
 test_sync_adds_trailer() {
-    echo "=== test: sync child→POC adds Task-Id trailer ==="
+    echo "=== test: sync task→source adds Task-Id trailer ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Commit on child WITHOUT Task-Id trailer
+    # Commit on task branch WITHOUT Task-Id trailer
     git checkout feat/task-3 -q
     echo "no-trailer" > notrailer.txt; git add notrailer.txt
     git commit --no-verify -m "Fix without trailer" -q
 
-    bash "$DISPATCH" sync poc/feature feat/task-3
+    bash "$DISPATCH" sync source/feature feat/task-3
 
-    # Check trailer was added on child branch commit (amended in-place)
-    local child_trailer
-    child_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/task-3 | tr -d '[:space:]')
-    assert_eq "3" "$child_trailer" "Task-Id trailer added on child branch commit"
+    # Check trailer was added on task branch commit (amended in-place)
+    local task_trailer
+    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/task-3 | tr -d '[:space:]')
+    assert_eq "3" "$task_trailer" "Task-Id trailer added on task branch commit"
 
-    # Check the cherry-picked commit on POC also has Task-Id trailer
-    local poc_trailer
-    poc_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" poc/feature | tr -d '[:space:]')
-    assert_eq "3" "$poc_trailer" "Task-Id trailer present on POC after sync"
+    # Check the cherry-picked commit on source also has Task-Id trailer
+    local source_trailer
+    source_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_trailer" "Task-Id trailer present on source after sync"
 
     teardown
 }
@@ -466,28 +466,28 @@ test_sync_adds_trailer() {
 test_status() {
     echo "=== test: status ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add a commit to POC for task-4
-    git checkout poc/feature -q
+    # Add a commit to source for task-4
+    git checkout source/feature -q
     echo "status-fix" > status-fix.txt; git add status-fix.txt
     git commit -m "Status fix$(printf '\n\nTask-Id: 4')" -q
 
-    # Add a commit directly on child task-3
+    # Add a commit directly on task-3
     git checkout feat/task-3 -q
-    echo "child-fix" > child-fix.txt; git add child-fix.txt
-    git commit -m "Child fix$(printf '\n\nTask-Id: 3')" -q
+    echo "task-fix" > task-fix.txt; git add task-fix.txt
+    git commit -m "Task fix$(printf '\n\nTask-Id: 3')" -q
 
     local output
-    output=$(bash "$DISPATCH" status poc/feature)
+    output=$(bash "$DISPATCH" status source/feature)
 
-    assert_contains "$output" "poc/feature" "status shows POC"
+    assert_contains "$output" "source/feature" "status shows source"
     assert_contains "$output" "feat/task-3" "status shows task-3"
     assert_contains "$output" "feat/task-4" "status shows task-4"
     assert_contains "$output" "feat/task-5" "status shows task-5"
-    # task-4 should have 1 pending POC -> child
+    # task-4 should have 1 pending source -> task
     assert_contains "$output" "1 pending" "status shows pending count"
     # task-5 should show up to date
     assert_contains "$output" "up to date" "status shows up to date"
@@ -498,17 +498,17 @@ test_status() {
 test_status_auto_detect() {
     echo "=== test: status auto-detect ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Run status from POC branch without explicit arg
-    git checkout poc/feature -q
+    # Run status from source branch without explicit arg
+    git checkout source/feature -q
     local output
     output=$(bash "$DISPATCH" status)
 
-    assert_contains "$output" "poc/feature" "auto-detect status shows POC"
-    assert_contains "$output" "feat/task-3" "auto-detect status shows children"
+    assert_contains "$output" "source/feature" "auto-detect status shows source"
+    assert_contains "$output" "feat/task-3" "auto-detect status shows tasks"
 
     teardown
 }
@@ -516,12 +516,12 @@ test_status_auto_detect() {
 test_pr_dry_run() {
     echo "=== test: pr --dry-run ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run poc/feature)
+    output=$(bash "$DISPATCH" pr --dry-run source/feature)
 
     assert_contains "$output" "gh pr create --base master --head feat/task-3" "PR for task-3 with correct base"
     assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
@@ -538,12 +538,12 @@ test_pr_dry_run() {
 test_pr_dry_run_push() {
     echo "=== test: pr --dry-run --push ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run --push poc/feature)
+    output=$(bash "$DISPATCH" pr --dry-run --push source/feature)
 
     assert_contains "$output" "git push -u origin feat/task-3" "push command for task-3"
     assert_contains "$output" "git push -u origin feat/task-4" "push command for task-4"
@@ -555,32 +555,32 @@ test_pr_dry_run_push() {
 test_reset() {
     echo "=== test: reset ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    bash "$DISPATCH" reset --force poc/feature
+    bash "$DISPATCH" reset --force source/feature
 
     # Verify config cleaned
-    local poc3
-    poc3=$(git config branch.feat/task-3.dispatchpoc 2>/dev/null || true)
-    assert_eq "" "$poc3" "task-3 dispatchpoc removed"
+    local src3
+    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    assert_eq "" "$src3" "task-3 dispatchsource removed"
 
-    local poc4
-    poc4=$(git config branch.feat/task-4.dispatchpoc 2>/dev/null || true)
-    assert_eq "" "$poc4" "task-4 dispatchpoc removed"
+    local src4
+    src4=$(git config branch.feat/task-4.dispatchsource 2>/dev/null || true)
+    assert_eq "" "$src4" "task-4 dispatchsource removed"
 
-    local children_master
-    children_master=$(git config --get-all branch.master.dispatchchildren 2>/dev/null || true)
-    assert_eq "" "$children_master" "master dispatchchildren removed"
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "" "$tasks_master" "master dispatchtasks removed"
 
-    local children_3
-    children_3=$(git config --get-all branch.feat/task-3.dispatchchildren 2>/dev/null || true)
-    assert_eq "" "$children_3" "task-3 dispatchchildren removed"
+    local tasks_3
+    tasks_3=$(git config --get-all branch.feat/task-3.dispatchtasks 2>/dev/null || true)
+    assert_eq "" "$tasks_3" "task-3 dispatchtasks removed"
 
-    local children_4
-    children_4=$(git config --get-all branch.feat/task-4.dispatchchildren 2>/dev/null || true)
-    assert_eq "" "$children_4" "task-4 dispatchchildren removed"
+    local tasks_4
+    tasks_4=$(git config --get-all branch.feat/task-4.dispatchtasks 2>/dev/null || true)
+    assert_eq "" "$tasks_4" "task-4 dispatchtasks removed"
 
     # Branches should still exist
     assert_branch_exists "feat/task-3" "task-3 still exists after reset"
@@ -593,12 +593,12 @@ test_reset() {
 test_reset_branches() {
     echo "=== test: reset --branches ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     git checkout master -q
-    bash "$DISPATCH" reset --force --branches poc/feature
+    bash "$DISPATCH" reset --force --branches source/feature
 
     # Branches should be deleted
     if git rev-parse --verify "feat/task-3" >/dev/null 2>&1; then
@@ -626,9 +626,9 @@ test_reset_branches() {
     fi
 
     # Config should also be clean
-    local poc3
-    poc3=$(git config branch.feat/task-3.dispatchpoc 2>/dev/null || true)
-    assert_eq "" "$poc3" "config cleaned after reset --branches"
+    local src3
+    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    assert_eq "" "$src3" "config cleaned after reset --branches"
 
     teardown
 }
@@ -636,12 +636,12 @@ test_reset_branches() {
 test_sync_cherry_pick_conflict() {
     echo "=== test: sync cherry-pick conflict ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Create conflicting commit on POC for task-3 (modifies file.txt which task-3 created)
-    git checkout poc/feature -q
+    # Create conflicting commit on source for task-3 (modifies file.txt which task-3 created)
+    git checkout source/feature -q
     echo "conflict" > file.txt; git add file.txt
     git commit -m "Conflict change$(printf '\n\nTask-Id: 3')" -q
 
@@ -652,7 +652,7 @@ test_sync_cherry_pick_conflict() {
 
     # Sync should fail with error message
     local output
-    if output=$(bash "$DISPATCH" sync poc/feature feat/task-3 2>&1); then
+    if output=$(bash "$DISPATCH" sync source/feature feat/task-3 2>&1); then
         echo -e "  ${RED}FAIL${NC} sync should fail on cherry-pick conflict"
         FAIL=$((FAIL + 1))
     else
@@ -673,10 +673,10 @@ test_split_no_commits() {
     setup
 
     # Create a branch with no commits beyond master
-    git checkout -b poc/empty master -q
+    git checkout -b source/empty master -q
 
     local output
-    if output=$(bash "$DISPATCH" split poc/empty --base master --name feat 2>&1); then
+    if output=$(bash "$DISPATCH" split source/empty --base master --name feat 2>&1); then
         echo -e "  ${RED}FAIL${NC} split should fail with no commits"
         FAIL=$((FAIL + 1))
     else
@@ -689,13 +689,13 @@ test_split_no_commits() {
 test_split_already_exists() {
     echo "=== test: split when branch already exists ==="
     setup
-    create_poc
+    create_source
 
     # Pre-create a branch that split would create
     git branch feat/task-3 master
 
     local output
-    if output=$(bash "$DISPATCH" split poc/feature --base master --name feat 2>&1); then
+    if output=$(bash "$DISPATCH" split source/feature --base master --name feat 2>&1); then
         echo -e "  ${RED}FAIL${NC} split should fail when branch exists"
         FAIL=$((FAIL + 1))
     else
@@ -705,11 +705,11 @@ test_split_already_exists() {
     teardown
 }
 
-test_resolve_poc_error_message() {
-    echo "=== test: resolve_poc error includes branch name ==="
+test_resolve_source_error_message() {
+    echo "=== test: resolve_source error includes branch name ==="
     setup
 
-    # Create a branch that's not a POC or child
+    # Create a branch that's not a source or task
     git checkout -b random/branch master -q
 
     local output
@@ -726,16 +726,16 @@ test_resolve_poc_error_message() {
 test_split_non_numeric_task_id() {
     echo "=== test: non-numeric task ID rejected ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Manually create a dispatch child with non-numeric task ID
+    # Manually create a dispatch task with non-numeric task ID
     git branch feat/task-abc master
-    git config "branch.feat/task-abc.dispatchpoc" "poc/feature"
+    git config "branch.feat/task-abc.dispatchsource" "source/feature"
 
     local output
-    if output=$(bash "$DISPATCH" sync poc/feature feat/task-abc 2>&1); then
+    if output=$(bash "$DISPATCH" sync source/feature feat/task-abc 2>&1); then
         echo -e "  ${RED}FAIL${NC} sync should reject non-numeric task ID"
         FAIL=$((FAIL + 1))
     else
@@ -772,12 +772,12 @@ test_install_chmod() {
 test_pr_single_branch() {
     echo "=== test: pr --branch targets single branch ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-4 poc/feature)
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-4 source/feature)
 
     assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
 
@@ -804,12 +804,12 @@ test_pr_single_branch() {
 test_pr_custom_title_body() {
     echo "=== test: pr --title and --body in dry-run ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-3 --title "Custom PR Title" --body "Custom body text" poc/feature)
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-3 --title "Custom PR Title" --body "Custom body text" source/feature)
 
     assert_contains "$output" "Custom PR Title" "custom title appears in dry-run"
     assert_contains "$output" "Custom body text" "custom body appears in dry-run"
@@ -820,12 +820,12 @@ test_pr_custom_title_body() {
 test_pr_branch_not_found() {
     echo "=== test: pr --branch nonexistent errors ==="
     setup
-    create_poc
+    create_source
 
-    bash "$DISPATCH" split poc/feature --base master --name feat >/dev/null
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    if output=$(bash "$DISPATCH" pr --dry-run --branch nonexistent poc/feature 2>&1); then
+    if output=$(bash "$DISPATCH" pr --dry-run --branch nonexistent source/feature 2>&1); then
         echo -e "  ${RED}FAIL${NC} should fail for nonexistent branch"
         FAIL=$((FAIL + 1))
     else
@@ -844,11 +844,11 @@ echo ""
 test_split
 test_split_dry_run
 test_tree
-test_sync_poc_to_child
-test_sync_child_to_poc
+test_sync_source_to_task
+test_sync_task_to_source
 test_sync_worktree
-test_sync_auto_detect_from_poc
-test_sync_auto_detect_from_child
+test_sync_auto_detect_from_source
+test_sync_auto_detect_from_task
 test_sync_adds_trailer
 test_status
 test_status_auto_detect
@@ -864,7 +864,7 @@ test_help
 test_sync_cherry_pick_conflict
 test_split_no_commits
 test_split_already_exists
-test_resolve_poc_error_message
+test_resolve_source_error_message
 test_split_non_numeric_task_id
 test_install_chmod
 test_pr_single_branch

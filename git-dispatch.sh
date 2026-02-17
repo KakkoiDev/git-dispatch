@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# git-dispatch: Split a POC branch into stacked task branches and keep them in sync.
+# git-dispatch: Split a source branch into stacked task branches and keep them in sync.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,31 +19,31 @@ warn() { echo -e "${YELLOW}$*${NC}"; }
 
 current_branch() { git symbolic-ref --short HEAD 2>/dev/null; }
 
-# Get children of a branch from git config (dispatch stack)
-get_children() {
+# Get tasks of a branch from git config (dispatch stack)
+get_tasks() {
     local branch="$1"
-    git config --get-all "branch.${branch}.dispatchchildren" 2>/dev/null || true
+    git config --get-all "branch.${branch}.dispatchtasks" 2>/dev/null || true
 }
 
-# Add a child branch to the dispatch stack
+# Add a task branch to the dispatch stack
 stack_add() {
-    local child="$1" parent="$2"
-    if get_children "$parent" | grep -Fxq "$child"; then
+    local task_name="$1" parent="$2"
+    if get_tasks "$parent" | grep -Fxq "$task_name"; then
         return 0
     fi
-    git config --add "branch.${parent}.dispatchchildren" "$child"
+    git config --add "branch.${parent}.dispatchtasks" "$task_name"
 }
 
-# Remove a child from the dispatch stack
+# Remove a task from the dispatch stack
 stack_remove() {
-    local child="$1" parent="$2"
-    local children
-    children=$(get_children "$parent" | grep -Fxv "$child" || true)
-    git config --unset-all "branch.${parent}.dispatchchildren" 2>/dev/null || true
-    if [[ -n "$children" ]]; then
+    local task_name="$1" parent="$2"
+    local tasks
+    tasks=$(get_tasks "$parent" | grep -Fxv "$task_name" || true)
+    git config --unset-all "branch.${parent}.dispatchtasks" 2>/dev/null || true
+    if [[ -n "$tasks" ]]; then
         while IFS= read -r c; do
-            git config --add "branch.${parent}.dispatchchildren" "$c"
-        done <<< "$children"
+            git config --add "branch.${parent}.dispatchtasks" "$c"
+        done <<< "$tasks"
     fi
 }
 
@@ -51,11 +51,11 @@ stack_remove() {
 stack_show_all() {
     local branch="$1" prefix="${2:-}" child_prefix="${3:-}"
     echo "${prefix}${branch}"
-    local children
-    children=$(get_children "$branch")
-    [[ -z "$children" ]] && return
+    local tasks
+    tasks=$(get_tasks "$branch")
+    [[ -z "$tasks" ]] && return
     local -a arr
-    while IFS= read -r line; do arr+=("$line"); done <<< "$children"
+    while IFS= read -r line; do arr+=("$line"); done <<< "$tasks"
     local count=${#arr[@]}
     for ((i = 0; i < count; i++)); do
         if (( i + 1 == count )); then
@@ -153,7 +153,7 @@ cherry_pick_into() {
 # ---------- split ----------
 
 cmd_split() {
-    local poc="" base="master" name="" dry_run=false continuing=false
+    local source="" base="master" name="" dry_run=false continuing=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -162,14 +162,14 @@ cmd_split() {
             --dry-run)   dry_run=true; shift ;;
             --continue)  continuing=true; shift ;;
             -*)          die "Unknown flag: $1" ;;
-            *)           poc="$1"; shift ;;
+            *)           source="$1"; shift ;;
         esac
     done
 
-    [[ -n "$poc" ]]  || die "Usage: git dispatch split <poc-branch> --name <prefix> [--base <base>]"
+    [[ -n "$source" ]]  || die "Usage: git dispatch split <source-branch> --name <prefix> [--base <base>]"
     [[ -n "$name" ]] || die "Missing --name flag (branch prefix)"
 
-    git rev-parse --verify "$poc" >/dev/null 2>&1  || die "Branch '$poc' does not exist"
+    git rev-parse --verify "$source" >/dev/null 2>&1  || die "Branch '$source' does not exist"
     git rev-parse --verify "$base" >/dev/null 2>&1 || die "Base '$base' does not exist"
 
     # Parse trailer-tagged commits into temp file: "hash task-id" per line
@@ -177,10 +177,10 @@ cmd_split() {
     commit_file=$(mktemp)
     trap "rm -f '$commit_file'" RETURN
 
-    git log --reverse --format="%H %(trailers:key=Task-Id,valueonly)" "$base..$poc" \
+    git log --reverse --format="%H %(trailers:key=Task-Id,valueonly)" "$base..$source" \
         | grep -v '^$' > "$commit_file" || true
 
-    [[ -s "$commit_file" ]] || die "No commits found between $base and $poc"
+    [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
 
     # Validate all commits have Task-Id
     while IFS= read -r line; do
@@ -196,9 +196,9 @@ cmd_split() {
         task_ids+=("$tid")
     done < <(awk '{print $2}' "$commit_file" | awk '!seen[$0]++')
 
-    echo -e "${CYAN}POC:${NC}  $poc"
-    echo -e "${CYAN}Base:${NC} $base"
-    echo -e "${CYAN}Tasks:${NC} ${task_ids[*]}"
+    echo -e "${CYAN}Source:${NC} $source"
+    echo -e "${CYAN}Base:${NC}   $base"
+    echo -e "${CYAN}Tasks:${NC}  ${task_ids[*]}"
     echo ""
 
     local prev_branch="$base"
@@ -216,7 +216,7 @@ cmd_split() {
             git branch "$branch_name" "$prev_branch" 2>/dev/null || die "Branch '$branch_name' already exists"
             cherry_pick_into "$branch_name" "${hashes[@]}"
             stack_add "$branch_name" "$prev_branch"
-            git config "branch.${branch_name}.dispatchpoc" "$poc"
+            git config "branch.${branch_name}.dispatchsource" "$source"
             info "  Created $branch_name (${#hashes[@]} commits)"
         fi
         prev_branch="$branch_name"
@@ -230,9 +230,9 @@ cmd_split() {
 
 # ---------- sync ----------
 
-# Resolve POC branch from current context
-# Priority: explicit arg > current branch is POC > current branch is child (read dispatchpoc)
-resolve_poc() {
+# Resolve source branch from current context
+# Priority: explicit arg > current branch is source > current branch is task (read dispatchsource)
+resolve_source() {
     local explicit="$1"
     if [[ -n "$explicit" ]]; then
         echo "$explicit"
@@ -242,49 +242,49 @@ resolve_poc() {
     local cur
     cur=$(current_branch)
 
-    # Is current branch a POC for any child?
-    local is_poc
-    is_poc=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        local cpoc
-        cpoc=$(git config "branch.${b}.dispatchpoc" 2>/dev/null || true)
-        if [[ "$cpoc" == "$cur" ]]; then echo "$cur"; break; fi
+    # Is current branch a source for any task?
+    local is_source
+    is_source=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        local csource
+        csource=$(git config "branch.${b}.dispatchsource" 2>/dev/null || true)
+        if [[ "$csource" == "$cur" ]]; then echo "$cur"; break; fi
     done)
-    if [[ -n "$is_poc" ]]; then
-        echo "$is_poc"
+    if [[ -n "$is_source" ]]; then
+        echo "$is_source"
         return
     fi
 
-    # Is current branch a child? Read its dispatchpoc
-    local cpoc
-    cpoc=$(git config "branch.${cur}.dispatchpoc" 2>/dev/null || true)
-    if [[ -n "$cpoc" ]]; then
-        echo "$cpoc"
+    # Is current branch a task? Read its dispatchsource
+    local csource
+    csource=$(git config "branch.${cur}.dispatchsource" 2>/dev/null || true)
+    if [[ -n "$csource" ]]; then
+        echo "$csource"
         return
     fi
 
-    die "Cannot detect POC branch (current: '${cur}'). Run from a POC or child branch, or pass it explicitly."
+    die "Cannot detect source branch (current: '${cur}'). Run from a source or task branch, or pass it explicitly."
 }
 
-# Find all dispatch children for a given POC
-find_dispatch_children() {
-    local poc="$1"
+# Find all dispatch tasks for a given source
+find_dispatch_tasks() {
+    local source="$1"
     local -a found=()
 
     while IFS= read -r ref; do
         local bname="${ref#refs/heads/}"
-        local cpoc
-        cpoc=$(git config "branch.${bname}.dispatchpoc" 2>/dev/null || true)
-        [[ "$cpoc" == "$poc" ]] && found+=("$bname")
+        local csource
+        csource=$(git config "branch.${bname}.dispatchsource" 2>/dev/null || true)
+        [[ "$csource" == "$source" ]] && found+=("$bname")
     done < <(git for-each-ref --format='%(refname)' refs/heads/)
 
     printf '%s\n' "${found[@]}"
 }
 
-# Find the parent branch in the dispatch stack for a given child
+# Find the parent branch in the dispatch stack for a given branch
 find_stack_parent() {
-    local child="$1"
+    local branch="$1"
     git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        if get_children "$b" | grep -Fxq "$child"; then
+        if get_tasks "$b" | grep -Fxq "$branch"; then
             echo "$b"
             break
         fi
@@ -292,49 +292,49 @@ find_stack_parent() {
 }
 
 cmd_sync() {
-    local poc_arg="" child="" continuing=false
+    local source_arg="" task="" continuing=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --continue) continuing=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)
-                if [[ -z "$poc_arg" ]]; then poc_arg="$1"
-                elif [[ -z "$child" ]]; then child="$1"
+                if [[ -z "$source_arg" ]]; then source_arg="$1"
+                elif [[ -z "$task" ]]; then task="$1"
                 fi
                 shift ;;
         esac
     done
 
-    local poc
-    poc=$(resolve_poc "$poc_arg")
+    local source
+    source=$(resolve_source "$source_arg")
 
-    # Resolve child branches to sync
+    # Resolve task branches to sync
     local -a targets=()
-    if [[ -n "$child" ]]; then
-        targets=("$child")
+    if [[ -n "$task" ]]; then
+        targets=("$task")
     else
         while IFS= read -r c; do
             [[ -n "$c" ]] && targets+=("$c")
-        done < <(find_dispatch_children "$poc")
+        done < <(find_dispatch_tasks "$source")
     fi
 
-    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
-    echo -e "${CYAN}POC:${NC} $poc"
+    echo -e "${CYAN}Source:${NC} $source"
     echo ""
 
-    for child_branch in "${targets[@]}"; do
-        echo -e "${CYAN}Syncing:${NC} $child_branch"
+    for task_branch in "${targets[@]}"; do
+        echo -e "${CYAN}Syncing:${NC} $task_branch"
 
         # Extract task-id from branch name (last segment after task-)
-        local task_id="${child_branch##*/task-}"
-        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${child_branch}'"
+        local task_id="${task_branch##*/task-}"
+        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${task_branch}'"
 
-        # POC → child: commits in POC for this task not yet in child
-        local -a poc_to_child=()
+        # Source → task: commits in source for this task not yet in task branch
+        local -a source_to_task=()
         local cherry_out
-        cherry_out=$(git cherry -v "$child_branch" "$poc" 2>&1) || die "git cherry failed: $cherry_out"
+        cherry_out=$(git cherry -v "$task_branch" "$source" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
@@ -342,21 +342,21 @@ cmd_sync() {
             # Check if this commit has matching Task-Id
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$task_id" ]] && poc_to_child+=("$hash")
+            [[ "$tid" == "$task_id" ]] && source_to_task+=("$hash")
         done <<< "$cherry_out"
 
-        if [[ ${#poc_to_child[@]} -gt 0 ]]; then
-            info "  POC → child: ${#poc_to_child[@]} commit(s)"
-            cherry_pick_into "$child_branch" "${poc_to_child[@]}"
+        if [[ ${#source_to_task[@]} -gt 0 ]]; then
+            info "  Source → task: ${#source_to_task[@]} commit(s)"
+            cherry_pick_into "$task_branch" "${source_to_task[@]}"
         else
-            echo "  POC → child: up to date"
+            echo "  Source → task: up to date"
         fi
 
-        # Child → POC: commits in child not yet in POC
-        # First, amend any child commits missing Task-Id on the child branch itself
-        local -a child_to_poc=()
+        # Task → source: commits in task branch not yet in source
+        # First, amend any task commits missing Task-Id on the task branch itself
+        local -a task_to_source=()
         local needs_trailer=false
-        cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
+        cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
@@ -366,28 +366,28 @@ cmd_sync() {
             if [[ "$tid" != "$task_id" ]]; then
                 needs_trailer=true
             fi
-            child_to_poc+=("$hash")
+            task_to_source+=("$hash")
         done <<< "$cherry_out"
 
-        if [[ ${#child_to_poc[@]} -gt 0 ]]; then
-            # Amend commits on child branch to add Task-Id before cherry-picking
+        if [[ ${#task_to_source[@]} -gt 0 ]]; then
+            # Amend commits on task branch to add Task-Id before cherry-picking
             if $needs_trailer; then
-                info "  Fixing Task-Id on child commits..."
-                _amend_trailers_on_branch "$child_branch" "$task_id" "${child_to_poc[@]}"
+                info "  Fixing Task-Id on task commits..."
+                _amend_trailers_on_branch "$task_branch" "$task_id" "${task_to_source[@]}"
                 # Re-read hashes after rewrite
-                child_to_poc=()
-                cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
+                task_to_source=()
+                cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
                 while IFS= read -r line; do
                     [[ "$line" == +* ]] || continue
                     local hash
                     hash=$(echo "$line" | awk '{print $2}')
-                    child_to_poc+=("$hash")
+                    task_to_source+=("$hash")
                 done <<< "$cherry_out"
             fi
-            info "  Child → POC: ${#child_to_poc[@]} commit(s)"
-            cherry_pick_into "$poc" "${child_to_poc[@]}"
+            info "  Task → source: ${#task_to_source[@]} commit(s)"
+            cherry_pick_into "$source" "${task_to_source[@]}"
         else
-            echo "  Child → POC: up to date"
+            echo "  Task → source: up to date"
         fi
 
         echo ""
@@ -397,63 +397,63 @@ cmd_sync() {
 # ---------- status ----------
 
 cmd_status() {
-    local poc_arg=""
+    local source_arg=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -*) die "Unknown flag: $1" ;;
-            *)  poc_arg="$1"; shift ;;
+            *)  source_arg="$1"; shift ;;
         esac
     done
 
-    local poc
-    poc=$(resolve_poc "$poc_arg")
+    local source
+    source=$(resolve_source "$source_arg")
 
     local -a targets=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && targets+=("$c")
-    done < <(find_dispatch_children "$poc")
+    done < <(find_dispatch_tasks "$source")
 
-    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
-    echo -e "${CYAN}POC:${NC} $poc"
+    echo -e "${CYAN}Source:${NC} $source"
     echo ""
 
-    for child_branch in "${targets[@]}"; do
-        local task_id="${child_branch##*/task-}"
-        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${child_branch}'"
+    for task_branch in "${targets[@]}"; do
+        local task_id="${task_branch##*/task-}"
+        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${task_branch}'"
 
-        # POC -> child: commits in POC for this task not yet in child
-        local poc_to_child=0
+        # Source -> task: commits in source for this task not yet in task branch
+        local source_to_task=0
         local cherry_out
-        cherry_out=$(git cherry -v "$child_branch" "$poc" 2>&1) || die "git cherry failed: $cherry_out"
+        cherry_out=$(git cherry -v "$task_branch" "$source" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$task_id" ]] && poc_to_child=$((poc_to_child + 1))
+            [[ "$tid" == "$task_id" ]] && source_to_task=$((source_to_task + 1))
         done <<< "$cherry_out"
 
-        # Child -> POC: commits in child not yet in POC
-        local child_to_poc=0
-        cherry_out=$(git cherry -v "$poc" "$child_branch" 2>&1) || die "git cherry failed: $cherry_out"
+        # Task -> source: commits in task branch not yet in source
+        local task_to_source=0
+        cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
-            child_to_poc=$((child_to_poc + 1))
+            task_to_source=$((task_to_source + 1))
         done <<< "$cherry_out"
 
-        echo -e "  ${YELLOW}$child_branch${NC}"
-        if [[ $poc_to_child -gt 0 ]]; then
-            echo -e "    POC -> child: ${GREEN}${poc_to_child} pending${NC}"
+        echo -e "  ${YELLOW}$task_branch${NC}"
+        if [[ $source_to_task -gt 0 ]]; then
+            echo -e "    Source -> task: ${GREEN}${source_to_task} pending${NC}"
         else
-            echo "    POC -> child: 0 pending"
+            echo "    Source -> task: 0 pending"
         fi
-        if [[ $child_to_poc -gt 0 ]]; then
-            echo -e "    Child -> POC: ${GREEN}${child_to_poc} pending${NC}"
+        if [[ $task_to_source -gt 0 ]]; then
+            echo -e "    Task -> source: ${GREEN}${task_to_source} pending${NC}"
         else
-            echo "    Child -> POC: 0 pending (up to date)"
+            echo "    Task -> source: 0 pending (up to date)"
         fi
         echo ""
     done
@@ -462,7 +462,7 @@ cmd_status() {
 # ---------- pr ----------
 
 cmd_pr() {
-    local poc_arg="" push=false dry_run=false
+    local source_arg="" push=false dry_run=false
     local branch_filter="" custom_title="" custom_body=""
 
     while [[ $# -gt 0 ]]; do
@@ -473,34 +473,34 @@ cmd_pr() {
             --title)   custom_title="$2"; shift 2 ;;
             --body)    custom_body="$2"; shift 2 ;;
             -*)        die "Unknown flag: $1" ;;
-            *)         poc_arg="$1"; shift ;;
+            *)         source_arg="$1"; shift ;;
         esac
     done
 
-    local poc
-    poc=$(resolve_poc "$poc_arg")
+    local source
+    source=$(resolve_source "$source_arg")
 
-    local -a children=()
+    local -a tasks=()
     while IFS= read -r c; do
-        [[ -n "$c" ]] && children+=("$c")
-    done < <(find_dispatch_children "$poc")
+        [[ -n "$c" ]] && tasks+=("$c")
+    done < <(find_dispatch_tasks "$source")
 
-    [[ ${#children[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+    [[ ${#tasks[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
     if ! $dry_run && ! command -v gh &>/dev/null; then
         die "gh CLI is required. Install: https://cli.github.com"
     fi
 
-    # Find base branch (parent of first child that isn't itself a dispatch child)
+    # Find base branch (parent of first task that isn't itself a dispatch task)
     local base=""
-    for child in "${children[@]}"; do
+    for task in "${tasks[@]}"; do
         local parent
-        parent=$(find_stack_parent "$child")
-        local parent_is_child=false
-        for c in "${children[@]}"; do
-            [[ "$c" == "$parent" ]] && { parent_is_child=true; break; }
+        parent=$(find_stack_parent "$task")
+        local parent_is_task=false
+        for c in "${tasks[@]}"; do
+            [[ "$c" == "$parent" ]] && { parent_is_task=true; break; }
         done
-        if ! $parent_is_child; then
+        if ! $parent_is_task; then
             base="$parent"
             break
         fi
@@ -508,13 +508,13 @@ cmd_pr() {
 
     [[ -n "$base" ]] || die "Cannot determine base branch"
 
-    # Walk from base through dispatch children in stack order
+    # Walk from base through dispatch tasks in stack order
     local -a ordered=()
     local current="$base"
     while true; do
         local next=""
-        for c in "${children[@]}"; do
-            if get_children "$current" | grep -Fxq "$c"; then
+        for c in "${tasks[@]}"; do
+            if get_tasks "$current" | grep -Fxq "$c"; then
                 next="$c"
                 break
             fi
@@ -537,19 +537,19 @@ cmd_pr() {
         ordered=("$branch_filter")
     fi
 
-    echo -e "${CYAN}POC:${NC} $poc"
+    echo -e "${CYAN}Source:${NC} $source"
     echo ""
 
-    for child_branch in "${ordered[@]}"; do
+    for task_branch in "${ordered[@]}"; do
         local parent
-        parent=$(find_stack_parent "$child_branch")
+        parent=$(find_stack_parent "$task_branch")
 
         # PR title: custom or first commit subject
         local title
         if [[ -n "$custom_title" ]]; then
             title="$custom_title"
         else
-            title=$(git log --reverse --format="%s" "${parent}..${child_branch}" | head -1)
+            title=$(git log --reverse --format="%s" "${parent}..${task_branch}" | head -1)
         fi
 
         # PR body: custom or empty
@@ -560,18 +560,18 @@ cmd_pr() {
 
         if $push; then
             if $dry_run; then
-                echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $child_branch"
+                echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $task_branch"
             else
-                git push -u origin "$child_branch" 2>/dev/null || warn "  Push failed for $child_branch"
+                git push -u origin "$task_branch" 2>/dev/null || warn "  Push failed for $task_branch"
             fi
         fi
 
         if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $child_branch --title \"$title\" --body \"$body\""
+            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $task_branch --title \"$title\" --body \"$body\""
         else
             local url
-            url=$(gh pr create --base "$parent" --head "$child_branch" --title "$title" --body "$body" 2>&1) || {
-                warn "  PR creation failed for $child_branch: $url"
+            url=$(gh pr create --base "$parent" --head "$task_branch" --title "$title" --body "$body" 2>&1) || {
+                warn "  PR creation failed for $task_branch: $url"
                 continue
             }
             info "  Created PR: $url"
@@ -582,29 +582,29 @@ cmd_pr() {
 # ---------- reset ----------
 
 cmd_reset() {
-    local poc_arg="" delete_branches=false force=false
+    local source_arg="" delete_branches=false force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --branches) delete_branches=true; shift ;;
             --force)    force=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
-            *)          poc_arg="$1"; shift ;;
+            *)          source_arg="$1"; shift ;;
         esac
     done
 
-    local poc
-    poc=$(resolve_poc "$poc_arg")
+    local source
+    source=$(resolve_source "$source_arg")
 
-    local -a children=()
+    local -a tasks=()
     while IFS= read -r c; do
-        [[ -n "$c" ]] && children+=("$c")
-    done < <(find_dispatch_children "$poc")
+        [[ -n "$c" ]] && tasks+=("$c")
+    done < <(find_dispatch_tasks "$source")
 
-    [[ ${#children[@]} -gt 0 ]] || die "No dispatch children found for $poc"
+    [[ ${#tasks[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
-    echo -e "${CYAN}POC:${NC} $poc"
-    echo "Children: ${children[*]}"
+    echo -e "${CYAN}Source:${NC} $source"
+    echo "Tasks: ${tasks[*]}"
     if $delete_branches; then
         warn "Will also delete task branches"
     fi
@@ -615,38 +615,38 @@ cmd_reset() {
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
     fi
 
-    # Collect parent-child pairs before modifying config
+    # Collect parent-task pairs before modifying config
     local -a parents=()
-    for child in "${children[@]}"; do
-        parents+=("$(find_stack_parent "$child")")
+    for task in "${tasks[@]}"; do
+        parents+=("$(find_stack_parent "$task")")
     done
 
-    for i in "${!children[@]}"; do
-        local child="${children[$i]}"
+    for i in "${!tasks[@]}"; do
+        local task="${tasks[$i]}"
         local parent="${parents[$i]}"
 
-        # Remove dispatchpoc from child
-        git config --unset "branch.${child}.dispatchpoc" 2>/dev/null || true
+        # Remove dispatchsource from task
+        git config --unset "branch.${task}.dispatchsource" 2>/dev/null || true
 
-        # Remove child from parent's dispatchchildren
+        # Remove task from parent's dispatchtasks
         if [[ -n "$parent" ]]; then
-            stack_remove "$child" "$parent"
+            stack_remove "$task" "$parent"
         fi
 
-        # Remove any dispatchchildren on this child itself
-        git config --unset-all "branch.${child}.dispatchchildren" 2>/dev/null || true
+        # Remove any dispatchtasks on this task itself
+        git config --unset-all "branch.${task}.dispatchtasks" 2>/dev/null || true
 
         if $delete_branches; then
             local cur
             cur=$(current_branch)
-            if [[ "$cur" == "$child" ]]; then
-                warn "  Skipping delete of $child (currently checked out)"
+            if [[ "$cur" == "$task" ]]; then
+                warn "  Skipping delete of $task (currently checked out)"
             else
-                git branch -D "$child" 2>/dev/null || warn "  Could not delete $child"
-                info "  Deleted $child"
+                git branch -D "$task" 2>/dev/null || warn "  Could not delete $task"
+                info "  Deleted $task"
             fi
         else
-            info "  Cleaned $child"
+            info "  Cleaned $task"
         fi
     done
 
@@ -659,21 +659,21 @@ cmd_reset() {
 cmd_tree() {
     local branch="${1:-}"
     if [[ -z "$branch" ]]; then
-        # Auto-detect: find root by walking dispatchpoc or use current branch
+        # Auto-detect: find root by walking dispatchsource or use current branch
         branch=$(current_branch)
-        local poc
-        poc=$(git config "branch.${branch}.dispatchpoc" 2>/dev/null || true)
-        if [[ -n "$poc" ]]; then
+        local source_ref
+        source_ref=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
+        if [[ -n "$source_ref" ]]; then
             # Walk up to find the base
             local parent
             parent=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                if get_children "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
+                if get_tasks "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
             done)
             # Find root of the stack
             while [[ -n "$parent" ]]; do
                 local gp
                 gp=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                    if get_children "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
+                    if get_tasks "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
                 done)
                 [[ -z "$gp" ]] && break
                 parent="$gp"
@@ -705,46 +705,46 @@ cmd_hook_install() {
 
 cmd_help() {
     cat <<'HELP'
-git-dispatch: Split a POC branch into stacked task branches and keep them in sync.
+git-dispatch: Split a source branch into stacked task branches and keep them in sync.
 
 WORKFLOW
-  1. Code on a POC branch, tagging each commit with a Task-Id trailer:
+  1. Code on a source branch, tagging each commit with a Task-Id trailer:
        git commit -m "Add feature X" --trailer "Task-Id=3"
 
   2. Split into stacked branches:
-       git dispatch split cyril/poc/feature --base master --name cyril/feat/feature
+       git dispatch split source/feature --base master --name feat/feature
 
-  3. Continue working on POC or child branches, then sync:
-       git dispatch sync                                      # auto-detect POC, sync all
-       git dispatch sync cyril/poc/feature                    # explicit POC, sync all
-       git dispatch sync cyril/poc/feature child/task-3       # sync one child
+  3. Continue working on source or task branches, then sync:
+       git dispatch sync                                      # auto-detect source, sync all
+       git dispatch sync source/feature                       # explicit source, sync all
+       git dispatch sync source/feature feat/task-3           # sync one task
 
   4. View the stack:
        git dispatch tree
 
 COMMANDS
-  split <poc> --name <prefix> [--base <base>] [--dry-run]
-      Parse Task-Id trailers from <poc>, group commits by task, create stacked
+  split <source> --name <prefix> [--base <base>] [--dry-run]
+      Parse Task-Id trailers from <source>, group commits by task, create stacked
       branches named <prefix>/task-N. Each branch stacks on the previous.
 
-  sync [poc] [child-branch]
+  sync [source] [task-branch]
       Bidirectional sync using git cherry (patch-id comparison).
-      POC->child: new commits for the task appear in the child branch.
-      Child->POC: direct fixes on child appear back in the POC (Task-Id added).
-      If <poc> is omitted, auto-detects from current branch context.
+      Source->task: new commits for the task appear in the task branch.
+      Task->source: direct fixes on task appear back in the source (Task-Id added).
+      If <source> is omitted, auto-detects from current branch context.
 
-  status [poc]
-      Show pending sync counts per child branch without applying changes.
+  status [source]
+      Show pending sync counts per task branch without applying changes.
       Quick check before running sync.
 
-  pr [poc] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]
+  pr [source] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]
       Create stacked PRs with correct --base flags via gh CLI.
       Walks the dispatch stack in order. --push pushes branches first.
-      --branch targets a single branch instead of all children.
+      --branch targets a single branch instead of all tasks.
       --title and --body override the auto-generated PR title and empty body.
       --dry-run shows what would be created without doing it.
 
-  reset [poc] [--branches] [--force]
+  reset [source] [--branches] [--force]
       Clean up dispatch metadata from git config.
       --branches also deletes the task branches.
       --force skips confirmation prompt.

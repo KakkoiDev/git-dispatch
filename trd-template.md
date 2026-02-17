@@ -66,18 +66,18 @@ git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 
 ## git-dispatch Workflow
 
-After writing this TRD and coding the POC:
+After writing this TRD and coding on your source branch:
 
 ```bash
-# 1. Code on POC branch, tagging each commit with its TRD task number
-git checkout -b you/poc/feature master
+# 1. Code on source branch, tagging each commit with its TRD task number
+git checkout -b you/source/feature master
 git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 git commit -m "Create GET endpoint"       --trailer "Task-Id=4"
 git commit -m "Add DTOs"                  --trailer "Task-Id=4"
 git commit -m "Implement validation"      --trailer "Task-Id=5"
 
 # 2. Split into stacked branches (one per task)
-git dispatch split you/poc/feature --base master --name you/feat/feature
+git dispatch split you/source/feature --base master --name you/feat/feature
 
 # 3. Create PRs -- each maps to a TRD task, reviewer reads commit-by-commit
 # 4. Sync when you fix things on either side

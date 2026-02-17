@@ -1,10 +1,10 @@
 # git-dispatch
 
-Split a POC branch into stacked task branches. Keep them in sync bidirectionally. Never cherry-pick manually again.
+Split a source branch into stacked task branches. Keep them in sync bidirectionally. Never cherry-pick manually again.
 
 ## Problem
 
-You write a TRD, vibe-code the whole feature on a POC branch, then need clean stacked PRs for review. Manually cherry-picking and keeping branches in sync is tedious and error-prone.
+You write a TRD, vibe-code the whole feature on a source branch, then need clean stacked PRs for review. Manually cherry-picking and keeping branches in sync is tedious and error-prone.
 
 ## Solution
 
@@ -16,21 +16,21 @@ Tag commits with `Task-Id` trailers. `git dispatch split` groups them into stack
 # Install
 bash install.sh
 
-# Tag commits on your POC
-git checkout -b poc/feature master
+# Tag commits on your source branch
+git checkout -b source/feature master
 git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 git commit -m "Create GET endpoint"       --trailer "Task-Id=4"
 git commit -m "Add DTOs"                  --trailer "Task-Id=4"
 git commit -m "Implement validation"      --trailer "Task-Id=5"
 
 # Split into stacked branches
-git dispatch split poc/feature --base master --name feat/feature
+git dispatch split source/feature --base master --name feat/feature
 # master
 # └── feat/feature/task-3
 #     └── feat/feature/task-4
 #         └── feat/feature/task-5
 
-# Continue working, then sync (auto-detects POC from current branch)
+# Continue working, then sync (auto-detects source from current branch)
 git dispatch sync
 ```
 
@@ -38,14 +38,14 @@ git dispatch sync
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch split <poc> --name <prefix> --base <base>` | Split POC into stacked branches by Task-Id |
-| `git dispatch split <poc> --name <prefix> --dry-run` | Preview split without creating branches |
-| `git dispatch sync` | Auto-detect POC, sync all task branches bidirectionally |
-| `git dispatch sync [poc]` | Sync all task branches for a specific POC |
-| `git dispatch sync [poc] <child>` | Sync one specific task branch |
-| `git dispatch status [poc]` | Show pending sync counts without applying |
-| `git dispatch pr [poc] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
-| `git dispatch reset [poc] [--branches] [--force]` | Clean up dispatch metadata |
+| `git dispatch split <source> --name <prefix> --base <base>` | Split source into stacked branches by Task-Id |
+| `git dispatch split <source> --name <prefix> --dry-run` | Preview split without creating branches |
+| `git dispatch sync` | Auto-detect source, sync all task branches bidirectionally |
+| `git dispatch sync [source]` | Sync all task branches for a specific source |
+| `git dispatch sync [source] <task>` | Sync one specific task branch |
+| `git dispatch status [source]` | Show pending sync counts without applying |
+| `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
 | `git dispatch help` | Show usage guide |
@@ -61,7 +61,7 @@ git commit -m "Add feature" --trailer "Task-Id=3"
 Parse trailers (zero regex, git-native):
 
 ```bash
-git log --format="%H %(trailers:key=Task-Id,valueonly)" master..poc
+git log --format="%H %(trailers:key=Task-Id,valueonly)" master..source
 ```
 
 Install the hook to enforce trailers on every commit:
@@ -94,12 +94,12 @@ See [`trd-template.md`](trd-template.md) for the full template.
 #### 11. (FE) Create transaction registration page
 ```
 
-### Step 1: Vibe-code the POC
+### Step 1: Vibe-code the source
 
 Code the whole feature on one branch. Tag every commit with its TRD task number:
 
 ```bash
-git checkout -b cyril/poc/po-transactions master
+git checkout -b cyril/source/po-transactions master
 git dispatch hook install
 
 # Task 3 - Schema
@@ -121,17 +121,17 @@ git commit -m "Add transaction status to PO detail header"      --trailer "Task-
 git commit -m "Add menu item with confirmation dialog"          --trailer "Task-Id=10"
 ```
 
-The POC branch is demo-able. Show it to PM, get feedback, iterate.
+The source branch is demo-able. Show it to PM, get feedback, iterate.
 
 ### Step 2: Split into stacked branches
 
 ```bash
 # Preview first
-git dispatch split cyril/poc/po-transactions \
+git dispatch split cyril/source/po-transactions \
   --base master --name cyril/feat/po-transactions --dry-run
 
 # Split
-git dispatch split cyril/poc/po-transactions \
+git dispatch split cyril/source/po-transactions \
   --base master --name cyril/feat/po-transactions
 ```
 
@@ -159,77 +159,77 @@ git dispatch pr --push
 
 ### Step 4: Keep iterating
 
-Fix something on the POC? Sync pushes it to the right child:
+Fix something on the source? Sync pushes it to the right task:
 
 ```bash
-git checkout cyril/poc/po-transactions
+git checkout cyril/source/po-transactions
 git commit -m "Fix tax mapping edge case" --trailer "Task-Id=4"
 git dispatch sync
 ```
 
-Fix something on a child branch? Sync pushes it back to POC:
+Fix something on a task branch? Sync pushes it back to source:
 
 ```bash
 git checkout cyril/feat/po-transactions/task-5
 git commit -m "Fix permission check"
 git dispatch sync
-# Task-Id=5 trailer added automatically, synced back to POC
+# Task-Id=5 trailer added automatically, synced back to source
 ```
 
-POC stays demo-able. PRs stay clean. Reviewer reads commit-by-commit.
+Source stays demo-able. PRs stay clean. Reviewer reads commit-by-commit.
 
 ## Commands Reference
 
 ### split
 
 ```bash
-git dispatch split <poc> --name <prefix> [--base <base>] [--dry-run]
+git dispatch split <source> --name <prefix> [--base <base>] [--dry-run]
 ```
 
-Parse `Task-Id` trailers from POC, group commits by task, create stacked branches named `<prefix>/task-N`. Each branch stacks on the previous.
+Parse `Task-Id` trailers from source, group commits by task, create stacked branches named `<prefix>/task-N`. Each branch stacks on the previous.
 
 ### sync
 
 ```bash
-git dispatch sync                    # auto-detect POC, sync all
-git dispatch sync [poc]              # explicit POC, sync all
-git dispatch sync [poc] <child>      # sync one child
+git dispatch sync                    # auto-detect source, sync all
+git dispatch sync [source]           # explicit source, sync all
+git dispatch sync [source] <task>    # sync one task
 ```
 
-Bidirectional sync using `git cherry` (patch-id comparison). POC->child: new commits for the task appear in the child. Child->POC: fixes flow back (Task-Id trailer added if missing). Auto-detects POC from current branch context.
+Bidirectional sync using `git cherry` (patch-id comparison). Source->task: new commits for the task appear in the task branch. Task->source: fixes flow back (Task-Id trailer added if missing). Auto-detects source from current branch context.
 
 ### status
 
 ```bash
-git dispatch status              # auto-detect POC
-git dispatch status [poc]        # explicit POC
+git dispatch status              # auto-detect source
+git dispatch status [source]     # explicit source
 ```
 
-Show pending sync counts per child branch without applying changes. Quick preview before running `sync`.
+Show pending sync counts per task branch without applying changes. Quick preview before running `sync`.
 
 ### pr
 
 ```bash
 git dispatch pr                  # auto-detect, create all PRs
-git dispatch pr [poc]            # explicit POC
+git dispatch pr [source]         # explicit source
 git dispatch pr --branch feat/task-4   # target a single branch
 git dispatch pr --title "My PR" --body "Description"  # custom title/body
 git dispatch pr --push           # push branches first, then create PRs
 git dispatch pr --dry-run        # show what would be created
 ```
 
-Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title defaults to the first commit subject of each task. `--branch` targets a single branch instead of all children. `--title` and `--body` override the auto-generated title and empty body. Requires `gh` CLI.
+Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title defaults to the first commit subject of each task. `--branch` targets a single branch instead of all tasks. `--title` and `--body` override the auto-generated title and empty body. Requires `gh` CLI.
 
 ### reset
 
 ```bash
-git dispatch reset               # auto-detect POC, clean metadata
-git dispatch reset [poc]         # explicit POC
+git dispatch reset               # auto-detect source, clean metadata
+git dispatch reset [source]      # explicit source
 git dispatch reset --branches    # also delete task branches
 git dispatch reset --force       # skip confirmation prompt
 ```
 
-Clean up dispatch metadata (`dispatchpoc`, `dispatchchildren`) from git config. Use when re-splitting or abandoning a dispatch stack.
+Clean up dispatch metadata (`dispatchsource`, `dispatchtasks`) from git config. Use when re-splitting or abandoning a dispatch stack.
 
 ### tree
 
@@ -263,7 +263,7 @@ git commit --no-verify -m "message without trailer"
 
 ## Worktree Support
 
-Sync is worktree-aware. If a child branch has a worktree checked out, `git dispatch sync` cherry-picks directly into the worktree instead of doing checkout gymnastics.
+Sync is worktree-aware. If a task branch has a worktree checked out, `git dispatch sync` cherry-picks directly into the worktree instead of doing checkout gymnastics.
 
 ## Conflict Recovery
 
@@ -277,8 +277,8 @@ When a cherry-pick conflict occurs during split or sync:
 
 Stored in git config (survives rebases, no extra files):
 
-- `branch.<name>.dispatchchildren` -- child branches (multi-value)
-- `branch.<name>.dispatchpoc` -- source POC branch
+- `branch.<name>.dispatchtasks` -- task branches (multi-value)
+- `branch.<name>.dispatchsource` -- source branch
 
 ## AI Integration
 
