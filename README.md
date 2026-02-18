@@ -14,7 +14,7 @@ Tag commits with `Task-Id` trailers. `git dispatch split` groups them into stack
 
 ```bash
 # Install
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/install-remote.sh | bash
 
 # Tag commits on your source branch
 git checkout -b source/feature master
@@ -313,7 +313,13 @@ mkdir -p ~/.claude/agents && cp AGENTS.md ~/.claude/agents/git-dispatch.md
 ## Installation
 
 ```bash
-git clone <repo-url> && cd git-dispatch
+curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/install-remote.sh | bash
+```
+
+Or clone and install locally:
+
+```bash
+git clone git@github.com:KakkoiDev/git-dispatch.git && cd git-dispatch
 bash install.sh
 ```
 
