@@ -113,6 +113,20 @@ Before splitting, verify:
 - [ ] Base branch is up to date
 - [ ] No uncommitted changes in working tree
 
+## Convention Detection
+
+Before committing to an existing dispatch source, detect established conventions:
+
+```bash
+# Detect Task-Id format (numeric vs prefixed)
+git log -5 --format="%(trailers:key=Task-Id,valueonly)" <base>..<source>
+
+# Detect if Task-Order is in use
+git log --format="%(trailers:key=Task-Order,valueonly)" <base>..<source> | grep -v '^$'
+```
+
+Follow whatever format is already established. If Task-Order is in use, maintain it.
+
 ## Stack Metadata
 
 Stored in git config:

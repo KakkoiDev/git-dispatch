@@ -70,6 +70,21 @@ Install the hook to enforce trailers on every commit:
 git dispatch hook install
 ```
 
+## Task-Order Trailer
+
+Optional trailer to control stack position during split:
+
+```bash
+git commit -m "fix" --trailer "Task-Id=task-13.1" --trailer "Task-Order=8"
+```
+
+By default, tasks are ordered by first commit appearance. `Task-Order` gives explicit control:
+- Tasks with `Task-Order` sort first (ascending by value)
+- Tasks without `Task-Order` follow in commit order
+- Duplicate `Task-Order` values are rejected
+
+Useful when a late fix for an earlier task needs to stay near its parent in the stack.
+
 ## Example: TRD to Stacked PRs
 
 The full workflow starts with a TRD (Technical Refinement Document). Task numbers in the TRD become `Task-Id` trailers in commits, which become stacked branches and PRs.

@@ -34,6 +34,18 @@ git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 
 Task→source sync adds missing trailers automatically.
 
+## Task-Order Trailer
+
+Optional trailer to control stack position during split:
+```bash
+git commit -m "fix" --trailer "Task-Id=task-13.1" --trailer "Task-Order=8"
+```
+
+Three modes (backward compatible):
+- **No Task-Order** — commit order (default)
+- **Partial** — ordered tasks sort first, unordered follow in commit order
+- **Full** — all tasks sorted by explicit order
+
 ## Full Workflow
 
 ```bash
