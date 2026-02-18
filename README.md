@@ -26,9 +26,9 @@ git commit -m "Implement validation"      --trailer "Task-Id=5"
 # Split into stacked branches
 git dispatch split source/feature --base master --name feat/feature
 # master
-# └── feat/feature/task-3
-#     └── feat/feature/task-4
-#         └── feat/feature/task-5
+# └── feat/feature/3
+#     └── feat/feature/4
+#         └── feat/feature/5
 
 # Continue working, then sync (auto-detects source from current branch)
 git dispatch sync
@@ -138,11 +138,11 @@ git dispatch split cyril/source/po-transactions \
 Result:
 ```
 master
-└── cyril/feat/po-transactions/task-3   (1 commit)
-    └── cyril/feat/po-transactions/task-4   (3 commits)
-        └── cyril/feat/po-transactions/task-5   (2 commits)
-            └── cyril/feat/po-transactions/task-9   (1 commit)
-                └── cyril/feat/po-transactions/task-10  (1 commit)
+└── cyril/feat/po-transactions/3   (1 commit)
+    └── cyril/feat/po-transactions/4   (3 commits)
+        └── cyril/feat/po-transactions/5   (2 commits)
+            └── cyril/feat/po-transactions/9   (1 commit)
+                └── cyril/feat/po-transactions/10  (1 commit)
 ```
 
 Each branch contains only its task's commits, stacked on top of the previous task. Reviewer reads one branch = one TRD task.
@@ -170,7 +170,7 @@ git dispatch sync
 Fix something on a task branch? Sync pushes it back to source:
 
 ```bash
-git checkout cyril/feat/po-transactions/task-5
+git checkout cyril/feat/po-transactions/5
 git commit -m "Fix permission check"
 git dispatch sync
 # Task-Id=5 trailer added automatically, synced back to source
@@ -186,7 +186,7 @@ Source stays demo-able. PRs stay clean. Reviewer reads commit-by-commit.
 git dispatch split <source> --name <prefix> [--base <base>] [--dry-run]
 ```
 
-Parse `Task-Id` trailers from source, group commits by task, create stacked branches named `<prefix>/task-N`. Each branch stacks on the previous.
+Parse `Task-Id` trailers from source, group commits by task, create stacked branches named `<prefix>/<task-id>`. Each branch stacks on the previous.
 
 ### sync
 
@@ -212,7 +212,7 @@ Show pending sync counts per task branch without applying changes. Quick preview
 ```bash
 git dispatch pr                  # auto-detect, create all PRs
 git dispatch pr [source]         # explicit source
-git dispatch pr --branch feat/task-4   # target a single branch
+git dispatch pr --branch feat/4        # target a single branch
 git dispatch pr --title "My PR" --body "Description"  # custom title/body
 git dispatch pr --push           # push branches first, then create PRs
 git dispatch pr --dry-run        # show what would be created

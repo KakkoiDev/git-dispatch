@@ -12,7 +12,7 @@ NEVER: Delete branches without confirmation, modify commits without Task-Id trai
 
 **TRD task number = Task-Id trailer = branch name = PR**
 
-One number flows through: TRD task 4 -> `--trailer "Task-Id=4"` -> `feat/task-4` branch -> PR for task 4.
+One number flows through: TRD task 4 -> `--trailer "Task-Id=4"` -> `feat/4` branch -> PR for task 4.
 
 ## Modes
 
@@ -57,7 +57,7 @@ Shows pending sync counts per task branch without applying changes.
 git dispatch pr --dry-run      # preview PR commands
 git dispatch pr --push         # push branches + create PRs
 git dispatch pr [source]       # explicit source
-git dispatch pr --branch feat/task-4                   # target single branch
+git dispatch pr --branch feat/4                        # target single branch
 git dispatch pr --title "My PR" --body "Description"   # custom title/body
 ```
 Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task. `--branch` targets a single branch. `--title`/`--body` override auto-generated values.

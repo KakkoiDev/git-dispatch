@@ -203,7 +203,7 @@ cmd_split() {
 
     local prev_branch="$base"
     for tid in "${task_ids[@]}"; do
-        local branch_name="${name}/task-${tid}"
+        local branch_name="${name}/${tid}"
         # Collect hashes for this task
         local -a hashes=()
         while IFS= read -r h; do
@@ -327,9 +327,9 @@ cmd_sync() {
     for task_branch in "${targets[@]}"; do
         echo -e "${CYAN}Syncing:${NC} $task_branch"
 
-        # Extract task-id from branch name (last segment after task-)
-        local task_id="${task_branch##*/task-}"
-        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${task_branch}'"
+        # Extract task-id from branch name (last path segment)
+        local task_id="${task_branch##*/}"
+        [[ -n "$task_id" ]] || die "Empty task ID in branch '${task_branch}'"
 
         # Source → task: commits in source for this task not yet in task branch
         local -a source_to_task=()
@@ -420,8 +420,8 @@ cmd_status() {
     echo ""
 
     for task_branch in "${targets[@]}"; do
-        local task_id="${task_branch##*/task-}"
-        [[ "$task_id" =~ ^[0-9]+$ ]] || die "Invalid task ID '${task_id}' in branch '${task_branch}'"
+        local task_id="${task_branch##*/}"
+        [[ -n "$task_id" ]] || die "Empty task ID in branch '${task_branch}'"
 
         # Source -> task: commits in source for this task not yet in task branch
         local source_to_task=0
@@ -717,7 +717,7 @@ WORKFLOW
   3. Continue working on source or task branches, then sync:
        git dispatch sync                                      # auto-detect source, sync all
        git dispatch sync source/feature                       # explicit source, sync all
-       git dispatch sync source/feature feat/task-3           # sync one task
+       git dispatch sync source/feature feat/feature/3       # sync one task
 
   4. View the stack:
        git dispatch tree
@@ -725,7 +725,7 @@ WORKFLOW
 COMMANDS
   split <source> --name <prefix> [--base <base>] [--dry-run]
       Parse Task-Id trailers from <source>, group commits by task, create stacked
-      branches named <prefix>/task-N. Each branch stacks on the previous.
+      branches named <prefix>/<task-id>. Each branch stacks on the previous.
 
   sync [source] [task-branch]
       Bidirectional sync using git cherry (patch-id comparison).

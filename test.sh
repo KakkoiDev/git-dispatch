@@ -89,41 +89,41 @@ test_split() {
 
     bash "$DISPATCH" split source/feature --base master --name feat
 
-    assert_branch_exists "feat/task-3" "task-3 branch created"
-    assert_branch_exists "feat/task-4" "task-4 branch created"
-    assert_branch_exists "feat/task-5" "task-5 branch created"
+    assert_branch_exists "feat/3" "task-3 branch created"
+    assert_branch_exists "feat/4" "task-4 branch created"
+    assert_branch_exists "feat/5" "task-5 branch created"
 
     # task-3: 1 commit
     local count3
-    count3=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
+    count3=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
     assert_eq "1" "$count3" "task-3 has 1 commit"
 
     # task-4: 1 (task-3) + 2 own = 3
     local count4
-    count4=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+    count4=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
     assert_eq "3" "$count4" "task-4 has 3 commits (stacked)"
 
     # task-5: 3 (task-3+4) + 1 own = 4
     local count5
-    count5=$(git log --oneline master..feat/task-5 | wc -l | tr -d ' ')
+    count5=$(git log --oneline master..feat/5 | wc -l | tr -d ' ')
     assert_eq "4" "$count5" "task-5 has 4 commits (stacked)"
 
     # Stack config
     local tasks_master
     tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-3" "$tasks_master" "master has task-3 in stack"
+    assert_eq "feat/3" "$tasks_master" "master has task-3 in stack"
 
     local tasks_3
-    tasks_3=$(git config --get-all branch.feat/task-3.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-4" "$tasks_3" "task-3 has task-4 in stack"
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/4" "$tasks_3" "task-3 has task-4 in stack"
 
     local tasks_4
-    tasks_4=$(git config --get-all branch.feat/task-4.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-5" "$tasks_4" "task-4 has task-5 in stack"
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/5" "$tasks_4" "task-4 has task-5 in stack"
 
     # Source association
     local src3
-    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    src3=$(git config branch.feat/3.dispatchsource 2>/dev/null || true)
     assert_eq "source/feature" "$src3" "task-3 linked to source"
 
     teardown
@@ -138,11 +138,11 @@ test_split_dry_run() {
     output=$(bash "$DISPATCH" split source/feature --base master --name feat --dry-run)
 
     assert_contains "$output" "[dry-run]" "dry-run output shown"
-    assert_contains "$output" "feat/task-3" "task-3 in dry-run output"
-    assert_contains "$output" "feat/task-4" "task-4 in dry-run output"
+    assert_contains "$output" "feat/3" "task-3 in dry-run output"
+    assert_contains "$output" "feat/4" "task-4 in dry-run output"
 
     # Branches should NOT exist
-    if git rev-parse --verify "feat/task-3" >/dev/null 2>&1; then
+    if git rev-parse --verify "feat/3" >/dev/null 2>&1; then
         echo -e "  ${RED}FAIL${NC} dry-run should not create branches"
         FAIL=$((FAIL + 1))
     else
@@ -164,9 +164,9 @@ test_tree() {
     tree=$(bash "$DISPATCH" tree master)
 
     assert_contains "$tree" "master" "tree shows master"
-    assert_contains "$tree" "feat/task-3" "tree shows task-3"
-    assert_contains "$tree" "feat/task-4" "tree shows task-4"
-    assert_contains "$tree" "feat/task-5" "tree shows task-5"
+    assert_contains "$tree" "feat/3" "tree shows task-3"
+    assert_contains "$tree" "feat/4" "tree shows task-4"
+    assert_contains "$tree" "feat/5" "tree shows task-5"
     assert_contains "$tree" "└──" "tree has branch characters"
 
     teardown
@@ -185,17 +185,17 @@ test_sync_source_to_task() {
     git commit -m "Fix DTO validation$(printf '\n\nTask-Id: 4')" -q
 
     local before
-    before=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+    before=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync source/feature feat/task-4
+    bash "$DISPATCH" sync source/feature feat/4
 
     local after
-    after=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+    after=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
     assert_eq "$((before + 1))" "$after" "new source commit cherry-picked into task"
 
     # Verify the file landed
-    if git show feat/task-4:fix.txt >/dev/null 2>&1; then
+    if git show feat/4:fix.txt >/dev/null 2>&1; then
         echo -e "  ${GREEN}PASS${NC} fix.txt exists in task-4"
         PASS=$((PASS + 1))
     else
@@ -214,14 +214,14 @@ test_sync_task_to_source() {
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     # Add a commit directly on task-3
-    git checkout feat/task-3 -q
+    git checkout feat/3 -q
     echo "hotfix" > hotfix.txt; git add hotfix.txt
     git commit -m "Hotfix alignment$(printf '\n\nTask-Id: 3')" -q
 
     local before
     before=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync source/feature feat/task-3
+    bash "$DISPATCH" sync source/feature feat/3
 
     local after
     after=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
@@ -248,14 +248,14 @@ test_sync_worktree() {
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     # Create worktree for task-4
-    git worktree add ../wt-task4 feat/task-4 -q
+    git worktree add ../wt-task4 feat/4 -q
 
     # Add commit to source for task-4
     git checkout source/feature -q
     echo "wt-fix" > wt-fix.txt; git add wt-fix.txt
     git commit -m "Worktree fix$(printf '\n\nTask-Id: 4')" -q
 
-    bash "$DISPATCH" sync source/feature feat/task-4
+    bash "$DISPATCH" sync source/feature feat/4
 
     # Verify via worktree
     if [[ -f "../wt-task4/wt-fix.txt" ]]; then
@@ -395,13 +395,13 @@ test_sync_auto_detect_from_source() {
     git commit -m "Auto detect fix$(printf '\n\nTask-Id: 3')" -q
 
     local before
-    before=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
+    before=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
 
     # Sync WITHOUT specifying source -- should auto-detect from current branch
     bash "$DISPATCH" sync
 
     local after
-    after=$(git log --oneline master..feat/task-3 | wc -l | tr -d ' ')
+    after=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
 
     assert_eq "$((before + 1))" "$after" "auto-detect from source synced commit"
 
@@ -421,15 +421,15 @@ test_sync_auto_detect_from_task() {
     git commit -m "Task auto fix$(printf '\n\nTask-Id: 4')" -q
 
     # Switch to task branch, sync without args
-    git checkout feat/task-4 -q
+    git checkout feat/4 -q
 
     local before
-    before=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+    before=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
     bash "$DISPATCH" sync
 
     local after
-    after=$(git log --oneline master..feat/task-4 | wc -l | tr -d ' ')
+    after=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
     assert_eq "$((before + 1))" "$after" "auto-detect from task synced commit"
 
@@ -444,15 +444,15 @@ test_sync_adds_trailer() {
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     # Commit on task branch WITHOUT Task-Id trailer
-    git checkout feat/task-3 -q
+    git checkout feat/3 -q
     echo "no-trailer" > notrailer.txt; git add notrailer.txt
     git commit --no-verify -m "Fix without trailer" -q
 
-    bash "$DISPATCH" sync source/feature feat/task-3
+    bash "$DISPATCH" sync source/feature feat/3
 
     # Check trailer was added on task branch commit (amended in-place)
     local task_trailer
-    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/task-3 | tr -d '[:space:]')
+    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/3 | tr -d '[:space:]')
     assert_eq "3" "$task_trailer" "Task-Id trailer added on task branch commit"
 
     # Check the cherry-picked commit on source also has Task-Id trailer
@@ -476,7 +476,7 @@ test_status() {
     git commit -m "Status fix$(printf '\n\nTask-Id: 4')" -q
 
     # Add a commit directly on task-3
-    git checkout feat/task-3 -q
+    git checkout feat/3 -q
     echo "task-fix" > task-fix.txt; git add task-fix.txt
     git commit -m "Task fix$(printf '\n\nTask-Id: 3')" -q
 
@@ -484,9 +484,9 @@ test_status() {
     output=$(bash "$DISPATCH" status source/feature)
 
     assert_contains "$output" "source/feature" "status shows source"
-    assert_contains "$output" "feat/task-3" "status shows task-3"
-    assert_contains "$output" "feat/task-4" "status shows task-4"
-    assert_contains "$output" "feat/task-5" "status shows task-5"
+    assert_contains "$output" "feat/3" "status shows task-3"
+    assert_contains "$output" "feat/4" "status shows task-4"
+    assert_contains "$output" "feat/5" "status shows task-5"
     # task-4 should have 1 pending source -> task
     assert_contains "$output" "1 pending" "status shows pending count"
     # task-5 should show up to date
@@ -508,7 +508,7 @@ test_status_auto_detect() {
     output=$(bash "$DISPATCH" status)
 
     assert_contains "$output" "source/feature" "auto-detect status shows source"
-    assert_contains "$output" "feat/task-3" "auto-detect status shows tasks"
+    assert_contains "$output" "feat/3" "auto-detect status shows tasks"
 
     teardown
 }
@@ -523,9 +523,9 @@ test_pr_dry_run() {
     local output
     output=$(bash "$DISPATCH" pr --dry-run source/feature)
 
-    assert_contains "$output" "gh pr create --base master --head feat/task-3" "PR for task-3 with correct base"
-    assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
-    assert_contains "$output" "gh pr create --base feat/task-4 --head feat/task-5" "PR for task-5 with correct base"
+    assert_contains "$output" "gh pr create --base master --head feat/3" "PR for task-3 with correct base"
+    assert_contains "$output" "gh pr create --base feat/3 --head feat/4" "PR for task-4 with correct base"
+    assert_contains "$output" "gh pr create --base feat/4 --head feat/5" "PR for task-5 with correct base"
 
     # Verify titles from first commit subjects
     assert_contains "$output" "Add enum" "PR title from first commit of task-3"
@@ -545,9 +545,9 @@ test_pr_dry_run_push() {
     local output
     output=$(bash "$DISPATCH" pr --dry-run --push source/feature)
 
-    assert_contains "$output" "git push -u origin feat/task-3" "push command for task-3"
-    assert_contains "$output" "git push -u origin feat/task-4" "push command for task-4"
-    assert_contains "$output" "git push -u origin feat/task-5" "push command for task-5"
+    assert_contains "$output" "git push -u origin feat/3" "push command for task-3"
+    assert_contains "$output" "git push -u origin feat/4" "push command for task-4"
+    assert_contains "$output" "git push -u origin feat/5" "push command for task-5"
 
     teardown
 }
@@ -563,11 +563,11 @@ test_reset() {
 
     # Verify config cleaned
     local src3
-    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    src3=$(git config branch.feat/3.dispatchsource 2>/dev/null || true)
     assert_eq "" "$src3" "task-3 dispatchsource removed"
 
     local src4
-    src4=$(git config branch.feat/task-4.dispatchsource 2>/dev/null || true)
+    src4=$(git config branch.feat/4.dispatchsource 2>/dev/null || true)
     assert_eq "" "$src4" "task-4 dispatchsource removed"
 
     local tasks_master
@@ -575,17 +575,17 @@ test_reset() {
     assert_eq "" "$tasks_master" "master dispatchtasks removed"
 
     local tasks_3
-    tasks_3=$(git config --get-all branch.feat/task-3.dispatchtasks 2>/dev/null || true)
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
     assert_eq "" "$tasks_3" "task-3 dispatchtasks removed"
 
     local tasks_4
-    tasks_4=$(git config --get-all branch.feat/task-4.dispatchtasks 2>/dev/null || true)
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
     assert_eq "" "$tasks_4" "task-4 dispatchtasks removed"
 
     # Branches should still exist
-    assert_branch_exists "feat/task-3" "task-3 still exists after reset"
-    assert_branch_exists "feat/task-4" "task-4 still exists after reset"
-    assert_branch_exists "feat/task-5" "task-5 still exists after reset"
+    assert_branch_exists "feat/3" "task-3 still exists after reset"
+    assert_branch_exists "feat/4" "task-4 still exists after reset"
+    assert_branch_exists "feat/5" "task-5 still exists after reset"
 
     teardown
 }
@@ -601,7 +601,7 @@ test_reset_branches() {
     bash "$DISPATCH" reset --force --branches source/feature
 
     # Branches should be deleted
-    if git rev-parse --verify "feat/task-3" >/dev/null 2>&1; then
+    if git rev-parse --verify "feat/3" >/dev/null 2>&1; then
         echo -e "  ${RED}FAIL${NC} task-3 should be deleted"
         FAIL=$((FAIL + 1))
     else
@@ -609,7 +609,7 @@ test_reset_branches() {
         PASS=$((PASS + 1))
     fi
 
-    if git rev-parse --verify "feat/task-4" >/dev/null 2>&1; then
+    if git rev-parse --verify "feat/4" >/dev/null 2>&1; then
         echo -e "  ${RED}FAIL${NC} task-4 should be deleted"
         FAIL=$((FAIL + 1))
     else
@@ -617,7 +617,7 @@ test_reset_branches() {
         PASS=$((PASS + 1))
     fi
 
-    if git rev-parse --verify "feat/task-5" >/dev/null 2>&1; then
+    if git rev-parse --verify "feat/5" >/dev/null 2>&1; then
         echo -e "  ${RED}FAIL${NC} task-5 should be deleted"
         FAIL=$((FAIL + 1))
     else
@@ -627,7 +627,7 @@ test_reset_branches() {
 
     # Config should also be clean
     local src3
-    src3=$(git config branch.feat/task-3.dispatchsource 2>/dev/null || true)
+    src3=$(git config branch.feat/3.dispatchsource 2>/dev/null || true)
     assert_eq "" "$src3" "config cleaned after reset --branches"
 
     teardown
@@ -646,13 +646,13 @@ test_sync_cherry_pick_conflict() {
     git commit -m "Conflict change$(printf '\n\nTask-Id: 3')" -q
 
     # Create conflicting commit on task-3 (different content in same file)
-    git checkout feat/task-3 -q
+    git checkout feat/3 -q
     echo "different" > file.txt; git add file.txt
     git commit -m "Conflicting fix$(printf '\n\nTask-Id: 3')" -q
 
     # Sync should fail with error message
     local output
-    if output=$(bash "$DISPATCH" sync source/feature feat/task-3 2>&1); then
+    if output=$(bash "$DISPATCH" sync source/feature feat/3 2>&1); then
         echo -e "  ${RED}FAIL${NC} sync should fail on cherry-pick conflict"
         FAIL=$((FAIL + 1))
     else
@@ -660,7 +660,7 @@ test_sync_cherry_pick_conflict() {
     fi
 
     # Branch should be clean (cherry-pick aborted)
-    git checkout feat/task-3 -q 2>/dev/null || true
+    git checkout feat/3 -q 2>/dev/null || true
     local status
     status=$(git status --porcelain)
     assert_eq "" "$status" "branch left clean after failed cherry-pick"
@@ -692,7 +692,7 @@ test_split_already_exists() {
     create_source
 
     # Pre-create a branch that split would create
-    git branch feat/task-3 master
+    git branch feat/3 master
 
     local output
     if output=$(bash "$DISPATCH" split source/feature --base master --name feat 2>&1); then
@@ -724,22 +724,24 @@ test_resolve_source_error_message() {
 }
 
 test_split_non_numeric_task_id() {
-    echo "=== test: non-numeric task ID rejected ==="
+    echo "=== test: non-numeric task ID accepted ==="
     setup
-    create_source
 
-    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+    git checkout -b source/alpha master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add alpha$(printf '\n\nTask-Id: task-6')" -q
 
-    # Manually create a dispatch task with non-numeric task ID
-    git branch feat/task-abc master
-    git config "branch.feat/task-abc.dispatchsource" "source/feature"
+    bash "$DISPATCH" split source/alpha --base master --name feat
 
-    local output
-    if output=$(bash "$DISPATCH" sync source/feature feat/task-abc 2>&1); then
-        echo -e "  ${RED}FAIL${NC} sync should reject non-numeric task ID"
+    assert_branch_exists "feat/task-6" "non-numeric task-6 branch created"
+
+    # Verify no double prefix (should NOT be feat/task-task-6)
+    if git rev-parse --verify "feat/task-task-6" >/dev/null 2>&1; then
+        echo -e "  ${RED}FAIL${NC} double prefix feat/task-task-6 should not exist"
         FAIL=$((FAIL + 1))
     else
-        assert_contains "$output" "Invalid task ID" "error mentions invalid task ID"
+        echo -e "  ${GREEN}PASS${NC} no double prefix"
+        PASS=$((PASS + 1))
     fi
 
     teardown
@@ -777,12 +779,12 @@ test_pr_single_branch() {
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-4 source/feature)
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/4 source/feature)
 
-    assert_contains "$output" "gh pr create --base feat/task-3 --head feat/task-4" "PR for task-4 with correct base"
+    assert_contains "$output" "gh pr create --base feat/3 --head feat/4" "PR for task-4 with correct base"
 
     # Should NOT contain task-3 or task-5 PR creation
-    if [[ "$output" == *"--head feat/task-3"* ]]; then
+    if [[ "$output" == *"--head feat/3"* ]]; then
         echo -e "  ${RED}FAIL${NC} should not create PR for task-3"
         FAIL=$((FAIL + 1))
     else
@@ -790,7 +792,7 @@ test_pr_single_branch() {
         PASS=$((PASS + 1))
     fi
 
-    if [[ "$output" == *"--head feat/task-5"* ]]; then
+    if [[ "$output" == *"--head feat/5"* ]]; then
         echo -e "  ${RED}FAIL${NC} should not create PR for task-5"
         FAIL=$((FAIL + 1))
     else
@@ -809,7 +811,7 @@ test_pr_custom_title_body() {
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" pr --dry-run --branch feat/task-3 --title "Custom PR Title" --body "Custom body text" source/feature)
+    output=$(bash "$DISPATCH" pr --dry-run --branch feat/3 --title "Custom PR Title" --body "Custom body text" source/feature)
 
     assert_contains "$output" "Custom PR Title" "custom title appears in dry-run"
     assert_contains "$output" "Custom body text" "custom body appears in dry-run"
