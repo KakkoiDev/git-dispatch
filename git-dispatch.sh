@@ -177,24 +177,57 @@ cmd_split() {
     commit_file=$(mktemp)
     trap "rm -f '$commit_file'" RETURN
 
-    git log --reverse --format="%H %(trailers:key=Task-Id,valueonly)" "$base..$source" \
-        | grep -v '^$' > "$commit_file" || true
+    while IFS= read -r _h; do
+        _t=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _o=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" "$_h" | tr -d '[:space:]')
+        echo "$_h $_t $_o"
+    done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
     [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
 
     # Validate all commits have Task-Id
-    while IFS= read -r line; do
-        local hash="${line%% *}"
-        local task="${line#* }"
-        task="${task## }"
-        [[ -z "$task" || "$task" == "$hash" ]] && die "Commit $hash has no Task-Id trailer"
+    while read -r hash task _order; do
+        [[ -z "$task" ]] && die "Commit $hash has no Task-Id trailer"
     done < "$commit_file"
 
-    # Ordered unique task ids (first appearance order)
+    # Ordered unique task ids (Task-Order aware: ordered tasks first, then unordered in commit order)
+    local order_output
+    if ! order_output=$(awk '
+        !seen[$2]++ {
+            task = $2; order = $3; tasks[++n] = task
+            if (order != "") {
+                if (order in order_used) {
+                    print "Duplicate Task-Order " order " on tasks " order_used[order] " and " task
+                    err = 1
+                }
+                order_used[order] = task; task_order[task] = order + 0
+            }
+        }
+        END {
+            if (err) exit 1
+            for (i = 1; i <= n; i++) {
+                t = tasks[i]
+                if (t in task_order) { ordered[++oc] = t; ord_val[oc] = task_order[t] }
+                else { unordered[++uc] = t }
+            }
+            for (i = 2; i <= oc; i++) {
+                key = ordered[i]; kv = ord_val[i]; j = i - 1
+                while (j > 0 && ord_val[j] > kv) {
+                    ordered[j+1] = ordered[j]; ord_val[j+1] = ord_val[j]; j--
+                }
+                ordered[j+1] = key; ord_val[j+1] = kv
+            }
+            for (i = 1; i <= oc; i++) print ordered[i]
+            for (i = 1; i <= uc; i++) print unordered[i]
+        }
+    ' "$commit_file"); then
+        die "$order_output"
+    fi
+
     local -a task_ids=()
     while IFS= read -r tid; do
         task_ids+=("$tid")
-    done < <(awk '{print $2}' "$commit_file" | awk '!seen[$0]++')
+    done <<< "$order_output"
 
     echo -e "${CYAN}Source:${NC} $source"
     echo -e "${CYAN}Base:${NC}   $base"
@@ -759,8 +792,12 @@ COMMANDS
       Show this message.
 
 TRAILERS
-  Commits use native git trailers for task linking:
+  Task-Id (required):
     git commit -m "message" --trailer "Task-Id=3"
+
+  Task-Order (optional): Controls stack position during split. Tasks with
+  Task-Order sort first (ascending), unordered tasks follow in commit order.
+    git commit -m "fix" --trailer "Task-Id=3" --trailer "Task-Order=1"
 
   The hook (install with `git dispatch hook install`) rejects commits without
   a Task-Id trailer.

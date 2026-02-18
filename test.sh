@@ -837,6 +837,86 @@ test_pr_branch_not_found() {
     teardown
 }
 
+test_split_task_order() {
+    echo "=== test: split with Task-Order ==="
+    setup
+
+    git checkout -b source/ordered master -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    bash "$DISPATCH" split source/ordered --base master --name feat
+
+    assert_branch_exists "feat/task-A" "task-A branch created"
+    assert_branch_exists "feat/task-B" "task-B branch created"
+
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-A" "$tasks_master" "master -> task-A (order 1 first)"
+
+    local tasks_a
+    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (order 2 second)"
+
+    teardown
+}
+
+test_split_task_order_partial() {
+    echo "=== test: split with partial Task-Order ==="
+    setup
+
+    git checkout -b source/partial master -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 1')" -q
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B')" -q
+
+    bash "$DISPATCH" split source/partial --base master --name feat
+
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-C" "$tasks_master" "master -> task-C (ordered first)"
+
+    local tasks_c
+    tasks_c=$(git config --get-all branch.feat/task-C.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-A" "$tasks_c" "task-C -> task-A (unordered, commit order)"
+
+    local tasks_a
+    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (unordered, commit order)"
+
+    teardown
+}
+
+test_split_no_task_order_backward_compat() {
+    echo "=== test: split without Task-Order (backward compat) ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat
+
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/3" "$tasks_master" "master -> task-3 (commit order preserved)"
+
+    local tasks_3
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/4" "$tasks_3" "task-3 -> task-4 (commit order preserved)"
+
+    local tasks_4
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/5" "$tasks_4" "task-4 -> task-5 (commit order preserved)"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -872,6 +952,9 @@ test_install_chmod
 test_pr_single_branch
 test_pr_custom_title_body
 test_pr_branch_not_found
+test_split_task_order
+test_split_task_order_partial
+test_split_no_task_order_backward_compat
 
 echo ""
 echo "======================="
