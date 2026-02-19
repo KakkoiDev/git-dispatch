@@ -696,6 +696,15 @@ cmd_push() {
     echo ""
 
     for task_branch in "${ordered[@]}"; do
+        # Skip if local matches remote (nothing to push)
+        local local_head remote_head
+        local_head=$(git rev-parse "$task_branch" 2>/dev/null || true)
+        remote_head=$(git rev-parse "origin/$task_branch" 2>/dev/null || true)
+        if [[ -n "$remote_head" && "$local_head" == "$remote_head" ]] && ! $force; then
+            echo "  $task_branch: up to date"
+            continue
+        fi
+
         if $dry_run; then
             echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $task_branch"
         else
