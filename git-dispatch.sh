@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+# git aliases with ! set GIT_DIR which overrides git -C; unset to fix worktree operations
+unset GIT_DIR GIT_WORK_TREE
+
 # git-dispatch: Split a source branch into stacked task branches and keep them in sync.
 
 RED='\033[0;31m'
@@ -131,23 +134,45 @@ cherry_pick_into() {
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
+    local -a git_cmd=(git)
+    [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
 
-    if [[ -n "$wt" ]]; then
-        if ! git -C "$wt" cherry-pick -x "${hashes[@]}"; then
-            git -C "$wt" cherry-pick --abort 2>/dev/null || true
-            die "Cherry-pick into $branch failed. Retry manually: git -C $wt cherry-pick -x ${hashes[*]}"
-        fi
-    else
+    if [[ -z "$wt" ]]; then
         local orig
         orig=$(current_branch)
         git checkout "$branch" --quiet
-        if ! git cherry-pick -x "${hashes[@]}"; then
-            git cherry-pick --abort 2>/dev/null || true
-            git checkout "$orig" --quiet
-            die "Cherry-pick into $branch failed. Retry manually: git checkout $branch && git cherry-pick -x ${hashes[*]}"
-        fi
-        git checkout "$orig" --quiet
     fi
+
+    # Stash dirty working tree (staged + unstaged) so cherry-pick can proceed
+    local stashed=false
+    if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
+        "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
+        stashed=true
+    fi
+
+    for hash in "${hashes[@]}"; do
+        if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
+            # Check if cherry-pick is actually in progress (vs aborted entirely)
+            if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                # Cherry-pick in progress but empty: patch already applied
+                if "${git_cmd[@]}" diff --cached --quiet; then
+                    warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                    "${git_cmd[@]}" cherry-pick --skip
+                    continue
+                fi
+            fi
+            # Real failure: abort and die
+            "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+            $stashed && "${git_cmd[@]}" stash pop --quiet
+            [[ -z "$wt" ]] && git checkout "$orig" --quiet
+            local retry="git -C $wt cherry-pick -x ${hashes[*]}"
+            [[ -z "$wt" ]] && retry="git checkout $branch && git cherry-pick -x ${hashes[*]}"
+            die "Cherry-pick into $branch failed. Retry manually: $retry"
+        fi
+    done
+
+    $stashed && "${git_cmd[@]}" stash pop --quiet
+    [[ -z "$wt" ]] && git checkout "$orig" --quiet
 }
 
 # ---------- split ----------
