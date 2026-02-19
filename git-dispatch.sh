@@ -540,6 +540,53 @@ cmd_status() {
     done
 }
 
+# ---------- push ----------
+
+cmd_push() {
+    local source_arg="" dry_run=false branch_filter=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            --branch)  branch_filter="$2"; shift 2 ;;
+            -*)        die "Unknown flag: $1" ;;
+            *)         source_arg="$1"; shift ;;
+        esac
+    done
+
+    local source
+    source=$(resolve_source "$source_arg")
+
+    local -a ordered=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && ordered+=("$c")
+    done < <(find_dispatch_tasks "$source" | order_by_stack)
+
+    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+
+    if [[ -n "$branch_filter" ]]; then
+        local found=false
+        for c in "${ordered[@]}"; do
+            [[ "$c" == "$branch_filter" ]] && { found=true; break; }
+        done
+        $found || die "Branch '$branch_filter' not found in dispatch stack"
+        ordered=("$branch_filter")
+    fi
+
+    echo -e "${CYAN}Source:${NC} $source"
+    echo ""
+
+    for task_branch in "${ordered[@]}"; do
+        if $dry_run; then
+            echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $task_branch"
+        else
+            git push -u origin "$task_branch" 2>/dev/null && \
+                info "  Pushed $task_branch" || \
+                warn "  Push failed for $task_branch"
+        fi
+    done
+}
+
 # ---------- pr ----------
 
 cmd_pr() {
@@ -788,6 +835,11 @@ COMMANDS
       Show pending sync counts per task branch without applying changes.
       Quick check before running sync.
 
+  push [source] [--branch <name>] [--dry-run]
+      Push task branches to origin. Walks the dispatch stack in order.
+      --branch targets a single branch instead of all tasks.
+      --dry-run shows what would be pushed without doing it.
+
   pr [source] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]
       Create stacked PRs with correct --base flags via gh CLI.
       Walks the dispatch stack in order. --push pushes branches first.
@@ -833,6 +885,7 @@ main() {
         split)        cmd_split "$@" ;;
         sync)         cmd_sync "$@" ;;
         status)       cmd_status "$@" ;;
+        push)         cmd_push "$@" ;;
         pr)           cmd_pr "$@" ;;
         reset)        cmd_reset "$@" ;;
         tree)         cmd_tree "$@" ;;

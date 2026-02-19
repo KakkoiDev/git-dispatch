@@ -52,6 +52,13 @@ git dispatch status [source]   # explicit source
 
 Shows pending sync counts per task branch without applying changes.
 
+**Push branches** (after split):
+```bash
+git dispatch push              # push all task branches to origin
+git dispatch push --branch feat/4  # push a single branch
+git dispatch push --dry-run    # preview push commands
+```
+
 **Create PRs** (after split):
 ```bash
 git dispatch pr --dry-run      # preview PR commands

@@ -1115,6 +1115,40 @@ test_pr_stack_order() {
     teardown
 }
 
+test_push_dry_run() {
+    echo "=== test: push --dry-run ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" push --dry-run source/feature)
+
+    assert_contains "$output" "git push -u origin feat/3" "push dry-run shows task-3"
+    assert_contains "$output" "git push -u origin feat/4" "push dry-run shows task-4"
+    assert_contains "$output" "git push -u origin feat/5" "push dry-run shows task-5"
+
+    teardown
+}
+
+test_push_branch_filter() {
+    echo "=== test: push --dry-run --branch targets single branch ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" push --dry-run --branch feat/4 source/feature)
+
+    assert_contains "$output" "git push -u origin feat/4" "push shows target branch"
+    assert_not_contains "$output" "feat/3" "push excludes task-3"
+    assert_not_contains "$output" "feat/5" "push excludes task-5"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1160,6 +1194,8 @@ test_status_stack_order
 test_status_no_false_pending
 test_sync_stack_order
 test_pr_stack_order
+test_push_dry_run
+test_push_branch_filter
 
 echo ""
 echo "======================="
