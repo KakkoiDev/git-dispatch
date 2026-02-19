@@ -917,6 +917,92 @@ test_split_no_task_order_backward_compat() {
     teardown
 }
 
+test_status_stack_order() {
+    echo "=== test: status shows branches in stack order ==="
+    setup
+
+    # Create source with task IDs that sort differently alphabetically vs numerically
+    # Alpha order: 10, 20, 3 — Stack order: 3, 10, 20
+    git checkout -b source/order master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+
+    bash "$DISPATCH" split source/order --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" status source/order | sed $'s/\033\\[[0-9;]*m//g')
+
+    # Extract branch names in order of appearance
+    local order
+    order=$(echo "$output" | grep 'feat/' | awk '{print $1}' | tr '\n' ' ')
+
+    assert_eq "feat/3 feat/10 feat/20 " "$order" "status lists branches in stack order, not alphabetical"
+
+    teardown
+}
+
+test_sync_stack_order() {
+    echo "=== test: sync processes branches in stack order ==="
+    setup
+
+    git checkout -b source/order master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+
+    bash "$DISPATCH" split source/order --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" sync source/order 2>&1)
+
+    # Extract "Syncing: <branch>" lines in order
+    local order
+    order=$(echo "$output" | grep 'Syncing:' | awk '{print $2}' | tr '\n' ' ')
+
+    assert_eq "feat/3 feat/10 feat/20 " "$order" "sync processes branches in stack order"
+
+    teardown
+}
+
+test_pr_stack_order() {
+    echo "=== test: pr creates PRs in stack order ==="
+    setup
+
+    git checkout -b source/order master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+
+    bash "$DISPATCH" split source/order --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run source/order)
+
+    # Extract --head values in order
+    local order
+    order=$(echo "$output" | grep '\-\-head' | sed 's/.*--head //' | awk '{print $1}' | tr -d '"' | tr '\n' ' ')
+
+    assert_eq "feat/3 feat/10 feat/20 " "$order" "pr creates PRs in stack order"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -955,6 +1041,9 @@ test_pr_branch_not_found
 test_split_task_order
 test_split_task_order_partial
 test_split_no_task_order_backward_compat
+test_status_stack_order
+test_sync_stack_order
+test_pr_stack_order
 
 echo ""
 echo "======================="
