@@ -651,7 +651,7 @@ cmd_resolve() {
         fi
     done <<< "$changed_files"
 
-    git commit -m "fix: resolve merge conflicts with base" --trailer "Task-Id=$task_id" -q
+    git commit --no-verify -m "fix: resolve merge conflicts with base" --trailer "Task-Id=$task_id" -q
     info "Resolved: merge replaced with regular commit (Task-Id=$task_id)"
 }
 
