@@ -34,6 +34,23 @@ git dispatch split source/feature --base master --name feat/feature
 git dispatch sync
 ```
 
+## Pipeline Overview
+
+```mermaid
+flowchart LR
+    TRD["📄 TRD\n(Task numbers)"]
+    SRC["🔀 Source Branch\n(tagged commits)"]
+    STK["📚 Stacked Branches\n(one per task)"]
+    PRs["🔗 Stacked PRs\n(chained bases)"]
+
+    TRD -- "vibe-code" --> SRC
+    SRC -- "split" --> STK
+    STK -- "push + pr" --> PRs
+
+    STK -- "sync" --> SRC
+    SRC -- "sync" --> STK
+```
+
 ## Commands
 
 | Command | Description |
@@ -205,6 +222,30 @@ git dispatch split <source> --name <prefix> [--base <base>] [--dry-run]
 
 Parse `Task-Id` trailers from source, group commits by task, create stacked branches named `<prefix>/<task-id>`. Each branch stacks on the previous.
 
+```mermaid
+gitGraph
+    commit id: "master"
+    branch source
+    commit id: "A [Task-Id=3]"
+    commit id: "B [Task-Id=4]"
+    commit id: "C [Task-Id=4]"
+    commit id: "D [Task-Id=5]"
+```
+
+After `split`:
+
+```mermaid
+gitGraph
+    commit id: "master"
+    branch task/3
+    commit id: "A"
+    branch task/4
+    commit id: "B"
+    commit id: "C"
+    branch task/5
+    commit id: "D"
+```
+
 ### sync
 
 ```bash
@@ -214,6 +255,17 @@ git dispatch sync [source] <task>    # sync one task
 ```
 
 Bidirectional sync using `git cherry` (patch-id comparison). Source->task: new commits for the task appear in the task branch. Task->source: fixes flow back (Task-Id trailer added if missing). Auto-detects source from current branch context.
+
+```mermaid
+flowchart LR
+    subgraph "Source → Task"
+        S1["source: new commit\n[Task-Id=4]"] -- "cherry-pick" --> T1["task/4"]
+    end
+
+    subgraph "Task → Source"
+        T2["task/4: fix commit"] -- "cherry-pick\n(Task-Id added)" --> S2["source"]
+    end
+```
 
 ### status
 
@@ -249,6 +301,16 @@ git dispatch pr --dry-run        # show what would be created
 
 Create stacked PRs with correct `--base` flags via `gh` CLI. Walks the dispatch stack in order. PR title defaults to the first commit subject of each task. `--branch` targets a single branch instead of all tasks. `--title` and `--body` override the auto-generated title and empty body. Requires `gh` CLI.
 
+```mermaid
+flowchart TB
+    PR3["PR task/3\nbase: master"] --> PR4["PR task/4\nbase: task/3"]
+    PR4 --> PR5["PR task/5\nbase: task/4"]
+
+    style PR3 fill:#d4edda,stroke:#28a745
+    style PR4 fill:#cce5ff,stroke:#007bff
+    style PR5 fill:#fff3cd,stroke:#ffc107
+```
+
 ### reset
 
 ```bash
@@ -280,6 +342,16 @@ Install three hooks (per-repo):
 - **`commit-msg`** — rejects commits without a `Task-Id` trailer
 - **`post-merge`** — auto-runs `resolve` after merge on dispatch task branches
 
+```mermaid
+flowchart TD
+    GC["git commit"] --> PCM["prepare-commit-msg\nauto-carry Task-Id"]
+    PCM --> CM["commit-msg\nreject if no Task-Id"]
+    CM -->|pass| OK["Commit created"]
+    CM -->|fail| REJECT["Commit rejected"]
+
+    GM["git merge\n(on task branch)"] --> PM["post-merge\nauto-resolve"]
+```
+
 To enforce `Task-Id` globally across all repos:
 
 ```bash
@@ -308,6 +380,25 @@ git dispatch resolve
 Convert a merge commit (HEAD) on a task branch into a regular commit with `Task-Id` trailer. Use after merging master (or any base) to resolve conflicts on a task branch.
 
 `git cherry` (used by `status` and `sync`) ignores merge commits, making conflict resolutions invisible to dispatch. `resolve` extracts only the changes to task-owned files and replays them as a regular commit. Clean merges (no task-file changes) are simply removed.
+
+```mermaid
+gitGraph
+    commit id: "A"
+    commit id: "B"
+    commit id: "C"
+    branch master-merge
+    commit id: "M (merge)" type: HIGHLIGHT
+```
+
+After `resolve`:
+
+```mermaid
+gitGraph
+    commit id: "A"
+    commit id: "B"
+    commit id: "C"
+    commit id: "R (resolve)" type: HIGHLIGHT
+```
 
 ```bash
 # Typical workflow
