@@ -313,6 +313,48 @@ find_dispatch_tasks() {
     printf '%s\n' "${found[@]}"
 }
 
+# Order tasks by walking the dispatch stack hierarchy.
+# Reads task names from stdin, writes them in stack order to stdout.
+order_by_stack() {
+    local -a tasks=()
+    while IFS= read -r t; do [[ -n "$t" ]] && tasks+=("$t"); done
+
+    # Find base branch (parent of first task that isn't itself a dispatch task)
+    local base=""
+    for task in "${tasks[@]}"; do
+        local parent
+        parent=$(find_stack_parent "$task")
+        local parent_is_task=false
+        for c in "${tasks[@]}"; do
+            [[ "$c" == "$parent" ]] && { parent_is_task=true; break; }
+        done
+        if ! $parent_is_task; then
+            base="$parent"
+            break
+        fi
+    done
+
+    if [[ -z "$base" ]]; then
+        printf '%s\n' "${tasks[@]}"
+        return
+    fi
+
+    # Walk from base through dispatch tasks in stack order
+    local current="$base"
+    while true; do
+        local next=""
+        for c in "${tasks[@]}"; do
+            if get_tasks "$current" | grep -Fxq "$c"; then
+                next="$c"
+                break
+            fi
+        done
+        [[ -n "$next" ]] || break
+        echo "$next"
+        current="$next"
+    done
+}
+
 # Find the parent branch in the dispatch stack for a given branch
 find_stack_parent() {
     local branch="$1"
@@ -342,14 +384,14 @@ cmd_sync() {
     local source
     source=$(resolve_source "$source_arg")
 
-    # Resolve task branches to sync
+    # Resolve task branches to sync (in stack order)
     local -a targets=()
     if [[ -n "$task" ]]; then
         targets=("$task")
     else
         while IFS= read -r c; do
             [[ -n "$c" ]] && targets+=("$c")
-        done < <(find_dispatch_tasks "$source")
+        done < <(find_dispatch_tasks "$source" | order_by_stack)
     fi
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
@@ -445,7 +487,7 @@ cmd_status() {
     local -a targets=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && targets+=("$c")
-    done < <(find_dispatch_tasks "$source")
+    done < <(find_dispatch_tasks "$source" | order_by_stack)
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -513,49 +555,16 @@ cmd_pr() {
     local source
     source=$(resolve_source "$source_arg")
 
-    local -a tasks=()
+    local -a ordered=()
     while IFS= read -r c; do
-        [[ -n "$c" ]] && tasks+=("$c")
-    done < <(find_dispatch_tasks "$source")
+        [[ -n "$c" ]] && ordered+=("$c")
+    done < <(find_dispatch_tasks "$source" | order_by_stack)
 
-    [[ ${#tasks[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
     if ! $dry_run && ! command -v gh &>/dev/null; then
         die "gh CLI is required. Install: https://cli.github.com"
     fi
-
-    # Find base branch (parent of first task that isn't itself a dispatch task)
-    local base=""
-    for task in "${tasks[@]}"; do
-        local parent
-        parent=$(find_stack_parent "$task")
-        local parent_is_task=false
-        for c in "${tasks[@]}"; do
-            [[ "$c" == "$parent" ]] && { parent_is_task=true; break; }
-        done
-        if ! $parent_is_task; then
-            base="$parent"
-            break
-        fi
-    done
-
-    [[ -n "$base" ]] || die "Cannot determine base branch"
-
-    # Walk from base through dispatch tasks in stack order
-    local -a ordered=()
-    local current="$base"
-    while true; do
-        local next=""
-        for c in "${tasks[@]}"; do
-            if get_tasks "$current" | grep -Fxq "$c"; then
-                next="$c"
-                break
-            fi
-        done
-        [[ -n "$next" ]] || break
-        ordered+=("$next")
-        current="$next"
-    done
 
     # Filter to single branch if --branch is set
     if [[ -n "$branch_filter" ]]; then
