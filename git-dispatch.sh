@@ -601,8 +601,9 @@ cmd_resolve() {
     fi
 
     # Save refs
-    local first_parent merge_head
+    local first_parent second_parent merge_head
     first_parent=$(git rev-parse HEAD^1)
+    second_parent=$(git rev-parse HEAD^2)
     merge_head=$(git rev-parse HEAD)
 
     # Find task-owned files: all files touched between stack parent and first_parent
@@ -614,8 +615,7 @@ cmd_resolve() {
     task_files=$(git log --format="" --name-only "${stack_parent}..${first_parent}" | sort -u | sed '/^$/d')
 
     if [[ -z "$task_files" ]]; then
-        git reset --hard "$first_parent" -q
-        info "Removed clean merge (no task files)"
+        info "Clean merge, no resolution needed"
         return
     fi
 
@@ -630,14 +630,15 @@ cmd_resolve() {
     changed_files=$(echo "$changed_files" | sed '/^$/d')
 
     if [[ -z "$changed_files" ]]; then
-        git reset --hard "$first_parent" -q
-        info "Removed clean merge (no conflict resolutions needed)"
+        info "Clean merge, no resolution needed"
         return
     fi
 
-    # Reset to pre-merge state and apply resolution as regular commit
+    # Create resolution commit + clean re-merge
+    # 1. Reset to pre-merge state
     git reset --hard "$first_parent" -q
 
+    # 2. Apply changed task files as resolution commit
     while IFS= read -r f; do
         [[ -z "$f" ]] && continue
         local dir
@@ -652,7 +653,11 @@ cmd_resolve() {
     done <<< "$changed_files"
 
     git commit --no-verify -m "fix: resolve merge conflicts with base" --trailer "Task-Id=$task_id" -q
-    info "Resolved: merge replaced with regular commit (Task-Id=$task_id)"
+
+    # 3. Re-merge with -X ours (no conflicts since resolution already applied)
+    git merge -X ours "$second_parent" --no-verify --no-edit -q
+
+    info "Resolved: resolution commit + clean re-merge (Task-Id=$task_id)"
 }
 
 # ---------- push ----------

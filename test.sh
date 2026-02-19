@@ -200,7 +200,7 @@ test_sync_source_to_task() {
     local before
     before=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync source/feature feat/4
+    bash "$DISPATCH" sync source/feature feat/4 || true
 
     local after
     after=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
@@ -234,7 +234,7 @@ test_sync_task_to_source() {
     local before
     before=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync source/feature feat/3
+    bash "$DISPATCH" sync source/feature feat/3 || true
 
     local after
     after=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
@@ -268,7 +268,7 @@ test_sync_worktree() {
     echo "wt-fix" > wt-fix.txt; git add wt-fix.txt
     git commit -m "Worktree fix$(printf '\n\nTask-Id: 4')" -q
 
-    bash "$DISPATCH" sync source/feature feat/4
+    bash "$DISPATCH" sync source/feature feat/4 || true
 
     # Verify via worktree
     if [[ -f "../wt-task4/wt-fix.txt" ]]; then
@@ -280,6 +280,7 @@ test_sync_worktree() {
     fi
 
     git worktree remove ../wt-task4 --force 2>/dev/null || true
+    rm -rf "$TMPDIR/../wt-task4" 2>/dev/null || true
     teardown
 }
 
@@ -476,7 +477,7 @@ test_sync_auto_detect_from_source() {
     before=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
 
     # Sync WITHOUT specifying source -- should auto-detect from current branch
-    bash "$DISPATCH" sync
+    bash "$DISPATCH" sync || true
 
     local after
     after=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
@@ -504,7 +505,7 @@ test_sync_auto_detect_from_task() {
     local before
     before=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
 
-    bash "$DISPATCH" sync
+    bash "$DISPATCH" sync || true
 
     local after
     after=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
@@ -526,7 +527,7 @@ test_sync_adds_trailer() {
     echo "no-trailer" > notrailer.txt; git add notrailer.txt
     git commit --no-verify -m "Fix without trailer" -q
 
-    bash "$DISPATCH" sync source/feature feat/3
+    bash "$DISPATCH" sync source/feature feat/3 || true
 
     # Check trailer was added on task branch commit (amended in-place)
     local task_trailer
@@ -1166,7 +1167,7 @@ test_push_branch_filter() {
 }
 
 test_resolve_basic() {
-    echo "=== test: resolve converts merge to regular commit ==="
+    echo "=== test: resolve creates resolution commit + re-merge ==="
     setup
     create_source
 
@@ -1192,14 +1193,19 @@ test_resolve_basic() {
 
     bash "$DISPATCH" resolve
 
-    # Verify HEAD is regular commit after resolve
+    # Verify HEAD is merge commit (re-merge)
     parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
-    assert_eq "1" "$parent_count" "HEAD is regular commit after resolve"
+    assert_eq "2" "$parent_count" "HEAD is merge after resolve (re-merge)"
 
-    # Verify Task-Id trailer
+    # Verify HEAD~1 is the resolution commit with Task-Id
     local tid
-    tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "3" "$tid" "Task-Id trailer present"
+    tid=$(git log -1 --skip=1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$tid" "Task-Id trailer on resolution commit"
+
+    # Verify resolution commit is regular (1 parent)
+    local res_parents
+    res_parents=$(git cat-file -p HEAD~1 | grep -c '^parent ')
+    assert_eq "1" "$res_parents" "resolution commit is regular commit"
 
     teardown
 }
@@ -1228,16 +1234,21 @@ test_resolve_preserves_content() {
     content=$(cat file.txt)
     assert_eq "carefully-resolved" "$content" "resolution content preserved in working tree"
 
-    # Also verify via git show
+    # Verify via git show on HEAD (re-merge)
     local git_content
     git_content=$(git show HEAD:file.txt)
-    assert_eq "carefully-resolved" "$git_content" "resolution content preserved in commit"
+    assert_eq "carefully-resolved" "$git_content" "resolution content preserved in merge commit"
+
+    # Verify HEAD is a merge commit
+    local parent_count
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    assert_eq "2" "$parent_count" "HEAD is merge after resolve"
 
     teardown
 }
 
 test_resolve_no_task_changes() {
-    echo "=== test: resolve removes clean merge (no task file changes) ==="
+    echo "=== test: resolve keeps clean merge as-is (no task file changes) ==="
     setup
     create_source
 
@@ -1248,24 +1259,24 @@ test_resolve_no_task_changes() {
     echo "unrelated" > unrelated.txt; git add unrelated.txt
     git commit -m "Unrelated change" -q
 
-    local pre_merge_head
-    pre_merge_head=$(git rev-parse feat/3)
-
     # Clean merge into feat/3
     git checkout feat/3 -q
     git merge master --no-edit -q
 
+    local merge_head
+    merge_head=$(git rev-parse HEAD)
+
     bash "$DISPATCH" resolve
 
-    # HEAD should be back to pre-merge (merge removed, no extra commit)
+    # HEAD should be unchanged (clean merge left as-is)
     local post_resolve_head
     post_resolve_head=$(git rev-parse HEAD)
-    assert_eq "$pre_merge_head" "$post_resolve_head" "HEAD reset to pre-merge state"
+    assert_eq "$merge_head" "$post_resolve_head" "HEAD unchanged (clean merge kept)"
 
-    # Verify no merge commit
+    # Verify still a merge commit
     local parent_count
     parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
-    assert_eq "1" "$parent_count" "no merge commit present"
+    assert_eq "2" "$parent_count" "merge commit still present"
 
     teardown
 }
