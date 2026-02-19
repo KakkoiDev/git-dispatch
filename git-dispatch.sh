@@ -543,12 +543,13 @@ cmd_status() {
 # ---------- push ----------
 
 cmd_push() {
-    local source_arg="" dry_run=false branch_filter=""
+    local source_arg="" dry_run=false branch_filter="" force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run) dry_run=true; shift ;;
             --branch)  branch_filter="$2"; shift 2 ;;
+            --force)   force=true; shift ;;
             -*)        die "Unknown flag: $1" ;;
             *)         source_arg="$1"; shift ;;
         esac
@@ -573,14 +574,17 @@ cmd_push() {
         ordered=("$branch_filter")
     fi
 
+    local -a push_args=(-u origin)
+    $force && push_args+=(--force-with-lease)
+
     echo -e "${CYAN}Source:${NC} $source"
     echo ""
 
     for task_branch in "${ordered[@]}"; do
         if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $task_branch"
+            echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $task_branch"
         else
-            git push -u origin "$task_branch" 2>/dev/null && \
+            git push "${push_args[@]}" "$task_branch" 2>/dev/null && \
                 info "  Pushed $task_branch" || \
                 warn "  Push failed for $task_branch"
         fi
@@ -835,9 +839,10 @@ COMMANDS
       Show pending sync counts per task branch without applying changes.
       Quick check before running sync.
 
-  push [source] [--branch <name>] [--dry-run]
+  push [source] [--branch <name>] [--force] [--dry-run]
       Push task branches to origin. Walks the dispatch stack in order.
       --branch targets a single branch instead of all tasks.
+      --force uses --force-with-lease (safe after sync rewrites history).
       --dry-run shows what would be pushed without doing it.
 
   pr [source] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]

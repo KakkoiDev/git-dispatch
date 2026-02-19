@@ -44,7 +44,7 @@ git dispatch sync
 | `git dispatch sync [source]` | Sync all task branches for a specific source |
 | `git dispatch sync [source] <task>` | Sync one specific task branch |
 | `git dispatch status [source]` | Show pending sync counts without applying |
-| `git dispatch push [source] [--branch <name>] [--dry-run]` | Push task branches to origin |
+| `git dispatch push [source] [--branch <name>] [--force] [--dry-run]` | Push task branches to origin |
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
@@ -229,10 +229,11 @@ Show pending sync counts per task branch without applying changes. Quick preview
 git dispatch push                # auto-detect source, push all task branches
 git dispatch push [source]       # explicit source
 git dispatch push --branch feat/4        # push a single branch
+git dispatch push --force        # force push after sync (uses --force-with-lease)
 git dispatch push --dry-run      # show what would be pushed
 ```
 
-Push task branches to origin with upstream tracking (`-u`). Walks the dispatch stack in order. `--branch` targets a single branch instead of all tasks.
+Push task branches to origin with upstream tracking (`-u`). Walks the dispatch stack in order. `--branch` targets a single branch instead of all tasks. `--force` uses `--force-with-lease` for safe force-push after sync rewrites history.
 
 ### pr
 

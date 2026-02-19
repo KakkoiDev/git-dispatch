@@ -19,7 +19,7 @@ Write TRD -> vibe-code source -> split into branches -> create PRs -> sync both 
 | `git dispatch sync [source]` | Sync all task branches for a specific source |
 | `git dispatch sync [source] <task>` | Sync one specific task branch |
 | `git dispatch status [source]` | Show pending sync counts without applying |
-| `git dispatch push [source] [--branch <name>] [--dry-run]` | Push task branches to origin |
+| `git dispatch push [source] [--branch <name>] [--force] [--dry-run]` | Push task branches to origin |
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |

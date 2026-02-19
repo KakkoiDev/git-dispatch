@@ -1132,6 +1132,22 @@ test_push_dry_run() {
     teardown
 }
 
+test_push_force_dry_run() {
+    echo "=== test: push --force --dry-run ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" push --force --dry-run source/feature)
+
+    assert_contains "$output" "--force-with-lease" "force flag uses --force-with-lease"
+    assert_contains "$output" "git push -u origin --force-with-lease feat/3" "force push dry-run shows task-3"
+
+    teardown
+}
+
 test_push_branch_filter() {
     echo "=== test: push --dry-run --branch targets single branch ==="
     setup
@@ -1196,6 +1212,7 @@ test_sync_stack_order
 test_pr_stack_order
 test_push_dry_run
 test_push_branch_filter
+test_push_force_dry_run
 
 echo ""
 echo "======================="

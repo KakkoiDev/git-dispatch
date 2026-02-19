@@ -56,6 +56,7 @@ Shows pending sync counts per task branch without applying changes.
 ```bash
 git dispatch push              # push all task branches to origin
 git dispatch push --branch feat/4  # push a single branch
+git dispatch push --force      # force push after sync (--force-with-lease)
 git dispatch push --dry-run    # preview push commands
 ```
 
