@@ -428,10 +428,12 @@ cmd_sync() {
         fi
 
         # Task → source: commits in task branch not yet in source
-        # First, amend any task commits missing Task-Id on the task branch itself
+        # Use stack parent as limit so we only count this task's commits
+        local parent
+        parent=$(find_stack_parent "$task_branch")
         local -a task_to_source=()
         local needs_trailer=false
-        cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
+        cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
@@ -451,7 +453,7 @@ cmd_sync() {
                 _amend_trailers_on_branch "$task_branch" "$task_id" "${task_to_source[@]}"
                 # Re-read hashes after rewrite
                 task_to_source=()
-                cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
+                cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
                 while IFS= read -r line; do
                     [[ "$line" == +* ]] || continue
                     local hash
@@ -512,23 +514,27 @@ cmd_status() {
         done <<< "$cherry_out"
 
         # Task -> source: commits in task branch not yet in source
+        # Use stack parent as limit so we only count this task's commits,
+        # not ancestor commits from base/master
         local task_to_source=0
-        cherry_out=$(git cherry -v "$source" "$task_branch" 2>&1) || die "git cherry failed: $cherry_out"
+        local parent
+        parent=$(find_stack_parent "$task_branch")
+        cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             task_to_source=$((task_to_source + 1))
         done <<< "$cherry_out"
 
         echo -e "  ${YELLOW}$task_branch${NC}"
-        if [[ $source_to_task -gt 0 ]]; then
-            echo -e "    Source -> task: ${GREEN}${source_to_task} pending${NC}"
+        if [[ $source_to_task -eq 0 && $task_to_source -eq 0 ]]; then
+            echo -e "    ${GREEN}in sync${NC}"
         else
-            echo "    Source -> task: 0 pending"
-        fi
-        if [[ $task_to_source -gt 0 ]]; then
-            echo -e "    Task -> source: ${GREEN}${task_to_source} pending${NC}"
-        else
-            echo "    Task -> source: 0 pending (up to date)"
+            if [[ $source_to_task -gt 0 ]]; then
+                echo -e "    Source -> task: ${YELLOW}${source_to_task} pending${NC}"
+            fi
+            if [[ $task_to_source -gt 0 ]]; then
+                echo -e "    Task -> source: ${YELLOW}${task_to_source} pending${NC}"
+            fi
         fi
         echo ""
     done

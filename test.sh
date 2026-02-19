@@ -53,6 +53,19 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="${3:-}"
+    if [[ "$haystack" != *"$needle"* ]]; then
+        echo -e "  ${GREEN}PASS${NC} $msg"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} $msg"
+        echo "    expected NOT to contain: $needle"
+        echo "    actual: $haystack"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 assert_branch_exists() {
     local branch="$1" msg="${2:-branch $1 exists}"
     if git rev-parse --verify "$branch" >/dev/null 2>&1; then
@@ -489,8 +502,8 @@ test_status() {
     assert_contains "$output" "feat/5" "status shows task-5"
     # task-4 should have 1 pending source -> task
     assert_contains "$output" "1 pending" "status shows pending count"
-    # task-5 should show up to date
-    assert_contains "$output" "up to date" "status shows up to date"
+    # task-5 should show in sync
+    assert_contains "$output" "in sync" "status shows in sync"
 
     teardown
 }
@@ -947,6 +960,40 @@ test_status_stack_order() {
     teardown
 }
 
+test_status_no_false_pending() {
+    echo "=== test: status shows in sync after fresh split (no false pending from base) ==="
+    setup
+
+    # Advance master so base diverges from source fork point
+    echo "base1" > base1.txt; git add base1.txt
+    git commit -m "Base advance 1" -q
+    echo "base2" > base2.txt; git add base2.txt
+    git commit -m "Base advance 2" -q
+
+    git checkout -b source/fresh master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nTask-Id: 4')" -q
+
+    # Advance master again after source fork
+    git checkout master -q
+    echo "base3" > base3.txt; git add base3.txt
+    git commit -m "Base advance 3" -q
+
+    # Split — task branches are on current master, ahead of source fork point
+    bash "$DISPATCH" split source/fresh --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" status source/fresh | sed $'s/\033\\[[0-9;]*m//g')
+
+    # After a fresh split, all tasks should be in sync — no false pending
+    assert_not_contains "$output" "pending" "no false pending after fresh split"
+    assert_contains "$output" "in sync" "shows in sync after fresh split"
+
+    teardown
+}
+
 test_sync_stack_order() {
     echo "=== test: sync processes branches in stack order ==="
     setup
@@ -1042,6 +1089,7 @@ test_split_task_order
 test_split_task_order_partial
 test_split_no_task_order_backward_compat
 test_status_stack_order
+test_status_no_false_pending
 test_sync_stack_order
 test_pr_stack_order
 
