@@ -386,6 +386,71 @@ test_hook_install_default_without_hooks_path() {
     teardown
 }
 
+test_hook_auto_carry_task_id() {
+    echo "=== test: hook auto-carries Task-Id from previous commit ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    # First commit with explicit Task-Id
+    echo "a" > a.txt; git add a.txt
+    git commit -m "first$(printf '\n\nTask-Id: 3')" -q
+
+    # Second commit without trailer — should auto-carry Task-Id=3
+    echo "b" > b.txt; git add b.txt
+    git commit -m "second" -q
+
+    local carried
+    carried=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "$carried" "3" "Task-Id auto-carried from previous commit"
+
+    teardown
+}
+
+test_hook_auto_carry_no_override() {
+    echo "=== test: hook does not override explicit Task-Id ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    # First commit with Task-Id=3
+    echo "a" > a.txt; git add a.txt
+    git commit -m "first$(printf '\n\nTask-Id: 3')" -q
+
+    # Second commit with explicit Task-Id=4 — should keep 4, not carry 3
+    echo "b" > b.txt; git add b.txt
+    git commit -m "second" --trailer "Task-Id=4" -q
+
+    local task_id
+    task_id=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "$task_id" "4" "explicit Task-Id not overridden by auto-carry"
+
+    teardown
+}
+
+test_hook_auto_carry_task_order() {
+    echo "=== test: hook auto-carries Task-Id and Task-Order ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    # First commit with Task-Id=3 and Task-Order=1
+    echo "a" > a.txt; git add a.txt
+    git commit -m "first$(printf '\n\nTask-Id: 3\nTask-Order: 1')" -q
+
+    # Second commit without trailers — should auto-carry both
+    echo "b" > b.txt; git add b.txt
+    git commit -m "second" -q
+
+    local carried_id carried_order
+    carried_id=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
+    carried_order=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" | tr -d '[:space:]')
+    assert_eq "$carried_id" "3" "Task-Id auto-carried"
+    assert_eq "$carried_order" "1" "Task-Order auto-carried"
+
+    teardown
+}
+
 test_help() {
     echo "=== test: help ==="
     local output
@@ -1075,6 +1140,9 @@ test_hook
 test_hook_install_respects_hooks_path_relative
 test_hook_install_respects_hooks_path_absolute
 test_hook_install_default_without_hooks_path
+test_hook_auto_carry_task_id
+test_hook_auto_carry_no_override
+test_hook_auto_carry_task_order
 test_help
 test_sync_cherry_pick_conflict
 test_split_no_commits

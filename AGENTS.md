@@ -81,7 +81,7 @@ Commits must use git trailers matching TRD task numbers:
 git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
 ```
 
-Install hook to enforce: `git dispatch hook install`
+Install hooks (auto-carry + enforce): `git dispatch hook install`
 
 Parse trailers (zero regex):
 ```bash

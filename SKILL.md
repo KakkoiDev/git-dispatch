@@ -22,7 +22,7 @@ Write TRD -> vibe-code source -> split into branches -> create PRs -> sync both 
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
-| `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
+| `git dispatch hook install` | Install hooks (auto-carry Task-Id + enforce Task-Id) |
 | `git dispatch help` | Show usage guide |
 
 ## Task-Id Trailers

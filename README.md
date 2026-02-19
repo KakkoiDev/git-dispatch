@@ -47,7 +47,7 @@ git dispatch sync
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
-| `git dispatch hook install` | Install commit-msg hook enforcing Task-Id |
+| `git dispatch hook install` | Install hooks (auto-carry Task-Id + enforce Task-Id) |
 | `git dispatch help` | Show usage guide |
 
 ## Task-Id Trailers
@@ -260,12 +260,16 @@ Show the dispatch stack hierarchy.
 git dispatch hook install
 ```
 
-Install `commit-msg` hook that rejects commits without a `Task-Id` trailer. This is per-repo.
+Install two hooks (per-repo):
+
+- **`prepare-commit-msg`** — auto-carries `Task-Id` (and `Task-Order`) from the previous commit when absent
+- **`commit-msg`** — rejects commits without a `Task-Id` trailer
 
 To enforce `Task-Id` globally across all repos:
 
 ```bash
 mkdir -p ~/.git-hooks
+cp hooks/prepare-commit-msg ~/.git-hooks/
 cp hooks/commit-msg ~/.git-hooks/
 git config --global core.hooksPath ~/.git-hooks
 ```

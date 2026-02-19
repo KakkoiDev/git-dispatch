@@ -744,8 +744,11 @@ cmd_hook_install() {
         hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
     fi
     mkdir -p "$hook_dir"
+    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$hook_dir/prepare-commit-msg"
+    chmod +x "$hook_dir/prepare-commit-msg"
     cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
     chmod +x "$hook_dir/commit-msg"
+    info "Installed prepare-commit-msg hook to $hook_dir/prepare-commit-msg"
     info "Installed commit-msg hook to $hook_dir/commit-msg"
 }
 
@@ -801,7 +804,8 @@ COMMANDS
       Show the dispatch stack hierarchy.
 
   hook install
-      Install commit-msg hook that enforces Task-Id trailer presence.
+      Install hooks: prepare-commit-msg (auto-carries Task-Id from previous
+      commit) and commit-msg (rejects commits without Task-Id).
 
   help
       Show this message.
@@ -814,8 +818,8 @@ TRAILERS
   Task-Order sort first (ascending), unordered tasks follow in commit order.
     git commit -m "fix" --trailer "Task-Id=3" --trailer "Task-Order=1"
 
-  The hook (install with `git dispatch hook install`) rejects commits without
-  a Task-Id trailer.
+  The hooks (install with `git dispatch hook install`) auto-carry Task-Id from
+  the previous commit and reject commits without a Task-Id trailer.
 HELP
 }
 

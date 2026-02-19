@@ -1,0 +1,26 @@
+#!/bin/bash
+# git-dispatch prepare-commit-msg hook: auto-carry Task-Id (and Task-Order) from previous commit
+# Install with: git dispatch hook install
+
+msg_file="$1"
+source="$2"  # message, template, merge, squash, commit
+
+# Skip merge and amend
+[[ "$source" == "merge" || "$source" == "commit" ]] && exit 0
+
+# Skip if Task-Id already present
+grep -q "^Task-Id:" "$msg_file" && exit 0
+
+# Read previous commit's Task-Id
+prev_task=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" HEAD 2>/dev/null | tr -d '[:space:]')
+[[ -z "$prev_task" ]] && exit 0
+
+# Add Task-Id trailer
+git interpret-trailers --in-place --trailer "Task-Id=$prev_task" "$msg_file"
+
+# Also carry Task-Order if present
+prev_order=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" HEAD 2>/dev/null | tr -d '[:space:]')
+[[ -n "$prev_order" ]] && \
+    git interpret-trailers --in-place --trailer "Task-Order=$prev_order" "$msg_file"
+
+exit 0
