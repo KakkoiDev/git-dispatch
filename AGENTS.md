@@ -70,6 +70,12 @@ git dispatch pr --title "My PR" --body "Description"   # custom title/body
 ```
 Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task. `--branch` targets a single branch. `--title`/`--body` override auto-generated values.
 
+**Resolve merge** (after merging base into task branch):
+```bash
+git dispatch resolve
+```
+Converts a merge commit (HEAD) on a task branch into a regular commit with `Task-Id` trailer. Merge commits are invisible to `git cherry` (used by status/sync). Resolve extracts only task-owned file changes and replays them as a regular commit. Clean merges are simply removed. The `post-merge` hook runs this automatically.
+
 **Reset metadata** (cleanup):
 ```bash
 git dispatch reset [source]              # clean config only
@@ -108,10 +114,16 @@ Key structure:
 
 ## Conflict Recovery
 
-When cherry-pick conflicts during split or sync:
+**Cherry-pick conflicts** (during split or sync):
 1. Resolve conflicts manually
 2. `git cherry-pick --continue`
 3. Re-run the dispatch command
+
+**Merge conflicts** (on task branch merging base):
+1. `git merge master` and resolve conflicts
+2. `git add` and `git commit`
+3. `git dispatch resolve` (or automatic via post-merge hook)
+4. Resolution becomes a regular commit visible to dispatch sync
 
 ## Pre-Split Checklist
 

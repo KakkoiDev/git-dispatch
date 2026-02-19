@@ -46,6 +46,7 @@ git dispatch sync
 | `git dispatch status [source]` | Show pending sync counts without applying |
 | `git dispatch push [source] [--branch <name>] [--force] [--dry-run]` | Push task branches to origin |
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch resolve` | Convert merge commit on task branch to regular commit with Task-Id |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install hooks (auto-carry Task-Id + enforce Task-Id) |
@@ -273,10 +274,11 @@ Show the dispatch stack hierarchy.
 git dispatch hook install
 ```
 
-Install two hooks (per-repo):
+Install three hooks (per-repo):
 
 - **`prepare-commit-msg`** — auto-carries `Task-Id` (and `Task-Order`) from the previous commit when absent
 - **`commit-msg`** — rejects commits without a `Task-Id` trailer
+- **`post-merge`** — auto-runs `resolve` after merge on dispatch task branches
 
 To enforce `Task-Id` globally across all repos:
 
@@ -296,6 +298,27 @@ git commit --no-verify -m "message without trailer"
 ## Worktree Support
 
 Sync is worktree-aware. If a task branch has a worktree checked out, `git dispatch sync` cherry-picks directly into the worktree instead of doing checkout gymnastics.
+
+### resolve
+
+```bash
+git dispatch resolve
+```
+
+Convert a merge commit (HEAD) on a task branch into a regular commit with `Task-Id` trailer. Use after merging master (or any base) to resolve conflicts on a task branch.
+
+`git cherry` (used by `status` and `sync`) ignores merge commits, making conflict resolutions invisible to dispatch. `resolve` extracts only the changes to task-owned files and replays them as a regular commit. Clean merges (no task-file changes) are simply removed.
+
+```bash
+# Typical workflow
+git checkout feat/feature/4
+git merge master              # conflicts arise
+# fix conflicts, git add, git commit
+git dispatch resolve          # replaces merge with Task-Id commit
+git push                      # fast-forward, no force push needed
+```
+
+The `post-merge` hook (installed via `hook install`) runs `resolve` automatically after any merge on a dispatch task branch.
 
 ## Conflict Recovery
 

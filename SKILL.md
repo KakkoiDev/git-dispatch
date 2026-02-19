@@ -21,6 +21,7 @@ Write TRD -> vibe-code source -> split into branches -> create PRs -> sync both 
 | `git dispatch status [source]` | Show pending sync counts without applying |
 | `git dispatch push [source] [--branch <name>] [--force] [--dry-run]` | Push task branches to origin |
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
+| `git dispatch resolve` | Convert merge commit on task branch to regular commit with Task-Id |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install hooks (auto-carry Task-Id + enforce Task-Id) |
@@ -69,6 +70,11 @@ git dispatch pr --push
 # 5. Keep iterating -- check status, then sync
 git dispatch status
 git dispatch sync
+
+# 5b. If task branch needs to merge base to resolve conflicts
+git checkout cyril/feat/feature/4
+git merge master              # resolve conflicts, commit
+git dispatch resolve          # converts merge to regular commit
 
 # 6. View stack
 git dispatch tree
