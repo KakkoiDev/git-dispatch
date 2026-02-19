@@ -1,0 +1,19 @@
+#!/bin/bash
+# git-dispatch post-merge hook: auto-resolve merge commits on dispatch task branches
+# Install with: git dispatch hook install
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || exit 0)
+source=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
+[[ -n "$source" ]] || exit 0
+
+# Only act if HEAD is a merge commit
+parent_count=$(git cat-file -p HEAD | grep -c '^parent ' || true)
+[[ $parent_count -ge 2 ]] || exit 0
+
+if git dispatch resolve 2>/dev/null; then
+    echo "git-dispatch: auto-resolved merge on $branch"
+else
+    echo "git-dispatch: merge on task branch '$branch'. Run 'git dispatch resolve' manually."
+fi
+
+exit 0

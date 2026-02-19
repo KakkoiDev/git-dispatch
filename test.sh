@@ -1165,6 +1165,202 @@ test_push_branch_filter() {
     teardown
 }
 
+test_resolve_basic() {
+    echo "=== test: resolve converts merge to regular commit ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Create add/add conflict on file.txt (feat/3 has it, add different version to master)
+    git checkout master -q
+    echo "master-version" > file.txt; git add file.txt
+    git commit -m "Master adds file.txt" -q
+
+    # Merge and resolve conflict
+    git checkout feat/3 -q
+    git merge master -q 2>/dev/null || {
+        echo "resolved-content" > file.txt
+        git add file.txt
+        git commit --no-edit -q
+    }
+
+    # Verify HEAD is merge before resolve
+    local parent_count
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    assert_eq "2" "$parent_count" "HEAD is merge before resolve"
+
+    bash "$DISPATCH" resolve
+
+    # Verify HEAD is regular commit after resolve
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    assert_eq "1" "$parent_count" "HEAD is regular commit after resolve"
+
+    # Verify Task-Id trailer
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$tid" "Task-Id trailer present"
+
+    teardown
+}
+
+test_resolve_preserves_content() {
+    echo "=== test: resolve preserves conflict resolution content ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    git checkout master -q
+    echo "master-version" > file.txt; git add file.txt
+    git commit -m "Master adds file.txt" -q
+
+    git checkout feat/3 -q
+    git merge master -q 2>/dev/null || {
+        echo "carefully-resolved" > file.txt
+        git add file.txt
+        git commit --no-edit -q
+    }
+
+    bash "$DISPATCH" resolve
+
+    local content
+    content=$(cat file.txt)
+    assert_eq "carefully-resolved" "$content" "resolution content preserved in working tree"
+
+    # Also verify via git show
+    local git_content
+    git_content=$(git show HEAD:file.txt)
+    assert_eq "carefully-resolved" "$git_content" "resolution content preserved in commit"
+
+    teardown
+}
+
+test_resolve_no_task_changes() {
+    echo "=== test: resolve removes clean merge (no task file changes) ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master with unrelated file
+    git checkout master -q
+    echo "unrelated" > unrelated.txt; git add unrelated.txt
+    git commit -m "Unrelated change" -q
+
+    local pre_merge_head
+    pre_merge_head=$(git rev-parse feat/3)
+
+    # Clean merge into feat/3
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    bash "$DISPATCH" resolve
+
+    # HEAD should be back to pre-merge (merge removed, no extra commit)
+    local post_resolve_head
+    post_resolve_head=$(git rev-parse HEAD)
+    assert_eq "$pre_merge_head" "$post_resolve_head" "HEAD reset to pre-merge state"
+
+    # Verify no merge commit
+    local parent_count
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    assert_eq "1" "$parent_count" "no merge commit present"
+
+    teardown
+}
+
+test_resolve_not_merge() {
+    echo "=== test: resolve errors on non-merge HEAD ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    git checkout feat/3 -q
+
+    local output
+    if output=$(bash "$DISPATCH" resolve 2>&1); then
+        echo -e "  ${RED}FAIL${NC} resolve should fail on non-merge HEAD"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "not a merge commit" "error mentions not a merge commit"
+    fi
+
+    teardown
+}
+
+test_resolve_not_task_branch() {
+    echo "=== test: resolve errors on non-dispatch branch ==="
+    setup
+
+    git checkout -b random/branch master -q
+    echo "x" > x.txt; git add x.txt
+    git commit -m "stuff" -q
+
+    local output
+    if output=$(bash "$DISPATCH" resolve 2>&1); then
+        echo -e "  ${RED}FAIL${NC} resolve should fail on non-dispatch branch"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Not a dispatch task branch" "error mentions not a dispatch branch"
+    fi
+
+    teardown
+}
+
+test_status_merge_warning() {
+    echo "=== test: status shows merge warning ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Create merge on feat/3
+    git checkout master -q
+    echo "unrelated" > unrelated.txt; git add unrelated.txt
+    git commit -m "Unrelated" -q
+
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    local output
+    output=$(bash "$DISPATCH" status source/feature 2>&1)
+
+    assert_contains "$output" "merge commit" "status shows merge warning"
+    assert_contains "$output" "git dispatch resolve" "status suggests resolve command"
+
+    teardown
+}
+
+test_hook_install_post_merge() {
+    echo "=== test: hook install includes post-merge ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    local hook_dir
+    hook_dir="$(git rev-parse --git-dir)/hooks"
+
+    if [[ -f "$hook_dir/post-merge" ]]; then
+        echo -e "  ${GREEN}PASS${NC} post-merge hook installed"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} post-merge hook not found"
+        FAIL=$((FAIL + 1))
+    fi
+
+    if [[ -x "$hook_dir/post-merge" ]]; then
+        echo -e "  ${GREEN}PASS${NC} post-merge hook is executable"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} post-merge hook not executable"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1213,6 +1409,13 @@ test_pr_stack_order
 test_push_dry_run
 test_push_branch_filter
 test_push_force_dry_run
+test_resolve_basic
+test_resolve_preserves_content
+test_resolve_no_task_changes
+test_resolve_not_merge
+test_resolve_not_task_branch
+test_status_merge_warning
+test_hook_install_post_merge
 
 echo ""
 echo "======================="

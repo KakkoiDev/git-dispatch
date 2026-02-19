@@ -561,8 +561,98 @@ cmd_status() {
                 echo -e "    Task -> source: ${YELLOW}${task_to_source} pending${NC}"
             fi
         fi
+
+        # Check for merge commits on task branch
+        local merge_count
+        merge_count=$(git rev-list --merges "${parent}..${task_branch}" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ $merge_count -gt 0 ]]; then
+            echo -e "    ${RED}WARNING: ${merge_count} merge commit(s) — run: git dispatch resolve${NC}"
+        fi
+
         echo ""
     done
+}
+
+# ---------- resolve ----------
+
+cmd_resolve() {
+    local branch
+    branch=$(current_branch)
+
+    # Verify this is a dispatch task branch
+    local source
+    source=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
+    [[ -n "$source" ]] || die "Not a dispatch task branch: $branch"
+
+    # Extract task_id from branch name (last segment)
+    local task_id="${branch##*/}"
+    [[ -n "$task_id" ]] || die "Cannot extract task ID from branch '$branch'"
+
+    # Verify HEAD is a merge commit (2+ parents)
+    local parent_count
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    [[ $parent_count -ge 2 ]] || die "HEAD is not a merge commit"
+
+    # Verify merge not pushed
+    if git rev-parse --verify "origin/$branch" &>/dev/null; then
+        if git merge-base --is-ancestor HEAD "origin/$branch" 2>/dev/null; then
+            die "Merge already pushed to origin/$branch. Cannot resolve."
+        fi
+    fi
+
+    # Save refs
+    local first_parent merge_head
+    first_parent=$(git rev-parse HEAD^1)
+    merge_head=$(git rev-parse HEAD)
+
+    # Find task-owned files: all files touched between stack parent and first_parent
+    local stack_parent
+    stack_parent=$(find_stack_parent "$branch")
+    [[ -n "$stack_parent" ]] || die "Cannot find stack parent for $branch"
+
+    local task_files
+    task_files=$(git log --format="" --name-only "${stack_parent}..${first_parent}" | sort -u | sed '/^$/d')
+
+    if [[ -z "$task_files" ]]; then
+        git reset --hard "$first_parent" -q
+        info "Removed clean merge (no task files)"
+        return
+    fi
+
+    # Find task files changed by the merge resolution
+    local changed_files=""
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        if ! git diff --quiet "$first_parent" "$merge_head" -- "$f" 2>/dev/null; then
+            changed_files+="$f"$'\n'
+        fi
+    done <<< "$task_files"
+    changed_files=$(echo "$changed_files" | sed '/^$/d')
+
+    if [[ -z "$changed_files" ]]; then
+        git reset --hard "$first_parent" -q
+        info "Removed clean merge (no conflict resolutions needed)"
+        return
+    fi
+
+    # Reset to pre-merge state and apply resolution as regular commit
+    git reset --hard "$first_parent" -q
+
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        local dir
+        dir=$(dirname "$f")
+        [[ "$dir" == "." ]] || mkdir -p "$dir"
+        if git cat-file -e "${merge_head}:${f}" 2>/dev/null; then
+            git show "${merge_head}:${f}" > "$f"
+            git add "$f"
+        else
+            git rm -f "$f" 2>/dev/null || true
+        fi
+    done <<< "$changed_files"
+
+    git commit -m "fix: resolve merge conflicts with base" --trailer "Task-Id=$task_id" -q
+    info "Resolved: merge replaced with regular commit (Task-Id=$task_id)"
 }
 
 # ---------- push ----------
@@ -825,7 +915,10 @@ cmd_hook_install() {
     cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
     chmod +x "$hook_dir/commit-msg"
     info "Installed prepare-commit-msg hook to $hook_dir/prepare-commit-msg"
+    cp "$SCRIPT_DIR/hooks/post-merge" "$hook_dir/post-merge"
+    chmod +x "$hook_dir/post-merge"
     info "Installed commit-msg hook to $hook_dir/commit-msg"
+    info "Installed post-merge hook to $hook_dir/post-merge"
 }
 
 # ---------- help ----------
@@ -877,6 +970,10 @@ COMMANDS
       --title and --body override the auto-generated PR title and empty body.
       --dry-run shows what would be created without doing it.
 
+  resolve
+      Convert a merge commit (HEAD) on a task branch into a regular commit
+      with Task-Id trailer. Use after merging master to resolve conflicts.
+
   reset [source] [--branches] [--force]
       Clean up dispatch metadata from git config.
       --branches also deletes the task branches.
@@ -918,6 +1015,7 @@ main() {
         push)         cmd_push "$@" ;;
         pr)           cmd_pr "$@" ;;
         reset)        cmd_reset "$@" ;;
+        resolve)      cmd_resolve "$@" ;;
         tree)         cmd_tree "$@" ;;
         hook)
             [[ "${1:-}" == "install" ]] || die "Usage: git dispatch hook install"
