@@ -192,9 +192,34 @@ cmd_split() {
     done
 
     [[ -n "$source" ]]  || die "Usage: git dispatch split <source-branch> --name <prefix> [--base <base>]"
-    [[ -n "$name" ]] || die "Missing --name flag (branch prefix)"
 
     git rev-parse --verify "$source" >/dev/null 2>&1  || die "Branch '$source' does not exist"
+
+    # Check if already split
+    local existing_tasks_str=""
+    existing_tasks_str=$(find_dispatch_tasks "$source" | order_by_stack)
+
+    if [[ -n "$existing_tasks_str" ]]; then
+        # Re-split: recover base and prefix from metadata
+        local recovered_base recovered_prefix
+        recovered_base=$(recover_dispatch_base "$source")
+        recovered_prefix=$(recover_dispatch_prefix "$source")
+
+        # Guard: if user passed --base or --name, they must match
+        if [[ "$base" != "master" && "$base" != "$recovered_base" ]]; then
+            die "Base mismatch: existing stack uses '$recovered_base', you passed '$base'"
+        fi
+        if [[ -n "$name" && "$name" != "$recovered_prefix" ]]; then
+            die "Prefix mismatch: existing stack uses '$recovered_prefix', you passed '$name'"
+        fi
+
+        base="$recovered_base"
+        name="$recovered_prefix"
+    else
+        # First split — require --name
+        [[ -n "$name" ]] || die "Missing --name flag (branch prefix)"
+    fi
+
     git rev-parse --verify "$base" >/dev/null 2>&1 || die "Base '$base' does not exist"
 
     # Parse trailer-tagged commits into temp file: "hash task-id" per line
@@ -271,11 +296,41 @@ cmd_split() {
         if $dry_run; then
             echo -e "  ${YELLOW}[dry-run]${NC} $branch_name  (${#hashes[@]} commits from $prev_branch)"
         else
-            git branch "$branch_name" "$prev_branch" 2>/dev/null || die "Branch '$branch_name' already exists"
-            cherry_pick_into "$branch_name" "${hashes[@]}"
+            git branch "$branch_name" "$prev_branch" 2>/dev/null || {
+                info "  Skipping $branch_name (already exists)"
+                prev_branch="$branch_name"
+                continue
+            }
+
+            # Inline cherry-pick with conflict recovery
+            local orig
+            orig=$(current_branch)
+            git checkout "$branch_name" --quiet
+
+            local cherry_pick_failed=false
+            for hash in "${hashes[@]}"; do
+                if ! git cherry-pick -x "$hash" 2>/dev/null; then
+                    if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && git diff --cached --quiet; then
+                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+                        git cherry-pick --skip
+                        continue
+                    fi
+                    git cherry-pick --abort 2>/dev/null || true
+                    cherry_pick_failed=true
+                    break
+                fi
+            done
+
+            git checkout "$orig" --quiet
+
             stack_add "$branch_name" "$prev_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
-            info "  Created $branch_name (${#hashes[@]} commits)"
+
+            if $cherry_pick_failed; then
+                warn "  $branch_name created (cherry-pick conflicted — run sync to retry)"
+            else
+                info "  Created $branch_name (${#hashes[@]} commits)"
+            fi
         fi
         prev_branch="$branch_name"
     done
@@ -389,6 +444,26 @@ find_stack_parent() {
             break
         fi
     done
+}
+
+# Recover base branch from dispatch metadata
+recover_dispatch_base() {
+    local source="$1"
+    local tasks
+    tasks=$(find_dispatch_tasks "$source" | order_by_stack)
+    [[ -n "$tasks" ]] || return 1
+    local first_task
+    first_task=$(echo "$tasks" | head -1)
+    find_stack_parent "$first_task"
+}
+
+# Recover branch prefix from dispatch metadata
+recover_dispatch_prefix() {
+    local source="$1"
+    local first_task
+    first_task=$(find_dispatch_tasks "$source" | order_by_stack | head -1)
+    [[ -n "$first_task" ]] || return 1
+    echo "${first_task%/*}"
 }
 
 cmd_sync() {
@@ -562,11 +637,22 @@ cmd_status() {
             fi
         fi
 
-        # Check for merge commits on task branch
-        local merge_count
-        merge_count=$(git rev-list --merges "${parent}..${task_branch}" 2>/dev/null | wc -l | tr -d ' ')
-        if [[ $merge_count -gt 0 ]]; then
-            echo -e "    ${RED}WARNING: ${merge_count} merge commit(s) — run: git dispatch resolve${NC}"
+        # Check for unresolved merge commits on task branch
+        # Skip merge commits produced by "git dispatch resolve" (their first
+        # parent is the resolution commit with "resolve merge conflicts" message)
+        local merge_commits unresolved_count=0
+        merge_commits=$(git rev-list --merges "${parent}..${task_branch}" 2>/dev/null)
+        while IFS= read -r mc; do
+            [[ -z "$mc" ]] && continue
+            local first_parent_msg
+            first_parent_msg=$(git log -1 --format="%s" "${mc}^1" 2>/dev/null)
+            if [[ "$first_parent_msg" == *"resolve merge conflicts with base"* ]]; then
+                continue
+            fi
+            unresolved_count=$((unresolved_count + 1))
+        done <<< "$merge_commits"
+        if [[ $unresolved_count -gt 0 ]]; then
+            echo -e "    ${RED}WARNING: ${unresolved_count} merge commit(s) — run: git dispatch resolve${NC}"
         fi
 
         echo ""
