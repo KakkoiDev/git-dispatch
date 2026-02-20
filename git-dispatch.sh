@@ -803,6 +803,148 @@ cmd_resolve() {
     info "Resolved: resolution commit + clean re-merge (Task-Id=$task_id)"
 }
 
+# ---------- restack ----------
+
+cmd_restack() {
+    local source_arg="" dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            -*)        die "Unknown flag: $1" ;;
+            *)         source_arg="$1"; shift ;;
+        esac
+    done
+
+    local source
+    source=$(resolve_source "$source_arg")
+
+    local base
+    base=$(recover_dispatch_base "$source")
+    [[ -n "$base" ]] || die "Cannot determine base branch for $source"
+
+    # Determine base ref (prefer origin, fallback to local)
+    local base_ref
+    if ! $dry_run && git remote get-url origin &>/dev/null; then
+        git fetch origin "$base" --quiet 2>/dev/null || true
+    fi
+    if git rev-parse --verify "origin/$base" &>/dev/null; then
+        base_ref="origin/$base"
+    else
+        base_ref="$base"
+    fi
+
+    # Get ordered task branches
+    local -a ordered=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && ordered+=("$c")
+    done < <(find_dispatch_tasks "$source" | order_by_stack)
+
+    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+
+    # Save old tip refs before any rebasing (needed for correct --onto parent)
+    local -a old_tips=()
+    for b in "${ordered[@]}"; do
+        old_tips+=("$(git rev-parse "$b")")
+    done
+
+    # Save current checkout to restore later
+    local orig
+    orig=$(current_branch)
+
+    echo -e "${CYAN}Source:${NC}  $source"
+    echo -e "${CYAN}Base:${NC}    $base (rebasing onto $base_ref)"
+    echo ""
+
+    local merged=0 rebased=0 conflict="" rebase_onto="$base_ref"
+
+    for i in "${!ordered[@]}"; do
+        local task_branch="${ordered[$i]}"
+
+        # Check if fully merged into base
+        if git merge-base --is-ancestor "${old_tips[$i]}" "$base_ref" 2>/dev/null; then
+            if $dry_run; then
+                echo -e "  ${GREEN}[merged]${NC} $task_branch"
+            else
+                info "  [merged] $task_branch"
+            fi
+            merged=$((merged + 1))
+            continue
+        fi
+
+        # Find parent in stack
+        local parent
+        parent=$(find_stack_parent "$task_branch")
+        [[ -n "$parent" ]] || { warn "  Cannot find parent for $task_branch, skipping"; continue; }
+
+        # Resolve parent's OLD ref (before we may have rebased it)
+        local parent_ref="$parent"
+        for j in "${!ordered[@]}"; do
+            if [[ "${ordered[$j]}" == "$parent" ]]; then
+                parent_ref="${old_tips[$j]}"
+                break
+            fi
+        done
+
+        if $dry_run; then
+            echo -e "  ${YELLOW}[rebase]${NC} $task_branch onto $(git rev-parse --short "$rebase_onto" 2>/dev/null || echo "$rebase_onto")"
+            rebase_onto="$task_branch"
+            rebased=$((rebased + 1))
+            continue
+        fi
+
+        # Worktree-aware rebase
+        local wt
+        wt=$(worktree_for_branch "$task_branch")
+
+        if [[ -n "$wt" ]]; then
+            if ! git -C "$wt" rebase --onto "$rebase_onto" "$parent_ref" 2>/dev/null; then
+                git -C "$wt" rebase --abort 2>/dev/null || true
+                conflict="$task_branch"
+                warn "  [conflict] $task_branch — aborted"
+                break
+            fi
+        else
+            if ! git rebase --onto "$rebase_onto" "$parent_ref" "$task_branch" 2>/dev/null; then
+                git rebase --abort 2>/dev/null || true
+                conflict="$task_branch"
+                warn "  [conflict] $task_branch — aborted"
+                break
+            fi
+        fi
+
+        info "  [rebased] $task_branch"
+        rebase_onto="$task_branch"
+        rebased=$((rebased + 1))
+    done
+
+    # Restore original checkout
+    if ! $dry_run && [[ -n "$orig" ]]; then
+        git checkout "$orig" --quiet 2>/dev/null || true
+    fi
+
+    echo ""
+    if $dry_run; then
+        echo -e "${CYAN}Summary (dry-run):${NC} $merged merged, $rebased to rebase"
+    else
+        echo -e "${CYAN}Summary:${NC} $merged merged, $rebased rebased"
+    fi
+
+    if [[ $merged -gt 0 && $rebased -eq 0 && -z "$conflict" ]]; then
+        echo "All branches merged. Run: git dispatch reset --force"
+    fi
+
+    if [[ -n "$conflict" ]]; then
+        warn "Stopped at $conflict due to conflict."
+        warn "Resolve manually, then re-run: git dispatch restack"
+        return 1
+    fi
+
+    if [[ $rebased -gt 0 ]] && ! $dry_run; then
+        echo "Next: git dispatch push --force"
+    fi
+}
+
 # ---------- push ----------
 
 cmd_push() {
@@ -1131,6 +1273,12 @@ COMMANDS
       Convert a merge commit (HEAD) on a task branch into a regular commit
       with Task-Id trailer. Use after merging master to resolve conflicts.
 
+  restack [source] [--dry-run]
+      Rebase stack onto updated base after merge. Walks the stack in order;
+      merged branches are skipped, remaining branches are rebased onto the
+      updated base. Stops on conflict. Use after a PR is merged to master.
+      --dry-run shows what would happen without modifying branches.
+
   reset [source] [--branches] [--force]
       Clean up dispatch metadata from git config.
       --branches also deletes the task branches.
@@ -1173,6 +1321,7 @@ main() {
         pr)           cmd_pr "$@" ;;
         reset)        cmd_reset "$@" ;;
         resolve)      cmd_resolve "$@" ;;
+        restack)      cmd_restack "$@" ;;
         tree)         cmd_tree "$@" ;;
         hook)
             [[ "${1:-}" == "install" ]] || die "Usage: git dispatch hook install"
