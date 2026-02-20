@@ -279,6 +279,31 @@ cmd_split() {
         task_ids+=("$tid")
     done <<< "$order_output"
 
+    # Warn about new tasks without Task-Order during re-split
+    if [[ -n "$existing_tasks_str" ]]; then
+        local -a existing_tids=()
+        while IFS= read -r eb; do
+            [[ -n "$eb" ]] && existing_tids+=("${eb##*/}")
+        done <<< "$existing_tasks_str"
+
+        for tid in "${task_ids[@]}"; do
+            # Is this a new task?
+            local is_new=true
+            for et in "${existing_tids[@]}"; do
+                [[ "$et" == "$tid" ]] && { is_new=false; break; }
+            done
+            $is_new || continue
+
+            # Does it have Task-Order?
+            local has_order
+            has_order=$(awk -v t="$tid" '$2 == t && $3 != "" {found=1} END {print found+0}' "$commit_file")
+            if [[ "$has_order" == "0" ]]; then
+                warn "WARNING: New task '$tid' has no Task-Order and will be appended at end of stack."
+                warn "  Add Task-Order to control position: git commit --amend --trailer \"Task-Order=N\""
+            fi
+        done
+    fi
+
     echo -e "${CYAN}Source:${NC} $source"
     echo -e "${CYAN}Base:${NC}   $base"
     echo -e "${CYAN}Tasks:${NC}  ${task_ids[*]}"
@@ -330,12 +355,28 @@ cmd_split() {
                 stack_remove "$branch_name" "$stale_parent"
             fi
 
-            # Insert into stack (splice: parent → new → old child)
-            local current_child=""
-            current_child=$(get_tasks "$prev_branch" | head -1)
-            if [[ -n "$current_child" && "$current_child" != "$branch_name" ]]; then
-                stack_remove "$current_child" "$prev_branch"
-                stack_add "$current_child" "$branch_name"
+            # Find next existing branch in task_ids order (for splice)
+            local next_existing=""
+            local found_self=false
+            for check_tid in "${task_ids[@]}"; do
+                if $found_self; then
+                    local check_branch="${name}/${check_tid}"
+                    if git rev-parse --verify "$check_branch" &>/dev/null; then
+                        next_existing="$check_branch"
+                        break
+                    fi
+                fi
+                [[ "$check_tid" == "$tid" ]] && found_self=true
+            done
+
+            # Splice into stack: prev → new → next_existing
+            if [[ -n "$next_existing" ]]; then
+                local next_parent
+                next_parent=$(find_stack_parent "$next_existing")
+                if [[ -n "$next_parent" ]]; then
+                    stack_remove "$next_existing" "$next_parent"
+                fi
+                stack_add "$next_existing" "$branch_name"
             fi
             stack_add "$branch_name" "$prev_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
