@@ -76,6 +76,14 @@ git dispatch resolve
 ```
 Converts a merge commit (HEAD) on a task branch into a regular commit with `Task-Id` trailer. Merge commits are invisible to `git cherry` (used by status/sync). Resolve extracts only task-owned file changes and replays them as a regular commit. Clean merges are simply removed. The `post-merge` hook runs this automatically.
 
+**Restack branches** (after PR merge):
+```bash
+git dispatch restack              # rebase stack onto updated base
+git dispatch restack [source]     # explicit source
+git dispatch restack --dry-run    # preview without modifying
+```
+Rebase the entire stack onto the updated base after a PR is merged. Merged branches are skipped, remaining branches are rebased. Stops on first conflict. Follow with `git dispatch push --force` to update remotes.
+
 **Reset metadata** (cleanup):
 ```bash
 git dispatch reset [source]              # clean config only

@@ -64,6 +64,7 @@ flowchart LR
 | `git dispatch push [source] [--branch <name>] [--force] [--dry-run]` | Push task branches to origin |
 | `git dispatch pr [source] [--branch <name>] [--title <t>] [--body <b>] [--push] [--dry-run]` | Create stacked PRs via gh CLI |
 | `git dispatch resolve` | Convert merge commit on task branch to regular commit with Task-Id |
+| `git dispatch restack [source] [--dry-run]` | Rebase stack onto updated base after merge |
 | `git dispatch reset [source] [--branches] [--force]` | Clean up dispatch metadata |
 | `git dispatch tree [branch]` | Show stack hierarchy |
 | `git dispatch hook install` | Install hooks (auto-carry Task-Id + enforce Task-Id) |
@@ -410,6 +411,120 @@ git push                      # fast-forward, no force push needed
 ```
 
 The `post-merge` hook (installed via `hook install`) runs `resolve` automatically after any merge on a dispatch task branch.
+
+### restack
+
+```bash
+git dispatch restack                 # auto-detect source
+git dispatch restack [source]        # explicit source
+git dispatch restack --dry-run       # preview without modifying
+```
+
+Rebase the entire stack onto the updated base branch after a PR is merged. Walks branches in stack order: merged branches are skipped, remaining branches are rebased onto the new base. Stops on first conflict.
+
+**restack vs resolve:**
+
+| | resolve | restack |
+|---|---------|---------|
+| **When** | PR under review, need to update with master | PR merged, update downstream branches |
+| **Strategy** | Merge master INTO branch | Rebase branch ONTO master |
+| **Force push** | No | Yes (`git dispatch push --force`) |
+| **Use case** | Keep PR open, safe for reviewers | Clean linear history after merge |
+
+```mermaid
+gitGraph
+    commit id: "master (updated)"
+    branch "feat/4 (rebased)"
+    commit id: "B'"
+    commit id: "C'"
+    branch "feat/5 (rebased)"
+    commit id: "D'"
+```
+
+```bash
+# Typical workflow after PR merge
+git dispatch restack              # rebase stack onto updated master
+git dispatch push --force         # force-push rebased branches
+```
+
+## Recipes
+
+Common workflows from start to finish.
+
+### Initial setup (split + create PRs)
+
+```bash
+git dispatch split source/feature --base master --name feat/feature
+git dispatch pr --push
+```
+
+### Iterating on source branch
+
+```bash
+# Make changes on source, then sync to task branches
+git commit -m "Fix edge case" --trailer "Task-Id=4"
+git dispatch sync
+git dispatch push
+```
+
+### Iterating on task branch
+
+```bash
+# Fix directly on task branch, sync back to source
+git checkout feat/feature/4
+git commit -m "Fix review feedback"
+git dispatch sync            # Task-Id added, synced to source
+git dispatch push
+```
+
+### Master moved ahead, PR under review (resolve)
+
+```bash
+git checkout feat/feature/4
+git merge master              # resolve conflicts if any
+git dispatch resolve          # converts merge to regular commit
+git dispatch push             # no force push needed
+```
+
+### PR merged, update downstream (restack)
+
+```bash
+git dispatch restack          # rebase remaining stack onto master
+git dispatch push --force     # force-push rebased branches
+```
+
+### Adding new task mid-stack
+
+```bash
+# On source branch, add commits with Task-Order to control position
+git commit -m "New task" --trailer "Task-Id=task-3.1" --trailer "Task-Order=4"
+git dispatch split source/feature    # re-split inserts at correct position
+git dispatch push
+git dispatch pr --branch feat/feature/task-3.1 --push
+```
+
+### Full lifecycle
+
+```bash
+# 1. Split and create PRs
+git dispatch split source/feature --base master --name feat/feature
+git dispatch pr --push
+
+# 2. Iterate (sync changes both ways)
+git dispatch sync
+git dispatch push
+
+# 3. First PR merged → restack downstream
+git dispatch restack
+git dispatch push --force
+
+# 4. Repeat until all merged
+git dispatch restack
+git dispatch push --force
+
+# 5. Cleanup
+git dispatch reset --force
+```
 
 ## Conflict Recovery
 
