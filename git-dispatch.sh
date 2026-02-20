@@ -323,6 +323,20 @@ cmd_split() {
 
             git checkout "$orig" --quiet
 
+            # Remove any stale references to this branch from other parents
+            local stale_parent
+            stale_parent=$(find_stack_parent "$branch_name")
+            if [[ -n "$stale_parent" && "$stale_parent" != "$prev_branch" ]]; then
+                stack_remove "$branch_name" "$stale_parent"
+            fi
+
+            # Insert into stack (splice: parent → new → old child)
+            local current_child=""
+            current_child=$(get_tasks "$prev_branch" | head -1)
+            if [[ -n "$current_child" && "$current_child" != "$branch_name" ]]; then
+                stack_remove "$current_child" "$prev_branch"
+                stack_add "$current_child" "$branch_name"
+            fi
             stack_add "$branch_name" "$prev_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
 
