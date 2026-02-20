@@ -1337,8 +1337,8 @@ test_status_merge_warning() {
     local output
     output=$(bash "$DISPATCH" status source/feature 2>&1)
 
-    assert_contains "$output" "merge commit" "status shows merge warning"
-    assert_contains "$output" "git dispatch resolve" "status suggests resolve command"
+    assert_contains "$output" "merge commit" "status shows merge info"
+    assert_contains "$output" "no action needed" "clean merge shows no action needed"
 
     teardown
 }

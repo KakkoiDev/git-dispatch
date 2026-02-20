@@ -586,8 +586,11 @@ cmd_sync() {
 
         # Task → source: commits in task branch not yet in source
         # Use stack parent as limit so we only count this task's commits
+        # Skip commits from base (master) that were merged into the branch
         local parent
         parent=$(find_stack_parent "$task_branch")
+        local base
+        base=$(recover_dispatch_base "$source" 2>/dev/null || true)
         local -a task_to_source=()
         local needs_trailer=false
         cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
@@ -595,6 +598,10 @@ cmd_sync() {
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
+            # Skip commits that are ancestors of base (merged master commits)
+            if [[ -n "$base" ]] && git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
+                continue
+            fi
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
             if [[ "$tid" != "$task_id" ]]; then
@@ -673,13 +680,18 @@ cmd_status() {
         # Task -> source: commits in task branch not yet in source
         # Use stack parent as limit so we only count this task's commits,
         # not ancestor commits from base/master
+        # Filter by Task-Id to exclude master commits merged into the branch
         local task_to_source=0
         local parent
         parent=$(find_stack_parent "$task_branch")
         cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
-            task_to_source=$((task_to_source + 1))
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
+            local tid
+            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" == "$task_id" ]] && task_to_source=$((task_to_source + 1))
         done <<< "$cherry_out"
 
         echo -e "  ${YELLOW}$task_branch${NC}"
@@ -709,7 +721,11 @@ cmd_status() {
             unresolved_count=$((unresolved_count + 1))
         done <<< "$merge_commits"
         if [[ $unresolved_count -gt 0 ]]; then
-            echo -e "    ${RED}WARNING: ${unresolved_count} merge commit(s) — run: git dispatch resolve${NC}"
+            if [[ $task_to_source -gt 0 ]]; then
+                echo -e "    ${RED}WARNING: ${unresolved_count} merge commit(s) — run: git dispatch resolve${NC}"
+            else
+                echo -e "    ${YELLOW}${unresolved_count} merge commit(s) from base (no action needed)${NC}"
+            fi
         fi
 
         echo ""
