@@ -1634,6 +1634,273 @@ test_split_cherry_pick_conflict_graceful() {
     teardown
 }
 
+test_restack_basic() {
+    echo "=== test: restack basic ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Record old tips
+    local old_4 old_5
+    old_4=$(git rev-parse feat/4)
+    old_5=$(git rev-parse feat/5)
+
+    # Simulate feat/3 merged to master + another PR merged (master advances)
+    git checkout master -q
+    git merge feat/3 --ff-only -q
+    echo "other-pr" > other.txt; git add other.txt
+    git commit -m "Other PR merged to master" -q
+
+    bash "$DISPATCH" restack source/feature
+
+    # feat/4 should have been rebased (different hash since master advanced)
+    local new_4
+    new_4=$(git rev-parse feat/4)
+    if [[ "$old_4" != "$new_4" ]]; then
+        echo -e "  ${GREEN}PASS${NC} feat/4 rebased (new hash)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/4 should have new hash after rebase"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # feat/4 should have only its own 2 commits on top of master
+    local count4
+    count4=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
+    assert_eq "2" "$count4" "feat/4 has 2 own commits on master"
+
+    # feat/5 should have 3 commits on master (2 from feat/4 + 1 own)
+    local count5
+    count5=$(git log --oneline master..feat/5 | wc -l | tr -d ' ')
+    assert_eq "3" "$count5" "feat/5 has 3 commits on master"
+
+    # Verify file content preserved
+    if git show feat/4:api.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} feat/4 has api.txt"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/4 missing api.txt"
+        FAIL=$((FAIL + 1))
+    fi
+
+    if git show feat/5:validate.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} feat/5 has validate.txt"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/5 missing validate.txt"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_restack_dry_run() {
+    echo "=== test: restack --dry-run ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Merge feat/3 to master + advance
+    git checkout master -q
+    git merge feat/3 --ff-only -q
+    echo "other-pr" > other.txt; git add other.txt
+    git commit -m "Other PR merged" -q
+
+    local old_4
+    old_4=$(git rev-parse feat/4)
+
+    local output
+    output=$(bash "$DISPATCH" restack --dry-run source/feature)
+
+    assert_contains "$output" "[merged]" "dry-run shows merged branch"
+    assert_contains "$output" "[rebase]" "dry-run shows rebase plan"
+    assert_contains "$output" "dry-run" "dry-run label in summary"
+
+    # Branches should NOT have changed
+    local new_4
+    new_4=$(git rev-parse feat/4)
+    assert_eq "$old_4" "$new_4" "dry-run did not modify branches"
+
+    teardown
+}
+
+test_restack_all_merged() {
+    echo "=== test: restack all merged ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Fast-forward master through all branches
+    git checkout master -q
+    git merge feat/5 --ff-only -q
+
+    local output
+    output=$(bash "$DISPATCH" restack source/feature)
+
+    assert_contains "$output" "[merged]" "reports merged branches"
+    assert_contains "$output" "All branches merged" "suggests reset"
+
+    teardown
+}
+
+test_restack_auto_detect() {
+    echo "=== test: restack auto-detect ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    git checkout master -q
+    git merge feat/3 --ff-only -q
+    echo "other-pr" > other.txt; git add other.txt
+    git commit -m "Other PR merged" -q
+
+    local old_4
+    old_4=$(git rev-parse feat/4)
+
+    # Run from source branch without explicit arg
+    git checkout source/feature -q
+    bash "$DISPATCH" restack
+
+    local new_4
+    new_4=$(git rev-parse feat/4)
+    if [[ "$old_4" != "$new_4" ]]; then
+        echo -e "  ${GREEN}PASS${NC} auto-detect restacked from source branch"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} auto-detect should have restacked"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_restack_conflict_stops() {
+    echo "=== test: restack conflict stops ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Merge feat/3 to master, then add conflicting change
+    git checkout master -q
+    git merge feat/3 --ff-only -q
+    echo "conflicting-content" > api.txt; git add api.txt
+    git commit -m "Master conflicts with feat/4" -q
+
+    local output
+    if output=$(bash "$DISPATCH" restack source/feature 2>&1); then
+        echo -e "  ${RED}FAIL${NC} restack should fail on conflict"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "[conflict]" "reports conflict"
+        assert_contains "$output" "feat/4" "identifies conflicting branch"
+    fi
+
+    # feat/5 should be untouched (stopped before reaching it)
+    # After ff-merge of feat/3 + conflict commit, master..feat/5 = 3 (feat/4's 2 + feat/5's 1)
+    local old_5_check
+    old_5_check=$(git log --oneline master..feat/5 2>/dev/null | wc -l | tr -d ' ')
+    assert_eq "3" "$old_5_check" "feat/5 untouched after conflict stop"
+
+    teardown
+}
+
+test_restack_worktree() {
+    echo "=== test: restack with worktree ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Create worktree for feat/4
+    git worktree add ../wt-restack feat/4 -q
+
+    # Merge feat/3 to master + advance
+    git checkout master -q
+    git merge feat/3 --ff-only -q
+    echo "other-pr" > other.txt; git add other.txt
+    git commit -m "Other PR merged" -q
+
+    local old_4
+    old_4=$(git rev-parse feat/4)
+
+    bash "$DISPATCH" restack source/feature
+
+    # feat/4 should be rebased even though it's in a worktree
+    local new_4
+    new_4=$(git rev-parse feat/4)
+    if [[ "$old_4" != "$new_4" ]]; then
+        echo -e "  ${GREEN}PASS${NC} worktree branch rebased"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} worktree branch should have been rebased"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # Verify file exists in worktree
+    if [[ -f "../wt-restack/api.txt" ]]; then
+        echo -e "  ${GREEN}PASS${NC} worktree has rebased content"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} worktree missing rebased content"
+        FAIL=$((FAIL + 1))
+    fi
+
+    git worktree remove ../wt-restack --force 2>/dev/null || true
+    rm -rf "$TMPDIR/../wt-restack" 2>/dev/null || true
+    teardown
+}
+
+test_restack_middle_merged() {
+    echo "=== test: restack with middle branches merged ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Merge feat/3 AND feat/4 to master + advance
+    git checkout master -q
+    git merge feat/4 --ff-only -q
+    echo "other-pr" > other.txt; git add other.txt
+    git commit -m "Other PR merged" -q
+
+    local old_5
+    old_5=$(git rev-parse feat/5)
+
+    bash "$DISPATCH" restack source/feature
+
+    # feat/5 should be rebased directly onto master
+    local new_5
+    new_5=$(git rev-parse feat/5)
+    if [[ "$old_5" != "$new_5" ]]; then
+        echo -e "  ${GREEN}PASS${NC} feat/5 rebased (new hash)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/5 should have new hash after rebase"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # feat/5 should have only its 1 own commit on top of master
+    local count5
+    count5=$(git log --oneline master..feat/5 | wc -l | tr -d ' ')
+    assert_eq "1" "$count5" "feat/5 has 1 own commit directly on master"
+
+    # Verify content preserved
+    if git show feat/5:validate.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} feat/5 has validate.txt"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/5 missing validate.txt"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1698,6 +1965,13 @@ test_resplit_new_task_at_end
 test_resplit_warns_no_task_order
 test_resplit_no_warn_first_split
 test_split_cherry_pick_conflict_graceful
+test_restack_basic
+test_restack_dry_run
+test_restack_all_merged
+test_restack_auto_detect
+test_restack_conflict_stops
+test_restack_worktree
+test_restack_middle_merged
 
 echo ""
 echo "======================="
