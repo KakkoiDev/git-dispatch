@@ -766,7 +766,7 @@ test_split_no_commits() {
 }
 
 test_split_already_exists() {
-    echo "=== test: split when branch already exists ==="
+    echo "=== test: split skips existing branches ==="
     setup
     create_source
 
@@ -774,12 +774,11 @@ test_split_already_exists() {
     git branch feat/3 master
 
     local output
-    if output=$(bash "$DISPATCH" split source/feature --base master --name feat 2>&1); then
-        echo -e "  ${RED}FAIL${NC} split should fail when branch exists"
-        FAIL=$((FAIL + 1))
-    else
-        assert_contains "$output" "already exists" "error mentions branch already exists"
-    fi
+    output=$(bash "$DISPATCH" split source/feature --base master --name feat 2>&1)
+
+    assert_contains "$output" "Skipping feat/3" "skips pre-existing branch"
+    assert_branch_exists "feat/4" "task-4 still created"
+    assert_branch_exists "feat/5" "task-5 still created"
 
     teardown
 }
@@ -1372,6 +1371,269 @@ test_hook_install_post_merge() {
     teardown
 }
 
+test_resplit_recovers_metadata() {
+    echo "=== test: re-split recovers --base and --name from metadata ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Re-split without --base or --name
+    local output
+    output=$(bash "$DISPATCH" split source/feature 2>&1)
+
+    assert_contains "$output" "Skipping feat/3" "re-split skips existing task-3"
+    assert_contains "$output" "Skipping feat/4" "re-split skips existing task-4"
+    assert_contains "$output" "Skipping feat/5" "re-split skips existing task-5"
+    local clean_output
+    clean_output=$(echo "$output" | sed $'s/\033\\[[0-9;]*m//g')
+    assert_contains "$clean_output" "Base:   master" "recovered base from metadata"
+
+    teardown
+}
+
+test_resplit_guards_wrong_prefix() {
+    echo "=== test: re-split rejects mismatched --name ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    if output=$(bash "$DISPATCH" split source/feature --name wrong/prefix 2>&1); then
+        echo -e "  ${RED}FAIL${NC} re-split should reject wrong prefix"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Prefix mismatch" "error mentions prefix mismatch"
+    fi
+
+    teardown
+}
+
+test_resplit_guards_wrong_base() {
+    echo "=== test: re-split rejects mismatched --base ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Create a decoy base
+    git branch wrong-base master
+
+    local output
+    if output=$(bash "$DISPATCH" split source/feature --base wrong-base 2>&1); then
+        echo -e "  ${RED}FAIL${NC} re-split should reject wrong base"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Base mismatch" "error mentions base mismatch"
+    fi
+
+    teardown
+}
+
+test_resplit_idempotent() {
+    echo "=== test: re-split is idempotent ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Record state before
+    local tree_before
+    tree_before=$(bash "$DISPATCH" tree master)
+    local tip3_before tip4_before tip5_before
+    tip3_before=$(git rev-parse feat/3)
+    tip4_before=$(git rev-parse feat/4)
+    tip5_before=$(git rev-parse feat/5)
+
+    # Re-split
+    bash "$DISPATCH" split source/feature >/dev/null
+
+    # State should be identical
+    local tree_after
+    tree_after=$(bash "$DISPATCH" tree master)
+    assert_eq "$tree_before" "$tree_after" "tree unchanged after idempotent re-split"
+
+    local tip3_after tip4_after tip5_after
+    tip3_after=$(git rev-parse feat/3)
+    tip4_after=$(git rev-parse feat/4)
+    tip5_after=$(git rev-parse feat/5)
+    assert_eq "$tip3_before" "$tip3_after" "task-3 tip unchanged"
+    assert_eq "$tip4_before" "$tip4_after" "task-4 tip unchanged"
+    assert_eq "$tip5_before" "$tip5_after" "task-5 tip unchanged"
+
+    teardown
+}
+
+test_resplit_new_task_mid_stack() {
+    echo "=== test: re-split inserts new task mid-stack with Task-Order ==="
+    setup
+
+    git checkout -b source/midstack master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 3')" -q
+
+    # First split: A -> C
+    bash "$DISPATCH" split source/midstack --base master --name feat >/dev/null
+
+    local tree_before
+    tree_before=$(bash "$DISPATCH" tree master)
+    assert_contains "$tree_before" "feat/task-A" "task-A in initial tree"
+    assert_contains "$tree_before" "feat/task-C" "task-C in initial tree"
+
+    # Add task-B with Task-Order=2 (should go between A and C)
+    git checkout source/midstack -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+
+    # Re-split
+    bash "$DISPATCH" split source/midstack >/dev/null
+
+    # Verify stack order: master -> A -> B -> C
+    local tasks_master
+    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-A" "$tasks_master" "master -> task-A"
+
+    local tasks_a
+    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (mid-stack insert)"
+
+    local tasks_b
+    tasks_b=$(git config --get-all branch.feat/task-B.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-C" "$tasks_b" "task-B -> task-C (re-linked)"
+
+    # Verify task-B has the commit
+    if git show feat/task-B:b.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} b.txt exists in task-B"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} b.txt missing from task-B"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_resplit_new_task_at_end() {
+    echo "=== test: re-split appends new task at end of stack ==="
+    setup
+
+    git checkout -b source/append master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+
+    bash "$DISPATCH" split source/append --base master --name feat >/dev/null
+
+    # Add task-C at end
+    git checkout source/append -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 3')" -q
+
+    bash "$DISPATCH" split source/append >/dev/null
+
+    local tasks_b
+    tasks_b=$(git config --get-all branch.feat/task-B.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/task-C" "$tasks_b" "task-B -> task-C (appended at end)"
+
+    assert_branch_exists "feat/task-C" "task-C branch created"
+
+    teardown
+}
+
+test_resplit_warns_no_task_order() {
+    echo "=== test: re-split warns when new task has no Task-Order ==="
+    setup
+
+    git checkout -b source/warnorder master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    bash "$DISPATCH" split source/warnorder --base master --name feat >/dev/null
+
+    # Add task without Task-Order
+    git checkout source/warnorder -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B')" -q
+
+    local output
+    output=$(bash "$DISPATCH" split source/warnorder 2>&1)
+
+    assert_contains "$output" "WARNING" "warns about missing Task-Order"
+    assert_contains "$output" "task-B" "warning mentions the task"
+    assert_contains "$output" "Task-Order" "warning suggests Task-Order"
+
+    teardown
+}
+
+test_resplit_no_warn_first_split() {
+    echo "=== test: first split does not warn about Task-Order ==="
+    setup
+
+    git checkout -b source/nowarn master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A')" -q
+
+    local output
+    output=$(bash "$DISPATCH" split source/nowarn --base master --name feat 2>&1)
+
+    assert_not_contains "$output" "WARNING" "no warning on first split"
+
+    teardown
+}
+
+test_split_cherry_pick_conflict_graceful() {
+    echo "=== test: split handles cherry-pick conflict gracefully ==="
+    setup
+
+    git checkout -b source/conflict master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    echo "b" > file.txt; git add file.txt
+    git commit -m "Modify file$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+
+    bash "$DISPATCH" split source/conflict --base master --name feat >/dev/null
+
+    # Merge master into task-A to create resolve scenario
+    git checkout master -q
+    echo "master-change" > file.txt; git add file.txt
+    git commit -m "Master changes file" -q
+
+    git checkout feat/task-A -q
+    git merge master -q 2>/dev/null || {
+        echo "resolved" > file.txt
+        git add file.txt
+        git commit --no-edit -q
+    }
+    bash "$DISPATCH" resolve
+
+    # Delete task-B to force re-creation
+    git checkout master -q
+    git branch -D feat/task-B
+    git config --remove-section branch.feat/task-B 2>/dev/null || true
+    git config --unset "branch.feat/task-A.dispatchtasks" 2>/dev/null || true
+
+    # Re-split should handle conflict gracefully
+    local output
+    output=$(bash "$DISPATCH" split source/conflict 2>&1)
+
+    assert_contains "$output" "cherry-pick conflicted" "warns about cherry-pick conflict"
+    assert_branch_exists "feat/task-B" "task-B branch still created (metadata)"
+
+    # Branch should have dispatchsource set
+    local src
+    src=$(git config branch.feat/task-B.dispatchsource 2>/dev/null || true)
+    assert_eq "source/conflict" "$src" "task-B linked to source despite conflict"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1427,6 +1689,15 @@ test_resolve_not_merge
 test_resolve_not_task_branch
 test_status_merge_warning
 test_hook_install_post_merge
+test_resplit_recovers_metadata
+test_resplit_guards_wrong_prefix
+test_resplit_guards_wrong_base
+test_resplit_idempotent
+test_resplit_new_task_mid_stack
+test_resplit_new_task_at_end
+test_resplit_warns_no_task_order
+test_resplit_no_warn_first_split
+test_split_cherry_pick_conflict_graceful
 
 echo ""
 echo "======================="

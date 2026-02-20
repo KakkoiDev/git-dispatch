@@ -445,7 +445,7 @@ find_dispatch_tasks() {
         [[ "$csource" == "$source" ]] && found+=("$bname")
     done < <(git for-each-ref --format='%(refname)' refs/heads/)
 
-    printf '%s\n' "${found[@]}"
+    [[ ${#found[@]} -gt 0 ]] && printf '%s\n' "${found[@]}" || true
 }
 
 # Order tasks by walking the dispatch stack hierarchy.
@@ -453,6 +453,8 @@ find_dispatch_tasks() {
 order_by_stack() {
     local -a tasks=()
     while IFS= read -r t; do [[ -n "$t" ]] && tasks+=("$t"); done
+
+    [[ ${#tasks[@]} -gt 0 ]] || return 0
 
     # Find base branch (parent of first task that isn't itself a dispatch task)
     local base=""
