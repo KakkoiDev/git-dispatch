@@ -104,6 +104,25 @@ _is_content_merged() {
     git diff --quiet "$base_ref" "$branch_tip" -- $changed_files 2>/dev/null
 }
 
+# Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
+_get_open_prs() {
+    local source="$1"
+    if ! command -v gh &>/dev/null; then
+        warn "gh CLI not found - skipping PR detection"
+        return 1
+    fi
+    if ! gh auth status &>/dev/null 2>&1; then
+        warn "gh CLI not authenticated - skipping PR detection"
+        return 1
+    fi
+    while IFS= read -r task; do
+        [[ -n "$task" ]] || continue
+        local pr_num
+        pr_num=$(gh pr list --head "$task" --state open --json number --jq '.[0].number' 2>/dev/null)
+        [[ -n "$pr_num" ]] && echo "$task $pr_num"
+    done < <(find_dispatch_tasks "$source")
+}
+
 # Amend commits on a branch to add Task-Id trailer (rewrites history)
 _amend_trailers_on_branch() {
     local branch="$1" task_id="$2"; shift 2
@@ -429,6 +448,22 @@ cmd_split() {
     echo -e "${CYAN}Base:${NC}   $base"
     echo -e "${CYAN}Tasks:${NC}  ${task_ids[*]}"
     echo ""
+
+    # Warn about open PRs before re-creating branches
+    if [[ -n "$existing_tasks_str" ]]; then
+        local pr_info
+        if pr_info=$(_get_open_prs "$source" 2>/dev/null); then
+            if [[ -n "$pr_info" ]]; then
+                local pr_count
+                pr_count=$(echo "$pr_info" | wc -l | tr -d ' ')
+                warn "Warning: ${pr_count} task branch(es) have open PRs - re-split will require force push"
+                while IFS=' ' read -r pr_branch pr_num; do
+                    warn "  $pr_branch (PR #${pr_num})"
+                done <<< "$pr_info"
+                echo ""
+            fi
+        fi
+    fi
 
     local prev_branch="$base"
     for tid in "${task_ids[@]}"; do
@@ -794,6 +829,10 @@ cmd_status() {
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
+    # Cache open PR info (silently skip if gh unavailable)
+    local pr_cache=""
+    pr_cache=$(_get_open_prs "$source" 2>/dev/null) || true
+
     echo -e "${CYAN}Source:${NC} $source"
     echo ""
 
@@ -842,7 +881,14 @@ cmd_status() {
             fi
         done <<< "$cherry_out"
 
-        echo -e "  ${YELLOW}$task_branch${NC}"
+        # Append PR number if available
+        local pr_suffix=""
+        if [[ -n "$pr_cache" ]]; then
+            local pr_num
+            pr_num=$(echo "$pr_cache" | awk -v b="$task_branch" '$1 == b {print $2}')
+            [[ -n "$pr_num" ]] && pr_suffix=" (PR #${pr_num})"
+        fi
+        echo -e "  ${YELLOW}$task_branch${NC}${pr_suffix}"
         if [[ $source_to_task -eq 0 && $task_to_source -eq 0 && $untracked_count -eq 0 ]]; then
             echo -e "    ${GREEN}in sync${NC}"
         else
@@ -885,6 +931,120 @@ cmd_status() {
         fi
 
         echo ""
+    done
+}
+
+# ---------- update-base ----------
+
+cmd_update_base() {
+    local source_arg="" strategy=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --merge)   strategy="merge"; shift ;;
+            --rebase)  strategy="rebase"; shift ;;
+            -*)        die "Unknown flag: $1" ;;
+            *)         source_arg="$1"; shift ;;
+        esac
+    done
+
+    local source
+    source=$(resolve_source "$source_arg")
+
+    local base
+    base=$(recover_dispatch_base "$source") || die "Cannot recover base for $source"
+
+    # Fetch latest base from origin if remote exists
+    if git remote get-url origin &>/dev/null; then
+        info "Fetching origin/${base}..."
+        git fetch origin "$base" --quiet 2>/dev/null || warn "Could not fetch origin/${base}"
+    fi
+
+    # Auto-detect strategy if not specified
+    if [[ -z "$strategy" ]]; then
+        local has_prs=false
+        if _get_open_prs "$source" &>/dev/null; then
+            local pr_info
+            pr_info=$(_get_open_prs "$source" 2>/dev/null) || true
+            [[ -n "$pr_info" ]] && has_prs=true
+        fi
+        if $has_prs; then
+            strategy="merge"
+            info "Open PRs detected - using --merge to preserve history"
+        else
+            strategy="rebase"
+            info "No open PRs detected - using --rebase for linear history"
+        fi
+    fi
+
+    local orig
+    orig=$(current_branch)
+
+    git checkout "$source" --quiet
+
+    if [[ "$strategy" == "merge" ]]; then
+        info "Merging ${base} into ${source}..."
+        git merge "$base" --no-edit || die "Merge conflict. Resolve and commit, then re-run."
+    else
+        info "Rebasing ${source} onto ${base}..."
+        git rebase "$base" || {
+            git rebase --abort 2>/dev/null || true
+            die "Rebase conflict. Use --merge or resolve manually."
+        }
+    fi
+
+    info "Done. Source '${source}' updated via ${strategy}."
+
+    # Return to original branch if different
+    if [[ "$orig" != "$source" ]]; then
+        git checkout "$orig" --quiet 2>/dev/null || true
+    fi
+}
+
+# ---------- pr-status ----------
+
+cmd_pr_status() {
+    local source_arg=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*) die "Unknown flag: $1" ;;
+            *)  source_arg="$1"; shift ;;
+        esac
+    done
+
+    local source
+    source=$(resolve_source "$source_arg")
+
+    if ! command -v gh &>/dev/null; then
+        warn "gh CLI not found - cannot check PR status"
+        return 1
+    fi
+    if ! gh auth status &>/dev/null 2>&1; then
+        warn "gh CLI not authenticated - cannot check PR status"
+        return 1
+    fi
+
+    local -a targets=()
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && targets+=("$c")
+    done < <(find_dispatch_tasks "$source" | order_by_stack)
+
+    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+
+    echo -e "${CYAN}Source:${NC} $source"
+    echo ""
+
+    for task_branch in "${targets[@]}"; do
+        local pr_num pr_state pr_url
+        pr_num=$(gh pr list --head "$task_branch" --state all --json number --jq '.[0].number' 2>/dev/null)
+        if [[ -n "$pr_num" ]]; then
+            pr_state=$(gh pr list --head "$task_branch" --state all --json state --jq '.[0].state' 2>/dev/null)
+            pr_url=$(gh pr list --head "$task_branch" --state all --json url --jq '.[0].url' 2>/dev/null)
+            echo -e "  ${YELLOW}$task_branch${NC}  PR #${pr_num} (${pr_state}) ${pr_url}"
+        else
+            echo -e "  ${YELLOW}$task_branch${NC}  no PR"
+        fi
     done
 }
 
@@ -1464,6 +1624,14 @@ COMMANDS
       Convert a merge commit (HEAD) on a task branch into a regular commit
       with Task-Id trailer. Use after merging master to resolve conflicts.
 
+  update-base [source] [--merge|--rebase]
+      Update source branch with latest base. Auto-detects strategy:
+      --merge when open PRs exist (preserves history), --rebase otherwise.
+      Explicit flag overrides auto-detection.
+
+  pr-status [source]
+      Show PR state for each task branch (requires gh CLI).
+
   restack [source] [--dry-run]
       Rebase stack onto updated base after merge. Walks the stack in order;
       merged branches are skipped, remaining branches are rebased onto the
@@ -1513,6 +1681,8 @@ main() {
         reset)        cmd_reset "$@" ;;
         resolve)      cmd_resolve "$@" ;;
         restack)      cmd_restack "$@" ;;
+        update-base)  cmd_update_base "$@" ;;
+        pr-status)    cmd_pr_status "$@" ;;
         tree)         cmd_tree "$@" ;;
         hook)
             [[ "${1:-}" == "install" ]] || die "Usage: git dispatch hook install"

@@ -2518,6 +2518,155 @@ test_hook_convention_no_warning_when_matching() {
     teardown
 }
 
+# ---------- PR-aware tests ----------
+
+test_update_base_merge() {
+    echo "=== test: update-base --merge ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new-base" > new-base.txt; git add new-base.txt
+    git commit -m "advance master" -q
+
+    bash "$DISPATCH" update-base --merge source/feature
+
+    # Source should have merge commit
+    git checkout source/feature -q
+    local parent_count
+    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
+    assert_eq "2" "$parent_count" "source has merge commit after update-base --merge"
+
+    # new-base.txt should be present
+    if [[ -f "new-base.txt" ]]; then
+        echo -e "  ${GREEN}PASS${NC} base content merged into source"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} base content not merged"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_update_base_rebase() {
+    echo "=== test: update-base --rebase ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new-base" > new-base.txt; git add new-base.txt
+    git commit -m "advance master" -q
+
+    bash "$DISPATCH" update-base --rebase source/feature
+
+    # Source should have linear history (no merge commits)
+    git checkout source/feature -q
+    local merge_count
+    merge_count=$(git rev-list --merges master..source/feature | wc -l | tr -d ' ')
+    assert_eq "0" "$merge_count" "linear history after update-base --rebase"
+
+    # new-base.txt should be present (rebased on top of master)
+    if git show source/feature:new-base.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} base content available after rebase"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} base content not available after rebase"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_update_base_auto_detect() {
+    echo "=== test: update-base auto-detects source ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new-base" > new-base.txt; git add new-base.txt
+    git commit -m "advance master" -q
+
+    # Run from source branch without explicit source arg
+    git checkout source/feature -q
+    bash "$DISPATCH" update-base --rebase
+
+    local merge_count
+    merge_count=$(git rev-list --merges master..source/feature | wc -l | tr -d ' ')
+    assert_eq "0" "$merge_count" "auto-detect source rebased correctly"
+
+    teardown
+}
+
+test_pr_status_no_gh() {
+    echo "=== test: pr-status warns when gh unavailable ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Run pr-status with gh hidden from PATH
+    local output
+    output=$(PATH=/usr/bin:/bin bash "$DISPATCH" pr-status source/feature 2>&1) || true
+
+    assert_contains "$output" "gh CLI not found" "warns about missing gh"
+
+    teardown
+}
+
+test_update_base_default_no_gh() {
+    echo "=== test: update-base defaults to rebase when gh unavailable ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new-base" > new-base.txt; git add new-base.txt
+    git commit -m "advance master" -q
+
+    # Run without --merge/--rebase, with gh hidden (no PR detection)
+    local output
+    output=$(PATH=/usr/bin:/bin bash "$DISPATCH" update-base source/feature 2>&1)
+
+    assert_contains "$output" "rebase" "defaults to rebase without gh"
+
+    # Verify linear history
+    local merge_count
+    merge_count=$(git rev-list --merges master..source/feature | wc -l | tr -d ' ')
+    assert_eq "0" "$merge_count" "linear history (rebase default without gh)"
+
+    teardown
+}
+
+test_status_no_pr_noise() {
+    echo "=== test: status runs clean without gh ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Run status with gh hidden from PATH
+    local output
+    output=$(PATH=/usr/bin:/bin bash "$DISPATCH" status source/feature 2>&1)
+
+    assert_not_contains "$output" "gh CLI" "no gh warning in status output"
+    assert_contains "$output" "feat/3" "status still shows branches"
+    assert_contains "$output" "in sync" "status still shows sync state"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2611,6 +2760,12 @@ test_restack_squash_merge
 test_restack_squash_merge_reparents
 test_hook_convention_warning
 test_hook_convention_no_warning_when_matching
+test_update_base_merge
+test_update_base_rebase
+test_update_base_auto_detect
+test_pr_status_no_gh
+test_update_base_default_no_gh
+test_status_no_pr_noise
 
 echo ""
 echo "======================="
