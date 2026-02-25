@@ -88,6 +88,43 @@ git dispatch tree
 git dispatch reset --force
 ```
 
+## Addressing PR Feedback
+
+When a reviewer comments on a stacked PR and the fix needs a new commit (whether the task branch exists or not):
+
+### 1. Detect conventions on the source branch
+
+```bash
+git log --format="%s%n  Task-Id: %(trailers:key=Task-Id,valueonly)  Task-Order: %(trailers:key=Task-Order,valueonly)%n---" <base>..<source>
+```
+
+Match the established format (numeric `3` vs prefixed `task-3`, with or without `Task-Order`).
+
+### 2. Fix on source branch (single source of truth)
+
+```bash
+git checkout <source-branch>
+# ... make changes ...
+git commit -m "fix: address PR comment" --trailer "Task-Id=<id>" [--trailer "Task-Order=<order>"]
+```
+
+- Use existing task ID if the fix belongs to an existing task
+- Use a new sub-ID (e.g., `task-6.2`) if it's a new reviewable unit
+
+### 3. Split or sync
+
+| Scenario | Command |
+|----------|---------|
+| Task branch **does not exist** (new task or after reset) | `git dispatch split <source> --base <base> --name <prefix>` |
+| Task branch **exists** | `git dispatch sync` |
+
+### 4. Push
+
+```bash
+git dispatch push --branch <task-branch>       # single branch
+git dispatch push --force                       # if rebased by split
+```
+
 ## TRD Template
 
 Available at `trd-template.md`. Key: task numbers become Task-Id trailer values.

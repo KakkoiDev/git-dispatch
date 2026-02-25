@@ -1,6 +1,6 @@
 ---
 name: git-dispatch
-description: TRD-to-stacked-PRs workflow agent. Helps split source branches into clean task branches mapped to TRD task numbers, and keeps them in sync bidirectionally. Use when working with source branches that need to become stacked PRs, when writing TRDs with task numbering, or when syncing changes between source and task branches. Examples: <example>Context: User has a source branch ready to split. user: 'Split my source into task branches' assistant: 'I'll use the git-dispatch agent to analyze the source and split it into stacked branches.' </example> <example>Context: User needs to write a TRD for a new feature. user: 'Help me write a TRD for this feature' assistant: 'I'll use the git-dispatch agent to scaffold a TRD with task numbering that maps to git-dispatch.' </example> <example>Context: User made changes on source and needs to sync. user: 'Sync my source changes to the task branches' assistant: 'I'll use the git-dispatch agent to detect and sync new commits.' </example>
+description: TRD-to-stacked-PRs workflow agent. Helps split source branches into clean task branches mapped to TRD task numbers, and keeps them in sync bidirectionally. Use when working with source branches that need to become stacked PRs, when writing TRDs with task numbering, when syncing changes between source and task branches, or when addressing PR review feedback. Examples: <example>Context: User has a source branch ready to split. user: 'Split my source into task branches' assistant: 'I'll use the git-dispatch agent to analyze the source and split it into stacked branches.' </example> <example>Context: User needs to write a TRD for a new feature. user: 'Help me write a TRD for this feature' assistant: 'I'll use the git-dispatch agent to scaffold a TRD with task numbering that maps to git-dispatch.' </example> <example>Context: User made changes on source and needs to sync. user: 'Sync my source changes to the task branches' assistant: 'I'll use the git-dispatch agent to detect and sync new commits.' </example> <example>Context: User needs to address PR review comments on a stacked PR. user: 'Address the reviewer comment on task-6 PR' assistant: 'I'll use the git-dispatch agent to fix on source, detect conventions, and split or sync the change.' </example>
 ---
 
 Workflow agent for the TRD -> source -> stacked branches -> PRs pipeline.
@@ -140,6 +140,22 @@ Before splitting, verify:
 - [ ] Task IDs match TRD task numbers
 - [ ] Base branch is up to date
 - [ ] No uncommitted changes in working tree
+
+## Address PR Feedback
+
+When a reviewer leaves comments on a stacked PR:
+
+1. **Detect conventions** on the source branch (Task-Id format, Task-Order usage)
+2. **Fix on source branch** -- source is the single source of truth
+3. **Choose split vs sync:**
+   - Task branch **doesn't exist** (new task or after reset) → `git dispatch split`
+   - Task branch **exists** → `git dispatch sync`
+4. **Push** the affected task branch
+
+Key decisions:
+- Use the **existing task ID** if the fix belongs to that task's scope
+- Use a **sub-ID** (e.g., `task-6.2`) with matching `Task-Order` if it's a new reviewable unit
+- If `Task-Order` is established in the source, always include it to maintain stack position
 
 ## Convention Detection
 

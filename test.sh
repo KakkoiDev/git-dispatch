@@ -77,6 +77,17 @@ assert_branch_exists() {
     fi
 }
 
+assert_branch_not_exists() {
+    local branch="$1" msg="${2:-branch $1 does not exist}"
+    if git rev-parse --verify "$branch" >/dev/null 2>&1; then
+        echo -e "  ${RED}FAIL${NC} $msg"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} $msg"
+        PASS=$((PASS + 1))
+    fi
+}
+
 # Create a source branch with trailer-tagged commits
 create_source() {
     git checkout -b source/feature master -q
@@ -1634,6 +1645,54 @@ test_split_cherry_pick_conflict_graceful() {
     teardown
 }
 
+test_resplit_after_reset_pr_feedback() {
+    echo "=== test: re-split after reset picks up fix commit (PR feedback) ==="
+    setup
+
+    git checkout -b source/prfix master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+
+    # Initial split
+    bash "$DISPATCH" split source/prfix --base master --name feat >/dev/null
+
+    assert_branch_exists "feat/task-A" "task-A created"
+    assert_branch_exists "feat/task-B" "task-B created"
+
+    # Reset all dispatch metadata + branches (simulates cleanup)
+    bash "$DISPATCH" reset source/prfix --branches --force >/dev/null 2>&1
+
+    # Verify branches are gone
+    assert_branch_not_exists "feat/task-A" "task-A removed after reset"
+    assert_branch_not_exists "feat/task-B" "task-B removed after reset"
+
+    # Reviewer left a comment on task-A -- add fix commit on source
+    git checkout source/prfix -q
+    echo "a-fix" >> a.txt; git add a.txt
+    git commit -m "fix: address PR comment on A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+
+    # Re-split recreates all branches including the fix
+    bash "$DISPATCH" split source/prfix --base master --name feat >/dev/null
+
+    assert_branch_exists "feat/task-A" "task-A recreated after re-split"
+    assert_branch_exists "feat/task-B" "task-B recreated after re-split"
+
+    # task-A should have 2 commits (original + fix)
+    local count_a
+    count_a=$(git log --oneline master..feat/task-A | wc -l | tr -d ' ')
+    assert_eq "2" "$count_a" "task-A has 2 commits (original + fix)"
+
+    # Verify fix landed
+    local content
+    content=$(git show feat/task-A:a.txt)
+    assert_contains "$content" "a-fix" "fix content present in task-A"
+
+    teardown
+}
+
 test_restack_basic() {
     echo "=== test: restack basic ==="
     setup
@@ -1965,6 +2024,7 @@ test_resplit_new_task_at_end
 test_resplit_warns_no_task_order
 test_resplit_no_warn_first_split
 test_split_cherry_pick_conflict_graceful
+test_resplit_after_reset_pr_feedback
 test_restack_basic
 test_restack_dry_run
 test_restack_all_merged
