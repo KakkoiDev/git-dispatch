@@ -2354,6 +2354,170 @@ test_sync_cherry_pick_untracked_conflict() {
     teardown
 }
 
+test_push_short_branch_name() {
+    echo "=== test: push --branch accepts short name ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" push --dry-run --branch 4 source/feature)
+
+    assert_contains "$output" "git push -u origin feat/4" "short name '4' matches feat/4"
+    assert_not_contains "$output" "feat/3" "push excludes task-3"
+    assert_not_contains "$output" "feat/5" "push excludes task-5"
+
+    teardown
+}
+
+test_pr_short_branch_name() {
+    echo "=== test: pr --branch accepts short name ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" pr --dry-run --branch 4 source/feature)
+
+    assert_contains "$output" "gh pr create --base feat/3 --head feat/4" "short name '4' matches feat/4"
+
+    # Should NOT contain other branches
+    if [[ "$output" == *"--head feat/3"* ]]; then
+        echo -e "  ${RED}FAIL${NC} should not create PR for task-3"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} no PR for task-3"
+        PASS=$((PASS + 1))
+    fi
+
+    if [[ "$output" == *"--head feat/5"* ]]; then
+        echo -e "  ${RED}FAIL${NC} should not create PR for task-5"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} no PR for task-5"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_restack_squash_merge() {
+    echo "=== test: restack detects squash-merged parent ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Simulate squash-merge of feat/3 into master
+    git checkout master -q
+    git merge --squash feat/3 -q
+    git commit -m "squash-merge feat/3" -q
+
+    local old_4
+    old_4=$(git rev-parse feat/4)
+
+    bash "$DISPATCH" restack source/feature
+
+    # feat/3 should be detected as merged (content-based)
+    # feat/4 should be rebased onto master
+    local new_4
+    new_4=$(git rev-parse feat/4)
+    if [[ "$old_4" != "$new_4" ]]; then
+        echo -e "  ${GREEN}PASS${NC} feat/4 rebased after squash-merge detection"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} feat/4 should have new hash after rebase"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # feat/4 should have only its own 2 commits on top of master
+    local count4
+    count4=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
+    assert_eq "2" "$count4" "feat/4 has 2 own commits on master"
+
+    # feat/5 should have 3 commits on master (2 from feat/4 + 1 own)
+    local count5
+    count5=$(git log --oneline master..feat/5 | wc -l | tr -d ' ')
+    assert_eq "3" "$count5" "feat/5 has 3 commits on master"
+
+    teardown
+}
+
+test_restack_squash_merge_reparents() {
+    echo "=== test: restack reparents children after squash-merge ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Verify initial stack: master -> feat/3 -> feat/4 -> feat/5
+    local tasks_master_before
+    tasks_master_before=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/3" "$tasks_master_before" "initial: master -> feat/3"
+
+    # Squash-merge feat/3 into master
+    git checkout master -q
+    git merge --squash feat/3 -q
+    git commit -m "squash-merge feat/3" -q
+
+    bash "$DISPATCH" restack source/feature
+
+    # After restack: feat/3 removed from stack, feat/4 reparented to master
+    local tasks_master_after
+    tasks_master_after=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    assert_eq "feat/4" "$tasks_master_after" "after restack: master -> feat/4 (reparented)"
+
+    # feat/3 should have no children
+    local tasks_3_after
+    tasks_3_after=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    assert_eq "" "$tasks_3_after" "feat/3 has no children after reparenting"
+
+    teardown
+}
+
+test_hook_convention_warning() {
+    echo "=== test: hook warns on Task-Id convention mismatch ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    # First commit with prefixed Task-Id
+    echo "a" > a.txt; git add a.txt
+    git commit -m "first$(printf '\n\nTask-Id: task-3')" -q
+
+    # Second commit with different prefix format
+    echo "b" > b.txt; git add b.txt
+    local output
+    output=$(git commit -m "second$(printf '\n\nTask-Id: 3')" 2>&1)
+
+    assert_contains "$output" "Warning" "warning shown for format mismatch"
+    assert_contains "$output" "different format" "warning mentions different format"
+
+    teardown
+}
+
+test_hook_convention_no_warning_when_matching() {
+    echo "=== test: hook no warning when Task-Id format matches ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    # First commit with prefixed Task-Id
+    echo "a" > a.txt; git add a.txt
+    git commit -m "first$(printf '\n\nTask-Id: task-3')" -q
+
+    # Second commit with same prefix format
+    echo "b" > b.txt; git add b.txt
+    local output
+    output=$(git commit -m "second$(printf '\n\nTask-Id: task-4')" 2>&1)
+
+    assert_not_contains "$output" "Warning" "no warning when format matches"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2441,6 +2605,12 @@ test_sync_rebase_path_without_merge
 test_sync_cherry_pick_untracked_with_task_order
 test_status_shows_untracked_commits
 test_sync_cherry_pick_untracked_conflict
+test_push_short_branch_name
+test_pr_short_branch_name
+test_restack_squash_merge
+test_restack_squash_merge_reparents
+test_hook_convention_warning
+test_hook_convention_no_warning_when_matching
 
 echo ""
 echo "======================="

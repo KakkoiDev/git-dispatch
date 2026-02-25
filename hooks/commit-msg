@@ -20,6 +20,20 @@ if [[ -n "$pattern" ]]; then
     fi
 fi
 
+# Auto-detect trailer convention warning (no pattern configured)
+if [[ -z "$pattern" ]]; then
+    task_id=$(grep "^Task-Id:" "$msg_file" | head -1 | sed 's/^Task-Id:[[:space:]]*//')
+    recent_tid=$(git log --format="%(trailers:key=Task-Id,valueonly)" -10 HEAD 2>/dev/null | tr -d ' ' | grep -v '^$' | head -1)
+    if [[ -n "$recent_tid" && -n "$task_id" ]]; then
+        recent_prefix="${recent_tid%%[0-9]*}"
+        new_prefix="${task_id%%[0-9]*}"
+        if [[ "$recent_prefix" != "$new_prefix" ]]; then
+            echo "Warning: Task-Id '$task_id' has different format than existing '$recent_tid'"
+            echo "Hint: git config dispatch.taskIdPattern '<pattern>' to enforce"
+        fi
+    fi
+fi
+
 # Validate Task-Order is present if required
 require_order=$(git config dispatch.requireTaskOrder 2>/dev/null || true)
 if [[ "$require_order" == "true" ]]; then

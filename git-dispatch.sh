@@ -93,6 +93,17 @@ _infer_task_order() {
     return 0
 }
 
+# Check if a branch's content has been merged (e.g. squash-merged) into base
+_is_content_merged() {
+    local branch_tip="$1" base_ref="$2"
+    local mb
+    mb=$(git merge-base "$base_ref" "$branch_tip" 2>/dev/null) || return 1
+    local changed_files
+    changed_files=$(git diff --name-only "$mb" "$branch_tip" 2>/dev/null)
+    [[ -z "$changed_files" ]] && return 0
+    git diff --quiet "$base_ref" "$branch_tip" -- $changed_files 2>/dev/null
+}
+
 # Amend commits on a branch to add Task-Id trailer (rewrites history)
 _amend_trailers_on_branch() {
     local branch="$1" task_id="$2"; shift 2
@@ -1022,12 +1033,26 @@ cmd_restack() {
     for i in "${!ordered[@]}"; do
         local task_branch="${ordered[$i]}"
 
-        # Check if fully merged into base
-        if git merge-base --is-ancestor "${old_tips[$i]}" "$base_ref" 2>/dev/null; then
+        # Check if fully merged into base (includes squash-merge detection)
+        if git merge-base --is-ancestor "${old_tips[$i]}" "$base_ref" 2>/dev/null || \
+           _is_content_merged "${old_tips[$i]}" "$base_ref"; then
             if $dry_run; then
                 echo -e "  ${GREEN}[merged]${NC} $task_branch"
             else
                 info "  [merged] $task_branch"
+                # Reparent children to this branch's parent
+                local merge_parent
+                merge_parent=$(find_stack_parent "$task_branch")
+                if [[ -n "$merge_parent" ]]; then
+                    local children
+                    children=$(get_tasks "$task_branch")
+                    while IFS= read -r child; do
+                        [[ -n "$child" ]] || continue
+                        stack_remove "$child" "$task_branch"
+                        stack_add "$child" "$merge_parent"
+                    done <<< "$children"
+                    stack_remove "$task_branch" "$merge_parent"
+                fi
             fi
             merged=$((merged + 1))
             continue
@@ -1132,12 +1157,14 @@ cmd_push() {
     [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
     if [[ -n "$branch_filter" ]]; then
-        local found=false
+        local matched=""
         for c in "${ordered[@]}"; do
-            [[ "$c" == "$branch_filter" ]] && { found=true; break; }
+            if [[ "$c" == "$branch_filter" ]] || [[ "$c" == */"$branch_filter" ]]; then
+                matched="$c"; break
+            fi
         done
-        $found || die "Branch '$branch_filter' not found in dispatch stack"
-        ordered=("$branch_filter")
+        [[ -n "$matched" ]] || die "Branch '$branch_filter' not found in dispatch stack"
+        ordered=("$matched")
     fi
 
     local -a push_args=(-u origin)
@@ -1200,15 +1227,14 @@ cmd_pr() {
 
     # Filter to single branch if --branch is set
     if [[ -n "$branch_filter" ]]; then
-        local found=false
+        local matched=""
         for c in "${ordered[@]}"; do
-            if [[ "$c" == "$branch_filter" ]]; then
-                found=true
-                break
+            if [[ "$c" == "$branch_filter" ]] || [[ "$c" == */"$branch_filter" ]]; then
+                matched="$c"; break
             fi
         done
-        $found || die "Branch '$branch_filter' not found in dispatch stack"
-        ordered=("$branch_filter")
+        [[ -n "$matched" ]] || die "Branch '$branch_filter' not found in dispatch stack"
+        ordered=("$matched")
     fi
 
     echo -e "${CYAN}Source:${NC} $source"
