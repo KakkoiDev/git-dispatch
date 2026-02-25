@@ -9,3 +9,32 @@ if ! grep -q "^Task-Id:" "$msg_file"; then
     echo "Use: git commit --trailer 'Task-Id=N'"
     exit 1
 fi
+
+# Validate Task-Id matches configured pattern
+pattern=$(git config dispatch.taskIdPattern 2>/dev/null || true)
+if [[ -n "$pattern" ]]; then
+    task_id=$(grep "^Task-Id:" "$msg_file" | head -1 | sed 's/^Task-Id:[[:space:]]*//')
+    if ! echo "$task_id" | grep -Eq "$pattern"; then
+        echo "Error: Task-Id '$task_id' does not match pattern: $pattern"
+        exit 1
+    fi
+fi
+
+# Validate Task-Order is present if required
+require_order=$(git config dispatch.requireTaskOrder 2>/dev/null || true)
+if [[ "$require_order" == "true" ]]; then
+    if ! grep -q "^Task-Order:" "$msg_file"; then
+        echo "Error: Missing Task-Order trailer (required by dispatch.requireTaskOrder)."
+        echo "Use: git commit --trailer 'Task-Order=N'"
+        exit 1
+    fi
+fi
+
+# Validate Task-Order format when present (must be numeric)
+if grep -q "^Task-Order:" "$msg_file"; then
+    task_order=$(grep "^Task-Order:" "$msg_file" | head -1 | sed 's/^Task-Order:[[:space:]]*//')
+    if ! echo "$task_order" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+        echo "Error: Task-Order '$task_order' is not numeric. Use integer or decimal (e.g., 6, 6.2)."
+        exit 1
+    fi
+fi

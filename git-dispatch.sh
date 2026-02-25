@@ -240,6 +240,35 @@ cmd_split() {
         [[ -z "$task" ]] && die "Commit $hash has no Task-Id trailer"
     done < "$commit_file"
 
+    # Validate Task-Id matches configured pattern
+    local id_pattern
+    id_pattern=$(git config dispatch.taskIdPattern 2>/dev/null || true)
+    if [[ -n "$id_pattern" ]]; then
+        while read -r hash task _order; do
+            if ! echo "$task" | grep -Eq "$id_pattern"; then
+                die "Commit $(echo "$hash" | cut -c1-8) has Task-Id '$task' not matching pattern: $id_pattern"
+            fi
+        done < "$commit_file"
+    fi
+
+    # Validate Task-Order is present if required
+    local require_order
+    require_order=$(git config dispatch.requireTaskOrder 2>/dev/null || true)
+    if [[ "$require_order" == "true" ]]; then
+        while read -r hash task order; do
+            if [[ -z "$order" ]]; then
+                die "Commit $(echo "$hash" | cut -c1-8) (Task-Id: $task) is missing Task-Order (required by dispatch.requireTaskOrder)"
+            fi
+        done < "$commit_file"
+    fi
+
+    # Validate Task-Order format when present (must be numeric)
+    while read -r hash task order; do
+        if [[ -n "$order" ]] && ! echo "$order" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Task-Order '$order'. Use integer or decimal (e.g., 6, 6.2)."
+        fi
+    done < "$commit_file"
+
     # Ordered unique task ids (Task-Order aware: ordered tasks first, then unordered in commit order)
     local order_output
     if ! order_output=$(awk '
@@ -1234,6 +1263,10 @@ cmd_hook_install() {
     chmod +x "$hook_dir/post-merge"
     info "Installed commit-msg hook to $hook_dir/commit-msg"
     info "Installed post-merge hook to $hook_dir/post-merge"
+    echo ""
+    echo "Hint: configure conventions with:"
+    echo "  git config dispatch.taskIdPattern '^task-[0-9]+\$'"
+    echo "  git config dispatch.requireTaskOrder true"
 }
 
 # ---------- help ----------

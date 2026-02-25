@@ -1960,6 +1960,198 @@ test_restack_middle_merged() {
     teardown
 }
 
+# ---------- dispatch config tests ----------
+
+test_hook_validates_task_id_pattern() {
+    echo "=== test: hook validates Task-Id pattern ==="
+    setup
+
+    bash "$DISPATCH" hook install
+    git config dispatch.taskIdPattern '^task-[0-9]+$'
+
+    echo "x" > x.txt; git add x.txt
+    if git commit -m "bad id$(printf '\n\nTask-Id: 3')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject Task-Id not matching pattern"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects Task-Id not matching pattern"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_hook_allows_task_id_matching_pattern() {
+    echo "=== test: hook allows Task-Id matching pattern ==="
+    setup
+
+    bash "$DISPATCH" hook install
+    git config dispatch.taskIdPattern '^task-[0-9]+$'
+
+    echo "x" > x.txt; git add x.txt
+    git commit -m "good id$(printf '\n\nTask-Id: task-3')" -q
+    if [[ $? -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook allows Task-Id matching pattern"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook should allow matching Task-Id"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_hook_requires_task_order() {
+    echo "=== test: hook requires Task-Order when configured ==="
+    setup
+
+    bash "$DISPATCH" hook install
+    git config dispatch.requireTaskOrder true
+
+    echo "x" > x.txt; git add x.txt
+    if git commit -m "no order$(printf '\n\nTask-Id: 1')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject commit without Task-Order"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Task-Order"
+        PASS=$((PASS + 1))
+    fi
+
+    # With Task-Order should pass
+    git commit -m "with order$(printf '\n\nTask-Id: 1\nTask-Order: 1')" -q
+    if [[ $? -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook allows commit with Task-Order"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook should allow commit with Task-Order"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_hook_validates_task_order_format() {
+    echo "=== test: hook validates Task-Order format ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    echo "x" > x.txt; git add x.txt
+    if git commit -m "bad order$(printf '\n\nTask-Id: 1\nTask-Order: first')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Task-Order"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Task-Order"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_hook_allows_decimal_task_order() {
+    echo "=== test: hook allows decimal Task-Order ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    echo "x" > x.txt; git add x.txt
+    git commit -m "decimal order$(printf '\n\nTask-Id: 1\nTask-Order: 6.2')" -q
+    if [[ $? -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook allows decimal Task-Order"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook should allow decimal Task-Order"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_split_validates_pattern() {
+    echo "=== test: split validates Task-Id pattern ==="
+    setup
+
+    git config dispatch.taskIdPattern '^task-[0-9]+$'
+
+    git checkout -b source/feat master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "bad$(printf '\n\nTask-Id: 3')" -q
+
+    local output
+    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
+        echo -e "  ${RED}FAIL${NC} split should reject Task-Id not matching pattern"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} split rejects Task-Id not matching pattern"
+        PASS=$((PASS + 1))
+    fi
+    assert_contains "$output" "not matching pattern" "error mentions pattern"
+
+    teardown
+}
+
+test_split_validates_task_order_format() {
+    echo "=== test: split validates Task-Order format ==="
+    setup
+
+    git checkout -b source/feat master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "bad order$(printf '\n\nTask-Id: 1\nTask-Order: abc')" -q
+
+    local output
+    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
+        echo -e "  ${RED}FAIL${NC} split should reject non-numeric Task-Order"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} split rejects non-numeric Task-Order"
+        PASS=$((PASS + 1))
+    fi
+    assert_contains "$output" "non-numeric Task-Order" "error mentions non-numeric"
+
+    teardown
+}
+
+test_split_requires_task_order() {
+    echo "=== test: split requires Task-Order when configured ==="
+    setup
+
+    git config dispatch.requireTaskOrder true
+
+    git checkout -b source/feat master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "no order$(printf '\n\nTask-Id: 1')" -q
+
+    local output
+    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
+        echo -e "  ${RED}FAIL${NC} split should reject missing Task-Order"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} split rejects missing Task-Order"
+        PASS=$((PASS + 1))
+    fi
+    assert_contains "$output" "missing Task-Order" "error mentions missing Task-Order"
+
+    teardown
+}
+
+test_no_config_backward_compat() {
+    echo "=== test: no config = backward compatible ==="
+    setup
+
+    # No dispatch config set -- should behave as before
+    git checkout -b source/feat master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "plain$(printf '\n\nTask-Id: 3')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "another$(printf '\n\nTask-Id: 4')" -q
+
+    bash "$DISPATCH" split source/feat --base master --name feat
+    assert_branch_exists "feat/3" "branch feat/3 created without config"
+    assert_branch_exists "feat/4" "branch feat/4 created without config"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2032,6 +2224,15 @@ test_restack_auto_detect
 test_restack_conflict_stops
 test_restack_worktree
 test_restack_middle_merged
+test_hook_validates_task_id_pattern
+test_hook_allows_task_id_matching_pattern
+test_hook_requires_task_order
+test_hook_validates_task_order_format
+test_hook_allows_decimal_task_order
+test_split_validates_pattern
+test_split_validates_task_order_format
+test_split_requires_task_order
+test_no_config_backward_compat
 
 echo ""
 echo "======================="

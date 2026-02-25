@@ -171,6 +171,22 @@ git log --format="%(trailers:key=Task-Order,valueonly)" <base>..<source> | grep 
 
 Follow whatever format is already established. If Task-Order is in use, maintain it.
 
+## Config
+
+Optional git config keys to enforce trailer conventions:
+
+```bash
+git config dispatch.taskIdPattern '^task-[0-9]+$'   # regex Task-Id must match
+git config dispatch.requireTaskOrder true            # require Task-Order on every commit
+```
+
+| Key | Type | Default | Common patterns |
+|-----|------|---------|-----------------|
+| `dispatch.taskIdPattern` | regex | (unset = any) | `^task-[0-9]+$`, `^[0-9]+$`, `^[0-9]{3,}$` |
+| `dispatch.requireTaskOrder` | bool | `false` | `true` |
+
+Validated by commit-msg hook and at split time. Task-Order format (numeric/decimal) is always validated when present.
+
 ## Stack Metadata
 
 Stored in git config:
