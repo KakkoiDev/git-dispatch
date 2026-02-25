@@ -78,6 +78,21 @@ worktree_for_branch() {
     '
 }
 
+# Infer Task-Order from existing commits for a task on source
+_infer_task_order() {
+    local source="$1" base="$2" task_id="$3"
+    while IFS= read -r h; do
+        local t
+        t=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$h" | tr -d '[:space:]')
+        if [[ "$t" == "$task_id" ]]; then
+            local o
+            o=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" "$h" | tr -d '[:space:]')
+            [[ -n "$o" ]] && echo "$o" && return 0
+        fi
+    done < <(git log --format="%H" "$base..$source")
+    return 0
+}
+
 # Amend commits on a branch to add Task-Id trailer (rewrites history)
 _amend_trailers_on_branch() {
     local branch="$1" task_id="$2"; shift 2
@@ -126,6 +141,72 @@ _amend_trailers_on_branch() {
     if [[ -z "$wt" && -n "$orig" ]]; then
         git checkout "$orig" --quiet
     fi
+}
+
+# Cherry-pick into a branch, adding Task-Id (and optionally Task-Order) to commits that lack them
+_cherry_pick_with_trailers() {
+    local branch="$1" task_id="$2" task_order="$3"; shift 3
+    local hashes=("$@")
+    local wt
+    wt=$(worktree_for_branch "$branch")
+    local -a git_cmd=(git)
+    [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
+
+    if [[ -z "$wt" ]]; then
+        local orig
+        orig=$(current_branch)
+        git checkout "$branch" --quiet
+    fi
+
+    # Stash dirty working tree (staged + unstaged) so cherry-pick can proceed
+    local stashed=false
+    if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
+        "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
+        stashed=true
+    fi
+
+    for hash in "${hashes[@]}"; do
+        local tid
+        tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        if [[ "$tid" == "$task_id" ]]; then
+            # Already has correct trailer — cherry-pick normally
+            if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
+                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    if "${git_cmd[@]}" diff --cached --quiet; then
+                        warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        "${git_cmd[@]}" cherry-pick --skip
+                        continue
+                    fi
+                fi
+                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                $stashed && "${git_cmd[@]}" stash pop --quiet
+                [[ -z "$wt" ]] && git checkout "$orig" --quiet
+                die "Cherry-pick into $branch failed on $hash. Resolve manually."
+            fi
+        else
+            # Missing trailer — cherry-pick --no-commit then commit with trailer
+            if ! "${git_cmd[@]}" cherry-pick --no-commit "$hash"; then
+                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    if "${git_cmd[@]}" diff --cached --quiet; then
+                        warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
+                        continue
+                    fi
+                fi
+                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                $stashed && "${git_cmd[@]}" stash pop --quiet
+                [[ -z "$wt" ]] && git checkout "$orig" --quiet
+                die "Cherry-pick into $branch failed on $hash. Resolve manually."
+            fi
+            local msg
+            msg=$(git log -1 --format="%B" "$hash")
+            "${git_cmd[@]}" commit -m "$msg" --trailer "Task-Id=$task_id" \
+                ${task_order:+--trailer "Task-Order=$task_order"} --quiet
+        fi
+    done
+
+    $stashed && "${git_cmd[@]}" stash pop --quiet
+    [[ -z "$wt" ]] && git checkout "$orig" --quiet
 }
 
 # Cherry-pick into a branch, worktree-aware
@@ -640,22 +721,38 @@ cmd_sync() {
         done <<< "$cherry_out"
 
         if [[ ${#task_to_source[@]} -gt 0 ]]; then
-            # Amend commits on task branch to add Task-Id before cherry-picking
             if $needs_trailer; then
-                info "  Fixing Task-Id on task commits..."
-                _amend_trailers_on_branch "$task_branch" "$task_id" "${task_to_source[@]}"
-                # Re-read hashes after rewrite
-                task_to_source=()
-                cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
-                while IFS= read -r line; do
-                    [[ "$line" == +* ]] || continue
-                    local hash
-                    hash=$(echo "$line" | awk '{print $2}')
-                    task_to_source+=("$hash")
-                done <<< "$cherry_out"
+                # Check for merge commits from base on task branch
+                local has_merges=false
+                if git rev-list --merges "${parent}..${task_branch}" 2>/dev/null | grep -q .; then
+                    has_merges=true
+                fi
+
+                if $has_merges; then
+                    info "  Cherry-picking untracked commits to source (merge commits detected)..."
+                    local task_order=""
+                    task_order=$(_infer_task_order "$source" "$base" "$task_id")
+                    info "  Task → source: ${#task_to_source[@]} commit(s)"
+                    _cherry_pick_with_trailers "$source" "$task_id" "$task_order" "${task_to_source[@]}"
+                else
+                    info "  Fixing Task-Id on task commits..."
+                    _amend_trailers_on_branch "$task_branch" "$task_id" "${task_to_source[@]}"
+                    # Re-read hashes after rewrite
+                    task_to_source=()
+                    cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
+                    while IFS= read -r line; do
+                        [[ "$line" == +* ]] || continue
+                        local hash
+                        hash=$(echo "$line" | awk '{print $2}')
+                        task_to_source+=("$hash")
+                    done <<< "$cherry_out"
+                    info "  Task → source: ${#task_to_source[@]} commit(s)"
+                    cherry_pick_into "$source" "${task_to_source[@]}"
+                fi
+            else
+                info "  Task → source: ${#task_to_source[@]} commit(s)"
+                cherry_pick_into "$source" "${task_to_source[@]}"
             fi
-            info "  Task → source: ${#task_to_source[@]} commit(s)"
-            cherry_pick_into "$source" "${task_to_source[@]}"
         else
             echo "  Task → source: up to date"
         fi
@@ -711,20 +808,31 @@ cmd_status() {
         # not ancestor commits from base/master
         # Filter by Task-Id to exclude master commits merged into the branch
         local task_to_source=0
+        local untracked_count=0
         local parent
         parent=$(find_stack_parent "$task_branch")
+        local base
+        base=$(recover_dispatch_base "$source" 2>/dev/null || true)
         cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
+            # Skip commits that are ancestors of base (merged master commits)
+            if [[ -n "$base" ]] && git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
+                continue
+            fi
             local tid
             tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$task_id" ]] && task_to_source=$((task_to_source + 1))
+            if [[ "$tid" == "$task_id" ]]; then
+                task_to_source=$((task_to_source + 1))
+            else
+                untracked_count=$((untracked_count + 1))
+            fi
         done <<< "$cherry_out"
 
         echo -e "  ${YELLOW}$task_branch${NC}"
-        if [[ $source_to_task -eq 0 && $task_to_source -eq 0 ]]; then
+        if [[ $source_to_task -eq 0 && $task_to_source -eq 0 && $untracked_count -eq 0 ]]; then
             echo -e "    ${GREEN}in sync${NC}"
         else
             if [[ $source_to_task -gt 0 ]]; then
@@ -754,6 +862,14 @@ cmd_status() {
                 echo -e "    ${RED}WARNING: ${unresolved_count} merge commit(s) — run: git dispatch resolve${NC}"
             else
                 echo -e "    ${YELLOW}${unresolved_count} merge commit(s) from base (no action needed)${NC}"
+            fi
+        fi
+
+        if [[ $untracked_count -gt 0 ]]; then
+            if [[ $unresolved_count -gt 0 ]]; then
+                echo -e "    ${YELLOW}${untracked_count} untracked commit(s) — sync will cherry-pick to source${NC}"
+            else
+                echo -e "    ${YELLOW}${untracked_count} untracked commit(s) — run: git dispatch sync${NC}"
             fi
         fi
 

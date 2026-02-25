@@ -2152,6 +2152,208 @@ test_no_config_backward_compat() {
     teardown
 }
 
+test_sync_cherry_pick_untracked_with_merge() {
+    echo "=== test: sync cherry-picks untracked commits when merge detected ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new" > new.txt; git add new.txt
+    git commit -m "advance master" -q
+
+    # Merge master into task branch
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    # Make untracked commit (no Task-Id trailer)
+    echo "fix" > fix.txt; git add fix.txt
+    git commit --no-verify -m "hotfix on task branch" -q
+
+    # Sync
+    bash "$DISPATCH" sync source/feature feat/3
+
+    # Verify: source has "hotfix" commit with Task-Id: 3
+    local source_msg
+    source_msg=$(git log -1 --format="%s" source/feature)
+    assert_eq "hotfix on task branch" "$source_msg" "commit message on source"
+
+    local source_trailer
+    source_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_trailer" "Task-Id trailer added on source"
+
+    teardown
+}
+
+test_sync_cherry_pick_untracked_preserves_message() {
+    echo "=== test: sync cherry-pick preserves original commit message ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master and merge into task branch
+    git checkout master -q
+    echo "advance" > adv.txt; git add adv.txt
+    git commit -m "advance" -q
+
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    # Make commit with multi-line message
+    echo "data" > data.txt; git add data.txt
+    git commit --no-verify -m "$(printf 'Multi-line fix\n\nThis is the body of the commit.')" -q
+
+    bash "$DISPATCH" sync source/feature feat/3
+
+    local source_subject
+    source_subject=$(git log -1 --format="%s" source/feature)
+    assert_eq "Multi-line fix" "$source_subject" "subject line preserved"
+
+    local source_body
+    source_body=$(git log -1 --format="%b" source/feature)
+    assert_contains "$source_body" "This is the body of the commit." "body preserved"
+
+    teardown
+}
+
+test_sync_rebase_path_without_merge() {
+    echo "=== test: sync uses rebase path when no merge commits ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Add untracked commit (no merge from base)
+    git checkout feat/3 -q
+    echo "plain" > plain.txt; git add plain.txt
+    git commit --no-verify -m "plain fix" -q
+
+    bash "$DISPATCH" sync source/feature feat/3
+
+    # Task branch commit should have been amended with Task-Id (rebase path)
+    local task_trailer
+    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/3 | tr -d '[:space:]')
+    assert_eq "3" "$task_trailer" "Task-Id added on task branch via rebase"
+
+    # Source should also have the commit
+    local source_msg
+    source_msg=$(git log -1 --format="%s" source/feature)
+    assert_eq "plain fix" "$source_msg" "commit synced to source"
+
+    teardown
+}
+
+test_sync_cherry_pick_untracked_with_task_order() {
+    echo "=== test: sync cherry-pick infers Task-Order from existing commits ==="
+    setup
+
+    # Create source with Task-Order trailers
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add enum$(printf '\n\nTask-Id: 3\nTask-Order: 1')" -q
+    echo "b" > api.txt; git add api.txt
+    git commit -m "Create GET endpoint$(printf '\n\nTask-Id: 4\nTask-Order: 2')" -q
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master and merge into task branch
+    git checkout master -q
+    echo "advance" > adv.txt; git add adv.txt
+    git commit -m "advance" -q
+
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    # Untracked commit
+    echo "fix" > fix.txt; git add fix.txt
+    git commit --no-verify -m "ordered fix" -q
+
+    bash "$DISPATCH" sync source/feature feat/3
+
+    local source_order
+    source_order=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "1" "$source_order" "Task-Order inferred from existing source commits"
+
+    local source_tid
+    source_tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_tid" "Task-Id added"
+
+    teardown
+}
+
+test_status_shows_untracked_commits() {
+    echo "=== test: status reports untracked commits ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Add untracked commit on feat/3 (no Task-Id)
+    git checkout feat/3 -q
+    echo "notrailer" > notrailer.txt; git add notrailer.txt
+    git commit --no-verify -m "untracked commit" -q
+
+    local output
+    output=$(bash "$DISPATCH" status source/feature 2>&1)
+
+    assert_contains "$output" "1 untracked commit" "status shows untracked count"
+    assert_contains "$output" "git dispatch sync" "status suggests sync"
+
+    # feat/4 and feat/5 should still show in sync
+    # (use clean output to match)
+    local clean_output
+    clean_output=$(echo "$output" | sed $'s/\033\\[[0-9;]*m//g')
+    # feat/5 should show in sync
+    assert_contains "$clean_output" "in sync" "other branches still in sync"
+
+    teardown
+}
+
+test_sync_cherry_pick_untracked_conflict() {
+    echo "=== test: sync cherry-pick conflict with merge commits ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
+
+    # Advance master and merge into task branch
+    git checkout master -q
+    echo "advance" > adv.txt; git add adv.txt
+    git commit -m "advance" -q
+
+    git checkout feat/3 -q
+    git merge master --no-edit -q
+
+    # Create conflicting changes
+    echo "task-version" > file.txt; git add file.txt
+    git commit --no-verify -m "conflict on task" -q
+
+    # Create conflicting commit on source
+    git checkout source/feature -q
+    echo "source-version" > file.txt; git add file.txt
+    git commit -m "conflict on source$(printf '\n\nTask-Id: 3')" -q
+
+    # Sync should fail gracefully
+    local output
+    if output=$(bash "$DISPATCH" sync source/feature feat/3 2>&1); then
+        echo -e "  ${RED}FAIL${NC} sync should fail on cherry-pick conflict"
+        FAIL=$((FAIL + 1))
+    else
+        assert_contains "$output" "Cherry-pick into" "error mentions cherry-pick failure"
+    fi
+
+    # Branch should be clean
+    git checkout source/feature -q 2>/dev/null || true
+    local status
+    status=$(git status --porcelain)
+    assert_eq "" "$status" "branch left clean after failed cherry-pick"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2233,6 +2435,12 @@ test_split_validates_pattern
 test_split_validates_task_order_format
 test_split_requires_task_order
 test_no_config_backward_compat
+test_sync_cherry_pick_untracked_with_merge
+test_sync_cherry_pick_untracked_preserves_message
+test_sync_rebase_path_without_merge
+test_sync_cherry_pick_untracked_with_task_order
+test_status_shows_untracked_commits
+test_sync_cherry_pick_untracked_conflict
 
 echo ""
 echo "======================="
