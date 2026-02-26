@@ -1,54 +1,18 @@
 #!/bin/bash
-# git-dispatch commit-msg hook: enforces Task-Id trailer on every commit
-# Install with: git dispatch hook install
+# git-dispatch commit-msg hook: enforces Target-Id trailer on every commit
+# Install with: git dispatch init
 
 msg_file="$1"
 
-if ! grep -q "^Task-Id:" "$msg_file"; then
-    echo "Error: Missing Task-Id trailer."
-    echo "Use: git commit --trailer 'Task-Id=N'"
+if ! grep -q "^Target-Id:" "$msg_file"; then
+    echo "Error: Missing Target-Id trailer."
+    echo "Use: git commit --trailer 'Target-Id=N'"
     exit 1
 fi
 
-# Validate Task-Id matches configured pattern
-pattern=$(git config dispatch.taskIdPattern 2>/dev/null || true)
-if [[ -n "$pattern" ]]; then
-    task_id=$(grep "^Task-Id:" "$msg_file" | head -1 | sed 's/^Task-Id:[[:space:]]*//')
-    if ! echo "$task_id" | grep -Eq "$pattern"; then
-        echo "Error: Task-Id '$task_id' does not match pattern: $pattern"
-        exit 1
-    fi
-fi
-
-# Auto-detect trailer convention warning (no pattern configured)
-if [[ -z "$pattern" ]]; then
-    task_id=$(grep "^Task-Id:" "$msg_file" | head -1 | sed 's/^Task-Id:[[:space:]]*//')
-    recent_tid=$(git log --format="%(trailers:key=Task-Id,valueonly)" -10 HEAD 2>/dev/null | tr -d ' ' | grep -v '^$' | head -1)
-    if [[ -n "$recent_tid" && -n "$task_id" ]]; then
-        recent_prefix="${recent_tid%%[0-9]*}"
-        new_prefix="${task_id%%[0-9]*}"
-        if [[ "$recent_prefix" != "$new_prefix" ]]; then
-            echo "Warning: Task-Id '$task_id' has different format than existing '$recent_tid'"
-            echo "Hint: git config dispatch.taskIdPattern '<pattern>' to enforce"
-        fi
-    fi
-fi
-
-# Validate Task-Order is present if required
-require_order=$(git config dispatch.requireTaskOrder 2>/dev/null || true)
-if [[ "$require_order" == "true" ]]; then
-    if ! grep -q "^Task-Order:" "$msg_file"; then
-        echo "Error: Missing Task-Order trailer (required by dispatch.requireTaskOrder)."
-        echo "Use: git commit --trailer 'Task-Order=N'"
-        exit 1
-    fi
-fi
-
-# Validate Task-Order format when present (must be numeric)
-if grep -q "^Task-Order:" "$msg_file"; then
-    task_order=$(grep "^Task-Order:" "$msg_file" | head -1 | sed 's/^Task-Order:[[:space:]]*//')
-    if ! echo "$task_order" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-        echo "Error: Task-Order '$task_order' is not numeric. Use integer or decimal (e.g., 6, 6.2)."
-        exit 1
-    fi
+# Validate Target-Id is numeric (integer or decimal)
+target_id=$(grep "^Target-Id:" "$msg_file" | head -1 | sed 's/^Target-Id:[[:space:]]*//')
+if ! echo "$target_id" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+    echo "Error: Target-Id '$target_id' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5)."
+    exit 1
 fi
