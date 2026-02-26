@@ -23,29 +23,29 @@ warn() { echo -e "${YELLOW}$*${NC}"; }
 current_branch() { git symbolic-ref --short HEAD 2>/dev/null; }
 
 # Get tasks of a branch from git config (dispatch stack)
-get_tasks() {
+get_targets() {
     local branch="$1"
-    git config --get-all "branch.${branch}.dispatchtasks" 2>/dev/null || true
+    git config --get-all "branch.${branch}.dispatchtargets" 2>/dev/null || true
 }
 
 # Add a task branch to the dispatch stack
 stack_add() {
     local task_name="$1" parent="$2"
-    if get_tasks "$parent" | grep -Fxq "$task_name"; then
+    if get_targets "$parent" | grep -Fxq "$task_name"; then
         return 0
     fi
-    git config --add "branch.${parent}.dispatchtasks" "$task_name"
+    git config --add "branch.${parent}.dispatchtargets" "$task_name"
 }
 
 # Remove a task from the dispatch stack
 stack_remove() {
     local task_name="$1" parent="$2"
     local tasks
-    tasks=$(get_tasks "$parent" | grep -Fxv "$task_name" || true)
-    git config --unset-all "branch.${parent}.dispatchtasks" 2>/dev/null || true
+    tasks=$(get_targets "$parent" | grep -Fxv "$task_name" || true)
+    git config --unset-all "branch.${parent}.dispatchtargets" 2>/dev/null || true
     if [[ -n "$tasks" ]]; then
         while IFS= read -r c; do
-            git config --add "branch.${parent}.dispatchtasks" "$c"
+            git config --add "branch.${parent}.dispatchtargets" "$c"
         done <<< "$tasks"
     fi
 }
@@ -55,7 +55,7 @@ stack_show_all() {
     local branch="$1" prefix="${2:-}" child_prefix="${3:-}"
     echo "${prefix}${branch}"
     local tasks
-    tasks=$(get_tasks "$branch")
+    tasks=$(get_targets "$branch")
     [[ -z "$tasks" ]] && return
     local -a arr
     while IFS= read -r line; do arr+=("$line"); done <<< "$tasks"
@@ -105,7 +105,7 @@ _get_open_prs() {
         local pr_num
         pr_num=$(gh pr list --head "$task" --state open --json number --jq '.[0].number' 2>/dev/null)
         [[ -n "$pr_num" ]] && echo "$task $pr_num"
-    done < <(find_dispatch_tasks "$source")
+    done < <(find_dispatch_targets "$source")
 }
 
 # Amend commits on a branch to add Target-Id trailer (rewrites history)
@@ -292,7 +292,7 @@ cmd_split() {
 
     # Check if already split
     local existing_tasks_str=""
-    existing_tasks_str=$(find_dispatch_tasks "$source" | order_by_stack)
+    existing_tasks_str=$(find_dispatch_targets "$source" | order_by_stack)
 
     if [[ -n "$existing_tasks_str" ]]; then
         # Re-split: recover base and prefix from metadata
@@ -489,7 +489,7 @@ resolve_source() {
 }
 
 # Find all dispatch tasks for a given source
-find_dispatch_tasks() {
+find_dispatch_targets() {
     local source="$1"
     local -a found=()
 
@@ -536,7 +536,7 @@ order_by_stack() {
     while true; do
         local next=""
         for c in "${tasks[@]}"; do
-            if get_tasks "$current" | grep -Fxq "$c"; then
+            if get_targets "$current" | grep -Fxq "$c"; then
                 next="$c"
                 break
             fi
@@ -551,7 +551,7 @@ order_by_stack() {
 find_stack_parent() {
     local branch="$1"
     git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        if get_tasks "$b" | grep -Fxq "$branch"; then
+        if get_targets "$b" | grep -Fxq "$branch"; then
             echo "$b"
             break
         fi
@@ -562,7 +562,7 @@ find_stack_parent() {
 recover_dispatch_base() {
     local source="$1"
     local tasks
-    tasks=$(find_dispatch_tasks "$source" | order_by_stack)
+    tasks=$(find_dispatch_targets "$source" | order_by_stack)
     [[ -n "$tasks" ]] || return 1
     local first_task
     first_task=$(echo "$tasks" | head -1)
@@ -573,7 +573,7 @@ recover_dispatch_base() {
 recover_dispatch_prefix() {
     local source="$1"
     local first_task
-    first_task=$(find_dispatch_tasks "$source" | order_by_stack | head -1)
+    first_task=$(find_dispatch_targets "$source" | order_by_stack | head -1)
     [[ -n "$first_task" ]] || return 1
     echo "${first_task%/*}"
 }
@@ -603,7 +603,7 @@ cmd_sync() {
     else
         while IFS= read -r c; do
             [[ -n "$c" ]] && targets+=("$c")
-        done < <(find_dispatch_tasks "$source" | order_by_stack)
+        done < <(find_dispatch_targets "$source" | order_by_stack)
     fi
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
@@ -722,7 +722,7 @@ cmd_status() {
     local -a targets=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && targets+=("$c")
-    done < <(find_dispatch_tasks "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source" | order_by_stack)
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -925,7 +925,7 @@ cmd_pr_status() {
     local -a targets=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && targets+=("$c")
-    done < <(find_dispatch_tasks "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source" | order_by_stack)
 
     [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -1067,7 +1067,7 @@ cmd_restack() {
     local -a ordered=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_tasks "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source" | order_by_stack)
 
     [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -1102,7 +1102,7 @@ cmd_restack() {
                 merge_parent=$(find_stack_parent "$task_branch")
                 if [[ -n "$merge_parent" ]]; then
                     local children
-                    children=$(get_tasks "$task_branch")
+                    children=$(get_targets "$task_branch")
                     while IFS= read -r child; do
                         [[ -n "$child" ]] || continue
                         stack_remove "$child" "$task_branch"
@@ -1209,7 +1209,7 @@ cmd_push() {
     local -a ordered=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_tasks "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source" | order_by_stack)
 
     [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -1274,7 +1274,7 @@ cmd_pr() {
     local -a ordered=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_tasks "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source" | order_by_stack)
 
     [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -1356,7 +1356,7 @@ cmd_reset() {
     local -a tasks=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && tasks+=("$c")
-    done < <(find_dispatch_tasks "$source")
+    done < <(find_dispatch_targets "$source")
 
     [[ ${#tasks[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
 
@@ -1385,13 +1385,13 @@ cmd_reset() {
         # Remove dispatchsource from task
         git config --unset "branch.${task}.dispatchsource" 2>/dev/null || true
 
-        # Remove task from parent's dispatchtasks
+        # Remove task from parent's dispatchtargets
         if [[ -n "$parent" ]]; then
             stack_remove "$task" "$parent"
         fi
 
-        # Remove any dispatchtasks on this task itself
-        git config --unset-all "branch.${task}.dispatchtasks" 2>/dev/null || true
+        # Remove any dispatchtargets on this task itself
+        git config --unset-all "branch.${task}.dispatchtargets" 2>/dev/null || true
 
         if $delete_branches; then
             local cur
@@ -1424,13 +1424,13 @@ cmd_tree() {
             # Walk up to find the base
             local parent
             parent=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                if get_tasks "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
+                if get_targets "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
             done)
             # Find root of the stack
             while [[ -n "$parent" ]]; do
                 local gp
                 gp=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                    if get_tasks "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
+                    if get_targets "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
                 done)
                 [[ -z "$gp" ]] && break
                 parent="$gp"
