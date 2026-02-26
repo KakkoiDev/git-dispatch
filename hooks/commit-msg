@@ -4,6 +4,11 @@
 
 msg_file="$1"
 
+# Skip merge commits
+if git rev-parse MERGE_HEAD &>/dev/null; then
+    exit 0
+fi
+
 if ! grep -q "^Target-Id:" "$msg_file"; then
     echo "Error: Missing Target-Id trailer."
     echo "Use: git commit --trailer 'Target-Id=N'"

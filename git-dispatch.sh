@@ -4,7 +4,7 @@ set -euo pipefail
 # git aliases with ! set GIT_DIR which overrides git -C; unset to fix worktree operations
 unset GIT_DIR GIT_WORK_TREE
 
-# git-dispatch: Split a source branch into stacked task branches and keep them in sync.
+# git-dispatch: Create target branches from a source branch and keep them in sync.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,51 +22,32 @@ warn() { echo -e "${YELLOW}$*${NC}"; }
 
 current_branch() { git symbolic-ref --short HEAD 2>/dev/null; }
 
-# Get tasks of a branch from git config (dispatch stack)
+# Get targets of a branch from git config
 get_targets() {
     local branch="$1"
     git config --get-all "branch.${branch}.dispatchtargets" 2>/dev/null || true
 }
 
-# Add a task branch to the dispatch stack
+# Add a target branch to the dispatch stack
 stack_add() {
-    local task_name="$1" parent="$2"
-    if get_targets "$parent" | grep -Fxq "$task_name"; then
+    local target_name="$1" parent="$2"
+    if get_targets "$parent" | grep -Fxq "$target_name"; then
         return 0
     fi
-    git config --add "branch.${parent}.dispatchtargets" "$task_name"
+    git config --add "branch.${parent}.dispatchtargets" "$target_name"
 }
 
-# Remove a task from the dispatch stack
+# Remove a target from the dispatch stack
 stack_remove() {
-    local task_name="$1" parent="$2"
-    local tasks
-    tasks=$(get_targets "$parent" | grep -Fxv "$task_name" || true)
+    local target_name="$1" parent="$2"
+    local targets
+    targets=$(get_targets "$parent" | grep -Fxv "$target_name" || true)
     git config --unset-all "branch.${parent}.dispatchtargets" 2>/dev/null || true
-    if [[ -n "$tasks" ]]; then
+    if [[ -n "$targets" ]]; then
         while IFS= read -r c; do
             git config --add "branch.${parent}.dispatchtargets" "$c"
-        done <<< "$tasks"
+        done <<< "$targets"
     fi
-}
-
-# Recursive tree display
-stack_show_all() {
-    local branch="$1" prefix="${2:-}" child_prefix="${3:-}"
-    echo "${prefix}${branch}"
-    local tasks
-    tasks=$(get_targets "$branch")
-    [[ -z "$tasks" ]] && return
-    local -a arr
-    while IFS= read -r line; do arr+=("$line"); done <<< "$tasks"
-    local count=${#arr[@]}
-    for ((i = 0; i < count; i++)); do
-        if (( i + 1 == count )); then
-            stack_show_all "${arr[$i]}" "${child_prefix}└── " "${child_prefix}    "
-        else
-            stack_show_all "${arr[$i]}" "${child_prefix}├── " "${child_prefix}│   "
-        fi
-    done
 }
 
 # Find worktree path for a branch (empty if none)
@@ -123,69 +104,17 @@ _is_content_merged() {
 _get_open_prs() {
     local source="$1"
     if ! command -v gh &>/dev/null; then
-        warn "gh CLI not found - skipping PR detection"
         return 1
     fi
     if ! gh auth status &>/dev/null 2>&1; then
-        warn "gh CLI not authenticated - skipping PR detection"
         return 1
     fi
-    while IFS= read -r task; do
-        [[ -n "$task" ]] || continue
+    while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
         local pr_num
-        pr_num=$(gh pr list --head "$task" --state open --json number --jq '.[0].number' 2>/dev/null)
-        [[ -n "$pr_num" ]] && echo "$task $pr_num"
+        pr_num=$(gh pr list --head "$target" --state open --json number --jq '.[0].number' 2>/dev/null)
+        [[ -n "$pr_num" ]] && echo "$target $pr_num"
     done < <(find_dispatch_targets "$source")
-}
-
-# Amend commits on a branch to add Target-Id trailer (rewrites history)
-_amend_trailers_on_branch() {
-    local branch="$1" target_id="$2"; shift 2
-    local hashes=("$@")
-    local wt
-    wt=$(worktree_for_branch "$branch")
-    local git_cmd=(git)
-    local orig=""
-
-    if [[ -n "$wt" ]]; then
-        git_cmd=(git -C "$wt")
-    else
-        orig=$(current_branch)
-        git checkout "$branch" --quiet
-    fi
-
-    for hash in "${hashes[@]}"; do
-        local tid
-        tid=$("${git_cmd[@]}" log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
-        if [[ "$tid" != "$target_id" ]]; then
-            # Rewrite this commit with the trailer using filter-branch on just this commit
-            # Simpler: interactive rebase is not an option, so use commit --amend via rebase --exec
-            # Even simpler: if it's the tip, just amend directly
-            local tip
-            tip=$("${git_cmd[@]}" rev-parse HEAD)
-            if [[ "$hash" == "$tip" ]]; then
-                "${git_cmd[@]}" commit --amend --no-edit --trailer "Target-Id=$target_id" --quiet
-            else
-                # For non-tip commits, use rebase with GIT_SEQUENCE_EDITOR
-                local parent
-                parent=$("${git_cmd[@]}" rev-parse "$hash^")
-                GIT_SEQUENCE_EDITOR="sed -i.bak 's/^pick $( echo "$hash" | cut -c1-7)/edit ${hash:0:7}/'" \
-                    "${git_cmd[@]}" rebase -i "$parent" --quiet 2>/dev/null || {
-                    "${git_cmd[@]}" rebase --abort 2>/dev/null || true
-                    die "Rebase failed while amending trailer on $hash in $branch. Resolve manually."
-                }
-                "${git_cmd[@]}" commit --amend --no-edit --trailer "Target-Id=$target_id" --quiet
-                "${git_cmd[@]}" rebase --continue --quiet 2>/dev/null || {
-                    "${git_cmd[@]}" rebase --abort 2>/dev/null || true
-                    die "Rebase --continue failed on $branch. Resolve manually."
-                }
-            fi
-        fi
-    done
-
-    if [[ -z "$wt" && -n "$orig" ]]; then
-        git checkout "$orig" --quiet
-    fi
 }
 
 # Cherry-pick into a branch, adding Target-Id to commits that lack them
@@ -203,7 +132,6 @@ _cherry_pick_with_trailers() {
         git checkout "$branch" --quiet
     fi
 
-    # Stash dirty working tree (staged + unstaged) so cherry-pick can proceed
     local stashed=false
     if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
         "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
@@ -214,7 +142,6 @@ _cherry_pick_with_trailers() {
         local tid
         tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
         if [[ "$tid" == "$target_id" ]]; then
-            # Already has correct trailer — cherry-pick normally
             if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
                 if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
                     if "${git_cmd[@]}" diff --cached --quiet; then
@@ -224,12 +151,11 @@ _cherry_pick_with_trailers() {
                     fi
                 fi
                 "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                $stashed && "${git_cmd[@]}" stash pop --quiet
-                [[ -z "$wt" ]] && git checkout "$orig" --quiet
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash. Resolve manually."
             fi
         else
-            # Missing trailer — cherry-pick --no-commit then commit with trailer
             if ! "${git_cmd[@]}" cherry-pick --no-commit "$hash"; then
                 if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
                     if "${git_cmd[@]}" diff --cached --quiet; then
@@ -239,8 +165,8 @@ _cherry_pick_with_trailers() {
                     fi
                 fi
                 "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                $stashed && "${git_cmd[@]}" stash pop --quiet
-                [[ -z "$wt" ]] && git checkout "$orig" --quiet
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash. Resolve manually."
             fi
             local msg
@@ -249,8 +175,8 @@ _cherry_pick_with_trailers() {
         fi
     done
 
-    $stashed && "${git_cmd[@]}" stash pop --quiet
-    [[ -z "$wt" ]] && git checkout "$orig" --quiet
+    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
 }
 
 # Cherry-pick into a branch, worktree-aware
@@ -268,7 +194,6 @@ cherry_pick_into() {
         git checkout "$branch" --quiet
     fi
 
-    # Stash dirty working tree (staged + unstaged) so cherry-pick can proceed
     local stashed=false
     if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
         "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
@@ -277,27 +202,136 @@ cherry_pick_into() {
 
     for hash in "${hashes[@]}"; do
         if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
-            # Check if cherry-pick is actually in progress (vs aborted entirely)
             if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                # Cherry-pick in progress but empty: patch already applied
                 if "${git_cmd[@]}" diff --cached --quiet; then
                     warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
                     "${git_cmd[@]}" cherry-pick --skip
                     continue
                 fi
             fi
-            # Real failure: abort and die
             "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-            $stashed && "${git_cmd[@]}" stash pop --quiet
-            [[ -z "$wt" ]] && git checkout "$orig" --quiet
-            local retry="git -C $wt cherry-pick -x ${hashes[*]}"
-            [[ -z "$wt" ]] && retry="git checkout $branch && git cherry-pick -x ${hashes[*]}"
-            die "Cherry-pick into $branch failed. Retry manually: $retry"
+            if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+            die "Cherry-pick into $branch failed. Resolve manually."
         fi
     done
 
-    $stashed && "${git_cmd[@]}" stash pop --quiet
-    [[ -z "$wt" ]] && git checkout "$orig" --quiet
+    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+}
+
+# Resolve source branch: current branch or from dispatchsource
+resolve_source() {
+    local explicit="$1"
+    if [[ -n "$explicit" ]]; then
+        echo "$explicit"
+        return
+    fi
+    local cur
+    cur=$(current_branch)
+    # Is current branch a source for any target?
+    local is_source
+    is_source=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        local csource
+        csource=$(git config "branch.${b}.dispatchsource" 2>/dev/null || true)
+        if [[ "$csource" == "$cur" ]]; then echo "$cur"; break; fi
+    done)
+    if [[ -n "$is_source" ]]; then
+        echo "$is_source"
+        return
+    fi
+    # Is current branch a target? Read its dispatchsource
+    local csource
+    csource=$(git config "branch.${cur}.dispatchsource" 2>/dev/null || true)
+    if [[ -n "$csource" ]]; then
+        echo "$csource"
+        return
+    fi
+    # Is dispatch initialized? Current branch is the source (no targets exist yet)
+    local dispatch_base
+    dispatch_base=$(_get_config base)
+    if [[ -n "$dispatch_base" && "$cur" != "$dispatch_base" ]]; then
+        echo "$cur"
+        return
+    fi
+    die "Cannot detect source branch. Run from a source or target branch."
+}
+
+# Find all dispatch targets for a given source
+find_dispatch_targets() {
+    local source="$1"
+    local -a found=()
+    while IFS= read -r ref; do
+        local bname="${ref#refs/heads/}"
+        local csource
+        csource=$(git config "branch.${bname}.dispatchsource" 2>/dev/null || true)
+        [[ "$csource" == "$source" ]] && found+=("$bname")
+    done < <(git for-each-ref --format='%(refname)' refs/heads/)
+    [[ ${#found[@]} -gt 0 ]] && printf '%s\n' "${found[@]}" || true
+}
+
+# Order targets by walking the dispatch stack hierarchy
+order_by_stack() {
+    local -a targets=()
+    while IFS= read -r t; do [[ -n "$t" ]] && targets+=("$t"); done
+    [[ ${#targets[@]} -gt 0 ]] || return 0
+
+    # Find roots: targets whose parent is not itself a target
+    local -a roots=()
+    local base=""
+    for target in "${targets[@]}"; do
+        local parent
+        parent=$(find_stack_parent "$target")
+        local parent_is_target=false
+        for c in "${targets[@]}"; do
+            [[ "$c" == "$parent" ]] && { parent_is_target=true; break; }
+        done
+        if ! $parent_is_target; then
+            base="$parent"
+            roots+=("$target")
+        fi
+    done
+
+    if [[ -z "$base" ]]; then
+        printf '%s\n' "${targets[@]}"
+        return
+    fi
+
+    # BFS walk: print roots, then their children, etc.
+    local -a queue=("${roots[@]}")
+    local -a visited=()
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        local current="${queue[0]}"
+        queue=("${queue[@]:1}")
+        echo "$current"
+        visited+=("$current")
+        for c in "${targets[@]}"; do
+            # Skip already visited
+            local seen=false
+            for v in "${visited[@]}"; do [[ "$v" == "$c" ]] && { seen=true; break; }; done
+            $seen && continue
+            if get_targets "$current" | grep -Fxq "$c"; then
+                queue+=("$c")
+            fi
+        done
+    done
+}
+
+# Find the parent branch in the dispatch stack for a given branch
+find_stack_parent() {
+    local branch="$1"
+    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        if get_targets "$b" | grep -Fxq "$branch"; then
+            echo "$b"
+            break
+        fi
+    done
+}
+
+# Derive target branch name from source, prefix, and target id
+_target_branch_name() {
+    local source="$1" prefix="$2" tid="$3"
+    echo "${source}-${prefix}${tid}"
 }
 
 # ---------- init ----------
@@ -310,22 +344,19 @@ cmd_init() {
             --base)   base="$2"; shift 2 ;;
             --prefix) prefix="$2"; shift 2 ;;
             --mode)   mode="$2"; shift 2 ;;
-            --force)  shift ;;  # consumed but not currently used differently
+            --force)  shift ;;
             -*)       die "Unknown flag: $1" ;;
             *)        die "Unexpected argument: $1" ;;
         esac
     done
 
-    # Validate mode
     [[ "$mode" == "independent" || "$mode" == "stacked" ]] || \
         die "Invalid mode '$mode'. Use: independent or stacked"
 
-    # Must be on a branch
     local source
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch (detached HEAD)"
 
-    # Auto-detect base if not specified
     if [[ -z "$base" ]]; then
         if git rev-parse --verify master &>/dev/null; then
             base="master"
@@ -339,7 +370,6 @@ cmd_init() {
     git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
     [[ "$source" != "$base" ]] || die "Cannot init on the base branch itself"
 
-    # Check for existing config
     local existing_base
     existing_base=$(_get_config base)
     if [[ -n "$existing_base" ]]; then
@@ -357,19 +387,16 @@ cmd_init() {
         echo ""
         warn "Overwriting config will orphan existing target branches."
 
-        # Non-interactive: require --force (already consumed above, but presence means intent)
         if [[ -t 0 ]]; then
             read -p "Proceed? [y/N] " confirm
             [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
         fi
     fi
 
-    # Store config
     git config dispatch.base "$base"
     git config dispatch.prefix "$prefix"
     git config dispatch.mode "$mode"
 
-    # Install hooks
     _install_hooks
 
     echo ""
@@ -379,52 +406,29 @@ cmd_init() {
     echo -e "  ${CYAN}prefix:${NC} $prefix"
 }
 
-# ---------- split ----------
+# ---------- apply ----------
 
-cmd_split() {
-    local source="" base="master" name="" dry_run=false continuing=false
+cmd_apply() {
+    _require_init
+
+    local dry_run=false resolve=false force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --base)      base="$2"; shift 2 ;;
-            --name)      name="$2"; shift 2 ;;
-            --dry-run)   dry_run=true; shift ;;
-            --continue)  continuing=true; shift ;;
-            -*)          die "Unknown flag: $1" ;;
-            *)           source="$1"; shift ;;
+            --dry-run)  dry_run=true; shift ;;
+            --resolve)  resolve=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          die "Unexpected argument: $1" ;;
         esac
     done
 
-    [[ -n "$source" ]]  || die "Usage: git dispatch split <source-branch> --name <prefix> [--base <base>]"
-
-    git rev-parse --verify "$source" >/dev/null 2>&1  || die "Branch '$source' does not exist"
-
-    # Check if already split
-    local existing_tasks_str=""
-    existing_tasks_str=$(find_dispatch_targets "$source" | order_by_stack)
-
-    if [[ -n "$existing_tasks_str" ]]; then
-        # Re-split: recover base and prefix from metadata
-        local recovered_base recovered_prefix
-        recovered_base=$(recover_dispatch_base "$source")
-        recovered_prefix=$(recover_dispatch_prefix "$source")
-
-        # Guard: if user passed --base or --name, they must match
-        if [[ "$base" != "master" && "$base" != "$recovered_base" ]]; then
-            die "Base mismatch: existing stack uses '$recovered_base', you passed '$base'"
-        fi
-        if [[ -n "$name" && "$name" != "$recovered_prefix" ]]; then
-            die "Prefix mismatch: existing stack uses '$recovered_prefix', you passed '$name'"
-        fi
-
-        base="$recovered_base"
-        name="$recovered_prefix"
-    else
-        # First split — require --name
-        [[ -n "$name" ]] || die "Missing --name flag (branch prefix)"
-    fi
-
-    git rev-parse --verify "$base" >/dev/null 2>&1 || die "Base '$base' does not exist"
+    local base prefix mode source
+    base=$(_get_config base)
+    prefix=$(_get_config prefix)
+    mode=$(_get_config mode)
+    source=$(current_branch)
+    [[ -n "$source" ]] || die "Not on a branch"
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file
@@ -432,66 +436,105 @@ cmd_split() {
     trap "rm -f '$commit_file'" RETURN
 
     while IFS= read -r _h; do
+        local _t
         _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
     [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
 
-    # Validate all commits have Target-Id and it's numeric
+    # Validate all commits have numeric Target-Id
     while read -r hash tid; do
-        [[ -z "$tid" ]] && die "Commit $hash has no Target-Id trailer"
+        [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Target-Id trailer"
         if ! echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'. Use integer or decimal (e.g., 1, 2, 1.5)."
+            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'"
         fi
     done < "$commit_file"
 
-    # Ordered unique target ids (numeric sort on Target-Id)
+    # Ordered unique target ids (numeric sort)
     local -a target_ids=()
     while IFS= read -r tid; do
         target_ids+=("$tid")
     done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
 
-    echo -e "${CYAN}Source:${NC} $source"
-    echo -e "${CYAN}Base:${NC}   $base"
-    echo -e "${CYAN}Tasks:${NC}  ${target_ids[*]}"
-    echo ""
-
-    # Warn about open PRs before re-creating branches
-    if [[ -n "$existing_tasks_str" ]]; then
-        local pr_info
-        if pr_info=$(_get_open_prs "$source" 2>/dev/null); then
-            if [[ -n "$pr_info" ]]; then
-                local pr_count
-                pr_count=$(echo "$pr_info" | wc -l | tr -d ' ')
-                warn "Warning: ${pr_count} task branch(es) have open PRs - re-split will require force push"
-                while IFS=' ' read -r pr_branch pr_num; do
-                    warn "  $pr_branch (PR #${pr_num})"
-                done <<< "$pr_info"
-                echo ""
-            fi
-        fi
+    if $dry_run; then
+        echo -e "${CYAN}mode:${NC} $mode (targets branch from ${mode/independent/base}${mode/stacked/previous target})"
+        echo ""
     fi
 
     local prev_branch="$base"
+    local created=0 updated=0 skipped=0
+
     for tid in "${target_ids[@]}"; do
-        local branch_name="${name}/${tid}"
-        # Collect hashes for this task
+        local branch_name
+        branch_name=$(_target_branch_name "$source" "$prefix" "$tid")
+
+        # Collect hashes for this target
         local -a hashes=()
         while IFS= read -r h; do
             hashes+=("$h")
         done < <(awk -v t="$tid" '$2 == t {print $1}' "$commit_file")
 
-        if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} $branch_name  (${#hashes[@]} commits from $prev_branch)"
-        else
-            git branch "$branch_name" "$prev_branch" 2>/dev/null || {
-                info "  Skipping $branch_name (already exists)"
-                prev_branch="$branch_name"
-                continue
-            }
+        # Determine parent branch for this target
+        local parent_branch="$base"
+        if [[ "$mode" == "stacked" && "$prev_branch" != "$base" ]]; then
+            parent_branch="$prev_branch"
+        fi
 
-            # Inline cherry-pick with conflict recovery
+        if $dry_run; then
+            if git rev-parse --verify "$branch_name" &>/dev/null; then
+                # Check for new commits
+                local new_count=0
+                local cherry_out
+                cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
+                while IFS= read -r line; do
+                    [[ "$line" == +* ]] || continue
+                    local hash
+                    hash=$(echo "$line" | awk '{print $2}')
+                    local ctid
+                    ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+                    [[ "$ctid" == "$tid" ]] && new_count=$((new_count + 1))
+                done <<< "$cherry_out"
+                if [[ $new_count -gt 0 ]]; then
+                    echo -e "  ${YELLOW}cherry-pick${NC} $new_count commit(s) to target $tid  $branch_name"
+                else
+                    echo -e "  ${GREEN}skip${NC} target $tid  $branch_name  in sync"
+                fi
+            else
+                echo -e "  ${YELLOW}create${NC} target $tid  $branch_name  (${#hashes[@]} commits from $parent_branch)"
+            fi
+            prev_branch="$branch_name"
+            continue
+        fi
+
+        if git rev-parse --verify "$branch_name" &>/dev/null; then
+            # Target exists - cherry-pick new commits
+            local -a new_hashes=()
+            local cherry_out
+            cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
+            while IFS= read -r line; do
+                [[ "$line" == +* ]] || continue
+                local hash
+                hash=$(echo "$line" | awk '{print $2}')
+                local ctid
+                ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+                [[ "$ctid" == "$tid" ]] && new_hashes+=("$hash")
+            done <<< "$cherry_out"
+
+            if [[ ${#new_hashes[@]} -gt 0 ]]; then
+                cherry_pick_into "$branch_name" "${new_hashes[@]}"
+                info "  Updated $branch_name (${#new_hashes[@]} new commits)"
+                updated=$((updated + 1))
+            else
+                echo "  $branch_name: in sync"
+                skipped=$((skipped + 1))
+            fi
+        else
+            # Create new target branch
+            git branch "$branch_name" "$parent_branch" 2>/dev/null || \
+                die "Could not create branch $branch_name"
+
+            # Cherry-pick commits
             local orig
             orig=$(current_branch)
             git checkout "$branch_name" --quiet
@@ -512,935 +555,397 @@ cmd_split() {
 
             git checkout "$orig" --quiet
 
-            # Remove any stale references to this branch from other parents
-            local stale_parent
-            stale_parent=$(find_stack_parent "$branch_name")
-            if [[ -n "$stale_parent" && "$stale_parent" != "$prev_branch" ]]; then
-                stack_remove "$branch_name" "$stale_parent"
-            fi
-
-            # Find next existing branch in target_ids order (for splice)
-            local next_existing=""
-            local found_self=false
-            for check_tid in "${target_ids[@]}"; do
-                if $found_self; then
-                    local check_branch="${name}/${check_tid}"
-                    if git rev-parse --verify "$check_branch" &>/dev/null; then
-                        next_existing="$check_branch"
-                        break
-                    fi
-                fi
-                [[ "$check_tid" == "$tid" ]] && found_self=true
-            done
-
-            # Splice into stack: prev → new → next_existing
-            if [[ -n "$next_existing" ]]; then
-                local next_parent
-                next_parent=$(find_stack_parent "$next_existing")
-                if [[ -n "$next_parent" ]]; then
-                    stack_remove "$next_existing" "$next_parent"
-                fi
-                stack_add "$next_existing" "$branch_name"
-            fi
-            stack_add "$branch_name" "$prev_branch"
+            # Set up stack metadata
+            stack_add "$branch_name" "$parent_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
 
             if $cherry_pick_failed; then
-                warn "  $branch_name created (cherry-pick conflicted — run sync to retry)"
+                warn "  $branch_name created (cherry-pick conflicted)"
             else
                 info "  Created $branch_name (${#hashes[@]} commits)"
             fi
+            created=$((created + 1))
         fi
         prev_branch="$branch_name"
     done
 
     echo ""
-    if ! $dry_run; then
-        cmd_tree "$base"
+    if $dry_run; then
+        echo -e "${CYAN}Summary (dry-run):${NC} ${#target_ids[@]} targets"
+    else
+        echo -e "${CYAN}Summary:${NC} $created created, $updated updated, $skipped in sync"
     fi
 }
 
-# ---------- sync ----------
+# ---------- cherry-pick ----------
 
-# Resolve source branch from current context
-# Priority: explicit arg > current branch is source > current branch is task (read dispatchsource)
-resolve_source() {
-    local explicit="$1"
-    if [[ -n "$explicit" ]]; then
-        echo "$explicit"
-        return
-    fi
+cmd_cherry_pick() {
+    _require_init
 
-    local cur
-    cur=$(current_branch)
-
-    # Is current branch a source for any task?
-    local is_source
-    is_source=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        local csource
-        csource=$(git config "branch.${b}.dispatchsource" 2>/dev/null || true)
-        if [[ "$csource" == "$cur" ]]; then echo "$cur"; break; fi
-    done)
-    if [[ -n "$is_source" ]]; then
-        echo "$is_source"
-        return
-    fi
-
-    # Is current branch a task? Read its dispatchsource
-    local csource
-    csource=$(git config "branch.${cur}.dispatchsource" 2>/dev/null || true)
-    if [[ -n "$csource" ]]; then
-        echo "$csource"
-        return
-    fi
-
-    die "Cannot detect source branch (current: '${cur}'). Run from a source or task branch, or pass it explicitly."
-}
-
-# Find all dispatch tasks for a given source
-find_dispatch_targets() {
-    local source="$1"
-    local -a found=()
-
-    while IFS= read -r ref; do
-        local bname="${ref#refs/heads/}"
-        local csource
-        csource=$(git config "branch.${bname}.dispatchsource" 2>/dev/null || true)
-        [[ "$csource" == "$source" ]] && found+=("$bname")
-    done < <(git for-each-ref --format='%(refname)' refs/heads/)
-
-    [[ ${#found[@]} -gt 0 ]] && printf '%s\n' "${found[@]}" || true
-}
-
-# Order tasks by walking the dispatch stack hierarchy.
-# Reads task names from stdin, writes them in stack order to stdout.
-order_by_stack() {
-    local -a tasks=()
-    while IFS= read -r t; do [[ -n "$t" ]] && tasks+=("$t"); done
-
-    [[ ${#tasks[@]} -gt 0 ]] || return 0
-
-    # Find base branch (parent of first task that isn't itself a dispatch task)
-    local base=""
-    for task in "${tasks[@]}"; do
-        local parent
-        parent=$(find_stack_parent "$task")
-        local parent_is_task=false
-        for c in "${tasks[@]}"; do
-            [[ "$c" == "$parent" ]] && { parent_is_task=true; break; }
-        done
-        if ! $parent_is_task; then
-            base="$parent"
-            break
-        fi
-    done
-
-    if [[ -z "$base" ]]; then
-        printf '%s\n' "${tasks[@]}"
-        return
-    fi
-
-    # Walk from base through dispatch tasks in stack order
-    local current="$base"
-    while true; do
-        local next=""
-        for c in "${tasks[@]}"; do
-            if get_targets "$current" | grep -Fxq "$c"; then
-                next="$c"
-                break
-            fi
-        done
-        [[ -n "$next" ]] || break
-        echo "$next"
-        current="$next"
-    done
-}
-
-# Find the parent branch in the dispatch stack for a given branch
-find_stack_parent() {
-    local branch="$1"
-    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        if get_targets "$b" | grep -Fxq "$branch"; then
-            echo "$b"
-            break
-        fi
-    done
-}
-
-# Recover base branch from dispatch metadata
-recover_dispatch_base() {
-    local source="$1"
-    local tasks
-    tasks=$(find_dispatch_targets "$source" | order_by_stack)
-    [[ -n "$tasks" ]] || return 1
-    local first_task
-    first_task=$(echo "$tasks" | head -1)
-    find_stack_parent "$first_task"
-}
-
-# Recover branch prefix from dispatch metadata
-recover_dispatch_prefix() {
-    local source="$1"
-    local first_task
-    first_task=$(find_dispatch_targets "$source" | order_by_stack | head -1)
-    [[ -n "$first_task" ]] || return 1
-    echo "${first_task%/*}"
-}
-
-cmd_sync() {
-    local source_arg="" task="" continuing=false
+    local from="" to="" dry_run=false resolve=false force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --continue) continuing=true; shift ;;
+            --from)     from="$2"; shift 2 ;;
+            --to)       to="$2"; shift 2 ;;
+            --dry-run)  dry_run=true; shift ;;
+            --resolve)  resolve=true; shift ;;
+            --force)    force=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
-            *)
-                if [[ -z "$source_arg" ]]; then source_arg="$1"
-                elif [[ -z "$task" ]]; then task="$1"
-                fi
-                shift ;;
+            *)          die "Unexpected argument: $1" ;;
         esac
     done
 
-    local source
-    source=$(resolve_source "$source_arg")
+    [[ -n "$from" ]] || die "Missing --from"
+    [[ -n "$to" ]] || die "Missing --to"
 
-    # Resolve task branches to sync (in stack order)
-    local -a targets=()
-    if [[ -n "$task" ]]; then
-        targets=("$task")
-    else
-        while IFS= read -r c; do
-            [[ -n "$c" ]] && targets+=("$c")
-        done < <(find_dispatch_targets "$source" | order_by_stack)
+    local base prefix source
+    base=$(_get_config base)
+    prefix=$(_get_config prefix)
+    source=$(resolve_source "")
+
+    # --from source --to all -> delegate to apply
+    if [[ "$from" == "source" && "$to" == "all" ]]; then
+        cmd_apply ${dry_run:+--dry-run} ${resolve:+--resolve} ${force:+--force}
+        return
     fi
 
-    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+    if [[ "$from" == "source" ]]; then
+        # Cherry-pick from source to target <id>
+        local target_branch
+        target_branch=$(_target_branch_name "$source" "$prefix" "$to")
+        git rev-parse --verify "$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist"
 
-    echo -e "${CYAN}Source:${NC} $source"
-    echo ""
-
-    for task_branch in "${targets[@]}"; do
-        echo -e "${CYAN}Syncing:${NC} $task_branch"
-
-        # Extract task-id from branch name (last path segment)
-        local target_id="${task_branch##*/}"
-        [[ -n "$target_id" ]] || die "Empty task ID in branch '${task_branch}'"
-
-        # Source → task: commits in source for this task not yet in task branch
-        local -a source_to_task=()
+        local -a new_hashes=()
         local cherry_out
-        cherry_out=$(git cherry -v "$task_branch" "$source" 2>&1) || die "git cherry failed: $cherry_out"
+        cherry_out=$(git cherry -v "$target_branch" "$source" 2>/dev/null) || \
+            die "git cherry failed"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
-            # Check if this commit has matching Target-Id
             local tid
             tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$target_id" ]] && source_to_task+=("$hash")
+            [[ "$tid" == "$to" ]] && new_hashes+=("$hash")
         done <<< "$cherry_out"
 
-        if [[ ${#source_to_task[@]} -gt 0 ]]; then
-            info "  Source → task: ${#source_to_task[@]} commit(s)"
-            cherry_pick_into "$task_branch" "${source_to_task[@]}"
-        else
-            echo "  Source → task: up to date"
+        if [[ ${#new_hashes[@]} -eq 0 ]]; then
+            info "Target $to already in sync"
+            return
         fi
 
-        # Task → source: commits in task branch not yet in source
-        # Use stack parent as limit so we only count this task's commits
-        # Skip commits from base (master) that were merged into the branch
+        if $dry_run; then
+            echo -e "${YELLOW}[dry-run]${NC} cherry-pick ${#new_hashes[@]} commit(s) from source to $target_branch"
+            return
+        fi
+
+        cherry_pick_into "$target_branch" "${new_hashes[@]}"
+        info "Cherry-picked ${#new_hashes[@]} commit(s) to $target_branch"
+
+    else
+        # Cherry-pick from target <id> to source
+        [[ "$to" == "source" ]] || die "Invalid --to '$to'. Use: source or a Target-Id"
+
+        local target_branch
+        target_branch=$(_target_branch_name "$source" "$prefix" "$from")
+        git rev-parse --verify "$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist"
+
         local parent
-        parent=$(find_stack_parent "$task_branch")
-        local base
-        base=$(recover_dispatch_base "$source" 2>/dev/null || true)
-        local -a task_to_source=()
-        local needs_trailer=false
-        cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
+        parent=$(find_stack_parent "$target_branch")
+
+        local -a new_hashes=()
+        local cherry_out
+        cherry_out=$(git cherry -v "$source" "$target_branch" ${parent:+"$parent"} 2>/dev/null) || \
+            die "git cherry failed"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
-            # Skip commits that are ancestors of base (merged master commits)
-            if [[ -n "$base" ]] && git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
+            # Skip commits from base
+            if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
                 continue
             fi
-            local tid
-            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            if [[ "$tid" != "$target_id" ]]; then
-                needs_trailer=true
-            fi
-            task_to_source+=("$hash")
+            new_hashes+=("$hash")
         done <<< "$cherry_out"
 
-        if [[ ${#task_to_source[@]} -gt 0 ]]; then
-            if $needs_trailer; then
-                # Check for merge commits from base on task branch
-                local has_merges=false
-                if git rev-list --merges "${parent}..${task_branch}" 2>/dev/null | grep -q .; then
-                    has_merges=true
-                fi
-
-                if $has_merges; then
-                    info "  Cherry-picking untracked commits to source (merge commits detected)..."
-                    info "  Task → source: ${#task_to_source[@]} commit(s)"
-                    _cherry_pick_with_trailers "$source" "$target_id" "${task_to_source[@]}"
-                else
-                    info "  Fixing Target-Id on task commits..."
-                    _amend_trailers_on_branch "$task_branch" "$target_id" "${task_to_source[@]}"
-                    # Re-read hashes after rewrite
-                    task_to_source=()
-                    cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
-                    while IFS= read -r line; do
-                        [[ "$line" == +* ]] || continue
-                        local hash
-                        hash=$(echo "$line" | awk '{print $2}')
-                        task_to_source+=("$hash")
-                    done <<< "$cherry_out"
-                    info "  Task → source: ${#task_to_source[@]} commit(s)"
-                    cherry_pick_into "$source" "${task_to_source[@]}"
-                fi
-            else
-                info "  Task → source: ${#task_to_source[@]} commit(s)"
-                cherry_pick_into "$source" "${task_to_source[@]}"
-            fi
-        else
-            echo "  Task → source: up to date"
+        if [[ ${#new_hashes[@]} -eq 0 ]]; then
+            info "Source already has all commits from target $from"
+            return
         fi
 
-        echo ""
+        if $dry_run; then
+            echo -e "${YELLOW}[dry-run]${NC} cherry-pick ${#new_hashes[@]} commit(s) from $target_branch to source"
+            return
+        fi
+
+        # Cherry-pick with trailer addition
+        _cherry_pick_with_trailers "$source" "$from" "${new_hashes[@]}"
+        info "Cherry-picked ${#new_hashes[@]} commit(s) from $target_branch to source"
+    fi
+}
+
+# ---------- rebase ----------
+
+cmd_rebase() {
+    _require_init
+
+    local from="" to="" dry_run=false resolve=false force=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)     from="$2"; shift 2 ;;
+            --to)       to="$2"; shift 2 ;;
+            --dry-run)  dry_run=true; shift ;;
+            --resolve)  resolve=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -n "$from" ]] || die "Missing --from"
+    [[ -n "$to" ]] || die "Missing --to"
+    [[ "$from" == "base" && "$to" == "source" ]] || \
+        die "Only --from base --to source is supported"
+
+    local base source
+    base=$(_get_config base)
+    source=$(resolve_source "")
+
+    # Check for open PRs on downstream targets
+    if ! $force; then
+        local pr_info
+        if pr_info=$(_get_open_prs "$source" 2>/dev/null) && [[ -n "$pr_info" ]]; then
+            local pr_branches
+            pr_branches=$(echo "$pr_info" | awk '{print $1 " (PR #" $2 ")"}')
+            warn "Rebase rewrites history on source."
+            warn "Targets with open PRs:"
+            echo "$pr_branches" | while IFS= read -r line; do warn "  $line"; done
+            die "Downstream force-push required. Use --force to override."
+        fi
+    fi
+
+    if $dry_run; then
+        local count
+        count=$(git rev-list --count "$base..$source" 2>/dev/null || echo 0)
+        echo -e "${YELLOW}[dry-run]${NC} rebase $source ($count commits) onto $base"
+        return
+    fi
+
+    local orig
+    orig=$(current_branch)
+    git checkout "$source" --quiet
+
+    if ! git rebase "$base"; then
+        git rebase --abort 2>/dev/null || true
+        [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+        die "Rebase conflict. Use --resolve or: git dispatch merge --from base --to source"
+    fi
+
+    [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+    info "Rebased $source onto $base"
+}
+
+# ---------- merge ----------
+
+cmd_merge() {
+    _require_init
+
+    local from="" to="" dry_run=false resolve=false force=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)     from="$2"; shift 2 ;;
+            --to)       to="$2"; shift 2 ;;
+            --dry-run)  dry_run=true; shift ;;
+            --resolve)  resolve=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -n "$from" ]] || die "Missing --from"
+    [[ -n "$to" ]] || die "Missing --to"
+    [[ "$from" == "base" && "$to" == "source" ]] || \
+        die "Only --from base --to source is supported"
+
+    local base source
+    base=$(_get_config base)
+    source=$(resolve_source "")
+
+    if $dry_run; then
+        local count
+        count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
+        echo -e "${YELLOW}[dry-run]${NC} merge $base ($count commits) into $source"
+        return
+    fi
+
+    local orig
+    orig=$(current_branch)
+    git checkout "$source" --quiet
+
+    if ! git merge "$base" --no-edit; then
+        if $resolve; then
+            warn "Merge conflict. Resolve, then: git commit"
+            exit 1
+        fi
+        git merge --abort 2>/dev/null || true
+        [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+        die "Merge conflict. Use --resolve to enter resolution mode."
+    fi
+
+    [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+    info "Merged $base into $source"
+}
+
+# ---------- push ----------
+
+cmd_push() {
+    _require_init
+
+    local from="" dry_run=false force=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)     from="$2"; shift 2 ;;
+            --dry-run)  dry_run=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -n "$from" ]] || die "Missing --from"
+
+    local base prefix source
+    base=$(_get_config base)
+    prefix=$(_get_config prefix)
+    source=$(resolve_source "")
+
+    local -a branches=()
+
+    if [[ "$from" == "all" ]]; then
+        while IFS= read -r c; do
+            [[ -n "$c" ]] && branches+=("$c")
+        done < <(find_dispatch_targets "$source" | order_by_stack)
+        [[ ${#branches[@]} -gt 0 ]] || die "No targets found"
+    elif [[ "$from" == "source" ]]; then
+        branches=("$source")
+    else
+        # Numeric target id
+        local target_branch
+        target_branch=$(_target_branch_name "$source" "$prefix" "$from")
+        git rev-parse --verify "$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist"
+        branches=("$target_branch")
+    fi
+
+    local -a push_args=(-u origin)
+    $force && push_args+=(--force-with-lease)
+
+    for branch in "${branches[@]}"; do
+        if $dry_run; then
+            echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $branch"
+        else
+            git push "${push_args[@]}" "$branch" 2>/dev/null && \
+                info "  Pushed $branch" || \
+                warn "  Push failed for $branch"
+        fi
     done
 }
 
 # ---------- status ----------
 
 cmd_status() {
-    local source_arg=""
+    _require_init
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -*) die "Unknown flag: $1" ;;
-            *)  source_arg="$1"; shift ;;
-        esac
-    done
+    local base prefix mode source
+    base=$(_get_config base)
+    prefix=$(_get_config prefix)
+    mode=$(_get_config mode)
+    source=$(resolve_source "")
 
-    local source
-    source=$(resolve_source "$source_arg")
+    echo -e "${CYAN}mode:${NC}   $mode"
+    echo -e "${CYAN}base:${NC}   $base"
+    echo -e "${CYAN}source:${NC} $source"
+    echo ""
 
-    local -a targets=()
+    local -a ordered=()
     while IFS= read -r c; do
-        [[ -n "$c" ]] && targets+=("$c")
+        [[ -n "$c" ]] && ordered+=("$c")
     done < <(find_dispatch_targets "$source" | order_by_stack)
 
-    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
+    # Also find Target-Ids in source that don't have branches yet
+    local -a source_tids=()
+    while IFS= read -r _h; do
+        local _t
+        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        [[ -n "$_t" ]] && source_tids+=("$_t")
+    done < <(git log --format="%H" "$base..$source")
+    # Unique sorted
+    local -a unique_tids=()
+    while IFS= read -r t; do
+        unique_tids+=("$t")
+    done < <(printf '%s\n' "${source_tids[@]}" | sort -t. -k1,1n -k2,2n -u)
 
-    # Cache open PR info (silently skip if gh unavailable)
+    # Cache PR info
     local pr_cache=""
     pr_cache=$(_get_open_prs "$source" 2>/dev/null) || true
 
-    echo -e "${CYAN}Source:${NC} $source"
-    echo ""
+    for tid in "${unique_tids[@]}"; do
+        local branch_name
+        branch_name=$(_target_branch_name "$source" "$prefix" "$tid")
 
-    for task_branch in "${targets[@]}"; do
-        local target_id="${task_branch##*/}"
-        [[ -n "$target_id" ]] || die "Empty task ID in branch '${task_branch}'"
-
-        # Source -> task: commits in source for this task not yet in task branch
-        local source_to_task=0
-        local cherry_out
-        cherry_out=$(git cherry -v "$task_branch" "$source" 2>&1) || die "git cherry failed: $cherry_out"
-        while IFS= read -r line; do
-            [[ "$line" == +* ]] || continue
-            local hash
-            hash=$(echo "$line" | awk '{print $2}')
-            local tid
-            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$target_id" ]] && source_to_task=$((source_to_task + 1))
-        done <<< "$cherry_out"
-
-        # Task -> source: commits in task branch not yet in source
-        # Use stack parent as limit so we only count this task's commits,
-        # not ancestor commits from base/master
-        # Filter by Target-Id to exclude master commits merged into the branch
-        local task_to_source=0
-        local untracked_count=0
-        local parent
-        parent=$(find_stack_parent "$task_branch")
-        local base
-        base=$(recover_dispatch_base "$source" 2>/dev/null || true)
-        cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
-        while IFS= read -r line; do
-            [[ "$line" == +* ]] || continue
-            local hash
-            hash=$(echo "$line" | awk '{print $2}')
-            # Skip commits that are ancestors of base (merged master commits)
-            if [[ -n "$base" ]] && git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
-                continue
-            fi
-            local tid
-            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            if [[ "$tid" == "$target_id" ]]; then
-                task_to_source=$((task_to_source + 1))
-            else
-                untracked_count=$((untracked_count + 1))
-            fi
-        done <<< "$cherry_out"
-
-        # Append PR number if available
         local pr_suffix=""
         if [[ -n "$pr_cache" ]]; then
             local pr_num
-            pr_num=$(echo "$pr_cache" | awk -v b="$task_branch" '$1 == b {print $2}')
-            [[ -n "$pr_num" ]] && pr_suffix=" (PR #${pr_num})"
-        fi
-        echo -e "  ${YELLOW}$task_branch${NC}${pr_suffix}"
-        if [[ $source_to_task -eq 0 && $task_to_source -eq 0 && $untracked_count -eq 0 ]]; then
-            echo -e "    ${GREEN}in sync${NC}"
-        else
-            if [[ $source_to_task -gt 0 ]]; then
-                echo -e "    Source -> task: ${YELLOW}${source_to_task} pending${NC}"
-            fi
-            if [[ $task_to_source -gt 0 ]]; then
-                echo -e "    Task -> source: ${YELLOW}${task_to_source} pending${NC}"
-            fi
+            pr_num=$(echo "$pr_cache" | awk -v b="$branch_name" '$1 == b {print $2}')
+            [[ -n "$pr_num" ]] && pr_suffix=" [PR #${pr_num}]"
         fi
 
-        # Check for unresolved merge commits on task branch
-        # Skip merge commits produced by "git dispatch resolve" (their first
-        # parent is the resolution commit with "resolve merge conflicts" message)
-        local merge_commits unresolved_count=0
-        merge_commits=$(git rev-list --merges "${parent}..${task_branch}" 2>/dev/null)
-        while IFS= read -r mc; do
-            [[ -z "$mc" ]] && continue
-            local first_parent_msg
-            first_parent_msg=$(git log -1 --format="%s" "${mc}^1" 2>/dev/null)
-            if [[ "$first_parent_msg" == *"resolve merge conflicts with base"* ]]; then
+        if ! git rev-parse --verify "$branch_name" &>/dev/null; then
+            echo -e "  ${YELLOW}$tid${NC}  $branch_name  not created"
+            continue
+        fi
+
+        # Count pending source -> target
+        local source_to_target=0
+        local cherry_out
+        cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
+        while IFS= read -r line; do
+            [[ "$line" == +* ]] || continue
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
+            local ctid
+            ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$ctid" == "$tid" ]] && source_to_target=$((source_to_target + 1))
+        done <<< "$cherry_out"
+
+        # Count pending target -> source
+        local target_to_source=0
+        local parent
+        parent=$(find_stack_parent "$branch_name")
+        cherry_out=$(git cherry -v "$source" "$branch_name" ${parent:+"$parent"} 2>/dev/null) || true
+        while IFS= read -r line; do
+            [[ "$line" == +* ]] || continue
+            local hash
+            hash=$(echo "$line" | awk '{print $2}')
+            if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
                 continue
             fi
-            unresolved_count=$((unresolved_count + 1))
-        done <<< "$merge_commits"
-        if [[ $unresolved_count -gt 0 ]]; then
-            if [[ $task_to_source -gt 0 ]]; then
-                echo -e "    ${RED}WARNING: ${unresolved_count} merge commit(s) — run: git dispatch resolve${NC}"
-            else
-                echo -e "    ${YELLOW}${unresolved_count} merge commit(s) from base (no action needed)${NC}"
-            fi
-        fi
+            target_to_source=$((target_to_source + 1))
+        done <<< "$cherry_out"
 
-        if [[ $untracked_count -gt 0 ]]; then
-            if [[ $unresolved_count -gt 0 ]]; then
-                echo -e "    ${YELLOW}${untracked_count} untracked commit(s) — sync will cherry-pick to source${NC}"
-            else
-                echo -e "    ${YELLOW}${untracked_count} untracked commit(s) — run: git dispatch sync${NC}"
-            fi
-        fi
-
-        echo ""
-    done
-}
-
-# ---------- update-base ----------
-
-cmd_update_base() {
-    local source_arg="" strategy=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --merge)   strategy="merge"; shift ;;
-            --rebase)  strategy="rebase"; shift ;;
-            -*)        die "Unknown flag: $1" ;;
-            *)         source_arg="$1"; shift ;;
-        esac
-    done
-
-    local source
-    source=$(resolve_source "$source_arg")
-
-    local base
-    base=$(recover_dispatch_base "$source") || die "Cannot recover base for $source"
-
-    # Fetch latest base from origin if remote exists
-    if git remote get-url origin &>/dev/null; then
-        info "Fetching origin/${base}..."
-        git fetch origin "$base" --quiet 2>/dev/null || warn "Could not fetch origin/${base}"
-    fi
-
-    # Auto-detect strategy if not specified
-    if [[ -z "$strategy" ]]; then
-        local has_prs=false
-        if _get_open_prs "$source" &>/dev/null; then
-            local pr_info
-            pr_info=$(_get_open_prs "$source" 2>/dev/null) || true
-            [[ -n "$pr_info" ]] && has_prs=true
-        fi
-        if $has_prs; then
-            strategy="merge"
-            info "Open PRs detected - using --merge to preserve history"
+        if [[ $source_to_target -eq 0 && $target_to_source -eq 0 ]]; then
+            echo -e "  ${GREEN}$tid${NC}  $branch_name  in sync${pr_suffix}"
         else
-            strategy="rebase"
-            info "No open PRs detected - using --rebase for linear history"
-        fi
-    fi
-
-    local orig
-    orig=$(current_branch)
-
-    git checkout "$source" --quiet
-
-    if [[ "$strategy" == "merge" ]]; then
-        info "Merging ${base} into ${source}..."
-        git merge "$base" --no-edit || die "Merge conflict. Resolve and commit, then re-run."
-    else
-        info "Rebasing ${source} onto ${base}..."
-        git rebase "$base" || {
-            git rebase --abort 2>/dev/null || true
-            die "Rebase conflict. Use --merge or resolve manually."
-        }
-    fi
-
-    info "Done. Source '${source}' updated via ${strategy}."
-
-    # Return to original branch if different
-    if [[ "$orig" != "$source" ]]; then
-        git checkout "$orig" --quiet 2>/dev/null || true
-    fi
-}
-
-# ---------- pr-status ----------
-
-cmd_pr_status() {
-    local source_arg=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -*) die "Unknown flag: $1" ;;
-            *)  source_arg="$1"; shift ;;
-        esac
-    done
-
-    local source
-    source=$(resolve_source "$source_arg")
-
-    if ! command -v gh &>/dev/null; then
-        warn "gh CLI not found - cannot check PR status"
-        return 1
-    fi
-    if ! gh auth status &>/dev/null 2>&1; then
-        warn "gh CLI not authenticated - cannot check PR status"
-        return 1
-    fi
-
-    local -a targets=()
-    while IFS= read -r c; do
-        [[ -n "$c" ]] && targets+=("$c")
-    done < <(find_dispatch_targets "$source" | order_by_stack)
-
-    [[ ${#targets[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
-
-    echo -e "${CYAN}Source:${NC} $source"
-    echo ""
-
-    for task_branch in "${targets[@]}"; do
-        local pr_num pr_state pr_url
-        pr_num=$(gh pr list --head "$task_branch" --state all --json number --jq '.[0].number' 2>/dev/null)
-        if [[ -n "$pr_num" ]]; then
-            pr_state=$(gh pr list --head "$task_branch" --state all --json state --jq '.[0].state' 2>/dev/null)
-            pr_url=$(gh pr list --head "$task_branch" --state all --json url --jq '.[0].url' 2>/dev/null)
-            echo -e "  ${YELLOW}$task_branch${NC}  PR #${pr_num} (${pr_state}) ${pr_url}"
-        else
-            echo -e "  ${YELLOW}$task_branch${NC}  no PR"
-        fi
-    done
-}
-
-# ---------- resolve ----------
-
-cmd_resolve() {
-    local branch
-    branch=$(current_branch)
-
-    # Verify this is a dispatch task branch
-    local source
-    source=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
-    [[ -n "$source" ]] || die "Not a dispatch task branch: $branch"
-
-    # Extract target_id from branch name (last segment)
-    local target_id="${branch##*/}"
-    [[ -n "$target_id" ]] || die "Cannot extract task ID from branch '$branch'"
-
-    # Verify HEAD is a merge commit (2+ parents)
-    local parent_count
-    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
-    [[ $parent_count -ge 2 ]] || die "HEAD is not a merge commit"
-
-    # Verify merge not pushed
-    if git rev-parse --verify "origin/$branch" &>/dev/null; then
-        if git merge-base --is-ancestor HEAD "origin/$branch" 2>/dev/null; then
-            die "Merge already pushed to origin/$branch. Cannot resolve."
-        fi
-    fi
-
-    # Save refs
-    local first_parent second_parent merge_head
-    first_parent=$(git rev-parse HEAD^1)
-    second_parent=$(git rev-parse HEAD^2)
-    merge_head=$(git rev-parse HEAD)
-
-    # Find task-owned files: all files touched between stack parent and first_parent
-    local stack_parent
-    stack_parent=$(find_stack_parent "$branch")
-    [[ -n "$stack_parent" ]] || die "Cannot find stack parent for $branch"
-
-    local task_files
-    task_files=$(git log --format="" --name-only "${stack_parent}..${first_parent}" | sort -u | sed '/^$/d')
-
-    if [[ -z "$task_files" ]]; then
-        info "Clean merge, no resolution needed"
-        return
-    fi
-
-    # Find task files changed by the merge resolution
-    local changed_files=""
-    while IFS= read -r f; do
-        [[ -z "$f" ]] && continue
-        if ! git diff --quiet "$first_parent" "$merge_head" -- "$f" 2>/dev/null; then
-            changed_files+="$f"$'\n'
-        fi
-    done <<< "$task_files"
-    changed_files=$(echo "$changed_files" | sed '/^$/d')
-
-    if [[ -z "$changed_files" ]]; then
-        info "Clean merge, no resolution needed"
-        return
-    fi
-
-    # Create resolution commit + clean re-merge
-    # 1. Reset to pre-merge state
-    git reset --hard "$first_parent" -q
-
-    # 2. Apply changed task files as resolution commit
-    while IFS= read -r f; do
-        [[ -z "$f" ]] && continue
-        local dir
-        dir=$(dirname "$f")
-        [[ "$dir" == "." ]] || mkdir -p "$dir"
-        if git cat-file -e "${merge_head}:${f}" 2>/dev/null; then
-            git show "${merge_head}:${f}" > "$f"
-            git add "$f"
-        else
-            git rm -f "$f" 2>/dev/null || true
-        fi
-    done <<< "$changed_files"
-
-    git commit --no-verify -m "fix: resolve merge conflicts with base" --trailer "Target-Id=$target_id" -q
-
-    # 3. Re-merge with -X ours (no conflicts since resolution already applied)
-    git merge -X ours "$second_parent" --no-verify --no-edit -q
-
-    info "Resolved: resolution commit + clean re-merge (Target-Id=$target_id)"
-}
-
-# ---------- restack ----------
-
-cmd_restack() {
-    local source_arg="" dry_run=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --dry-run) dry_run=true; shift ;;
-            -*)        die "Unknown flag: $1" ;;
-            *)         source_arg="$1"; shift ;;
-        esac
-    done
-
-    local source
-    source=$(resolve_source "$source_arg")
-
-    local base
-    base=$(recover_dispatch_base "$source")
-    [[ -n "$base" ]] || die "Cannot determine base branch for $source"
-
-    # Determine base ref (prefer origin, fallback to local)
-    local base_ref
-    if ! $dry_run && git remote get-url origin &>/dev/null; then
-        git fetch origin "$base" --quiet 2>/dev/null || true
-    fi
-    if git rev-parse --verify "origin/$base" &>/dev/null; then
-        base_ref="origin/$base"
-    else
-        base_ref="$base"
-    fi
-
-    # Get ordered task branches
-    local -a ordered=()
-    while IFS= read -r c; do
-        [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_targets "$source" | order_by_stack)
-
-    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
-
-    # Save old tip refs before any rebasing (needed for correct --onto parent)
-    local -a old_tips=()
-    for b in "${ordered[@]}"; do
-        old_tips+=("$(git rev-parse "$b")")
-    done
-
-    # Save current checkout to restore later
-    local orig
-    orig=$(current_branch)
-
-    echo -e "${CYAN}Source:${NC}  $source"
-    echo -e "${CYAN}Base:${NC}    $base (rebasing onto $base_ref)"
-    echo ""
-
-    local merged=0 rebased=0 conflict="" rebase_onto="$base_ref"
-
-    for i in "${!ordered[@]}"; do
-        local task_branch="${ordered[$i]}"
-
-        # Check if fully merged into base (includes squash-merge detection)
-        if git merge-base --is-ancestor "${old_tips[$i]}" "$base_ref" 2>/dev/null || \
-           _is_content_merged "${old_tips[$i]}" "$base_ref"; then
-            if $dry_run; then
-                echo -e "  ${GREEN}[merged]${NC} $task_branch"
-            else
-                info "  [merged] $task_branch"
-                # Reparent children to this branch's parent
-                local merge_parent
-                merge_parent=$(find_stack_parent "$task_branch")
-                if [[ -n "$merge_parent" ]]; then
-                    local children
-                    children=$(get_targets "$task_branch")
-                    while IFS= read -r child; do
-                        [[ -n "$child" ]] || continue
-                        stack_remove "$child" "$task_branch"
-                        stack_add "$child" "$merge_parent"
-                    done <<< "$children"
-                    stack_remove "$task_branch" "$merge_parent"
-                fi
-            fi
-            merged=$((merged + 1))
-            continue
-        fi
-
-        # Find parent in stack
-        local parent
-        parent=$(find_stack_parent "$task_branch")
-        [[ -n "$parent" ]] || { warn "  Cannot find parent for $task_branch, skipping"; continue; }
-
-        # Resolve parent's OLD ref (before we may have rebased it)
-        local parent_ref="$parent"
-        for j in "${!ordered[@]}"; do
-            if [[ "${ordered[$j]}" == "$parent" ]]; then
-                parent_ref="${old_tips[$j]}"
-                break
-            fi
-        done
-
-        if $dry_run; then
-            echo -e "  ${YELLOW}[rebase]${NC} $task_branch onto $(git rev-parse --short "$rebase_onto" 2>/dev/null || echo "$rebase_onto")"
-            rebase_onto="$task_branch"
-            rebased=$((rebased + 1))
-            continue
-        fi
-
-        # Worktree-aware rebase
-        local wt
-        wt=$(worktree_for_branch "$task_branch")
-
-        if [[ -n "$wt" ]]; then
-            if ! git -C "$wt" rebase --onto "$rebase_onto" "$parent_ref" 2>/dev/null; then
-                git -C "$wt" rebase --abort 2>/dev/null || true
-                conflict="$task_branch"
-                warn "  [conflict] $task_branch — aborted"
-                break
-            fi
-        else
-            if ! git rebase --onto "$rebase_onto" "$parent_ref" "$task_branch" 2>/dev/null; then
-                git rebase --abort 2>/dev/null || true
-                conflict="$task_branch"
-                warn "  [conflict] $task_branch — aborted"
-                break
-            fi
-        fi
-
-        info "  [rebased] $task_branch"
-        rebase_onto="$task_branch"
-        rebased=$((rebased + 1))
-    done
-
-    # Restore original checkout
-    if ! $dry_run && [[ -n "$orig" ]]; then
-        git checkout "$orig" --quiet 2>/dev/null || true
-    fi
-
-    echo ""
-    if $dry_run; then
-        echo -e "${CYAN}Summary (dry-run):${NC} $merged merged, $rebased to rebase"
-    else
-        echo -e "${CYAN}Summary:${NC} $merged merged, $rebased rebased"
-    fi
-
-    if [[ $merged -gt 0 && $rebased -eq 0 && -z "$conflict" ]]; then
-        echo "All branches merged. Run: git dispatch reset --force"
-    fi
-
-    if [[ -n "$conflict" ]]; then
-        warn "Stopped at $conflict due to conflict."
-        warn "Resolve manually, then re-run: git dispatch restack"
-        return 1
-    fi
-
-    if [[ $rebased -gt 0 ]] && ! $dry_run; then
-        echo "Next: git dispatch push --force"
-    fi
-}
-
-# ---------- push ----------
-
-cmd_push() {
-    local source_arg="" dry_run=false branch_filter="" force=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --dry-run) dry_run=true; shift ;;
-            --branch)  branch_filter="$2"; shift 2 ;;
-            --force)   force=true; shift ;;
-            -*)        die "Unknown flag: $1" ;;
-            *)         source_arg="$1"; shift ;;
-        esac
-    done
-
-    local source
-    source=$(resolve_source "$source_arg")
-
-    local -a ordered=()
-    while IFS= read -r c; do
-        [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_targets "$source" | order_by_stack)
-
-    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
-
-    if [[ -n "$branch_filter" ]]; then
-        local matched=""
-        for c in "${ordered[@]}"; do
-            if [[ "$c" == "$branch_filter" ]] || [[ "$c" == */"$branch_filter" ]]; then
-                matched="$c"; break
-            fi
-        done
-        [[ -n "$matched" ]] || die "Branch '$branch_filter' not found in dispatch stack"
-        ordered=("$matched")
-    fi
-
-    local -a push_args=(-u origin)
-    $force && push_args+=(--force-with-lease)
-
-    echo -e "${CYAN}Source:${NC} $source"
-    echo ""
-
-    for task_branch in "${ordered[@]}"; do
-        # Skip if local matches remote (nothing to push)
-        local local_head remote_head
-        local_head=$(git rev-parse "$task_branch" 2>/dev/null || true)
-        remote_head=$(git rev-parse "origin/$task_branch" 2>/dev/null || true)
-        if [[ -n "$remote_head" && "$local_head" == "$remote_head" ]] && ! $force; then
-            echo "  $task_branch: up to date"
-            continue
-        fi
-
-        if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $task_branch"
-        else
-            git push "${push_args[@]}" "$task_branch" 2>/dev/null && \
-                info "  Pushed $task_branch" || \
-                warn "  Push failed for $task_branch"
-        fi
-    done
-}
-
-# ---------- pr ----------
-
-cmd_pr() {
-    local source_arg="" push=false dry_run=false
-    local branch_filter="" custom_title="" custom_body=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --push)    push=true; shift ;;
-            --dry-run) dry_run=true; shift ;;
-            --branch)  branch_filter="$2"; shift 2 ;;
-            --title)   custom_title="$2"; shift 2 ;;
-            --body)    custom_body="$2"; shift 2 ;;
-            -*)        die "Unknown flag: $1" ;;
-            *)         source_arg="$1"; shift ;;
-        esac
-    done
-
-    local source
-    source=$(resolve_source "$source_arg")
-
-    local -a ordered=()
-    while IFS= read -r c; do
-        [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_targets "$source" | order_by_stack)
-
-    [[ ${#ordered[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
-
-    if ! $dry_run && ! command -v gh &>/dev/null; then
-        die "gh CLI is required. Install: https://cli.github.com"
-    fi
-
-    # Filter to single branch if --branch is set
-    if [[ -n "$branch_filter" ]]; then
-        local matched=""
-        for c in "${ordered[@]}"; do
-            if [[ "$c" == "$branch_filter" ]] || [[ "$c" == */"$branch_filter" ]]; then
-                matched="$c"; break
-            fi
-        done
-        [[ -n "$matched" ]] || die "Branch '$branch_filter' not found in dispatch stack"
-        ordered=("$matched")
-    fi
-
-    echo -e "${CYAN}Source:${NC} $source"
-    echo ""
-
-    for task_branch in "${ordered[@]}"; do
-        local parent
-        parent=$(find_stack_parent "$task_branch")
-
-        # PR title: custom or first commit subject
-        local title
-        if [[ -n "$custom_title" ]]; then
-            title="$custom_title"
-        else
-            title=$(git log --reverse --format="%s" "${parent}..${task_branch}" | head -1)
-        fi
-
-        # PR body: custom or empty
-        local body=""
-        if [[ -n "$custom_body" ]]; then
-            body="$custom_body"
-        fi
-
-        if $push; then
-            if $dry_run; then
-                echo -e "  ${YELLOW}[dry-run]${NC} git push -u origin $task_branch"
-            else
-                git push -u origin "$task_branch" 2>/dev/null || warn "  Push failed for $task_branch"
-            fi
-        fi
-
-        if $dry_run; then
-            echo -e "  ${YELLOW}[dry-run]${NC} gh pr create --base $parent --head $task_branch --title \"$title\" --body \"$body\""
-        else
-            local url
-            url=$(gh pr create --base "$parent" --head "$task_branch" --title "$title" --body "$body" 2>&1) || {
-                warn "  PR creation failed for $task_branch: $url"
-                continue
-            }
-            info "  Created PR: $url"
+            local status_parts=""
+            [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
+            [[ $target_to_source -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${target_to_source} ahead"
+            echo -e "  ${YELLOW}$tid${NC}  $branch_name  $status_parts${pr_suffix}"
         fi
     done
 }
@@ -1448,220 +953,116 @@ cmd_pr() {
 # ---------- reset ----------
 
 cmd_reset() {
-    local source_arg="" delete_branches=false force=false
+    _require_init
+
+    local force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --branches) delete_branches=true; shift ;;
-            --force)    force=true; shift ;;
-            -*)         die "Unknown flag: $1" ;;
-            *)          source_arg="$1"; shift ;;
+            --force) force=true; shift ;;
+            -*)      die "Unknown flag: $1" ;;
+            *)       die "Unexpected argument: $1" ;;
         esac
     done
 
     local source
-    source=$(resolve_source "$source_arg")
+    source=$(resolve_source "")
 
-    local -a tasks=()
+    local -a targets=()
     while IFS= read -r c; do
-        [[ -n "$c" ]] && tasks+=("$c")
+        [[ -n "$c" ]] && targets+=("$c")
     done < <(find_dispatch_targets "$source")
 
-    [[ ${#tasks[@]} -gt 0 ]] || die "No dispatch tasks found for $source"
-
-    echo -e "${CYAN}Source:${NC} $source"
-    echo "Tasks: ${tasks[*]}"
-    if $delete_branches; then
-        warn "Will also delete task branches"
+    echo -e "${CYAN}This will delete:${NC}"
+    echo "  - dispatch config on source branch"
+    if [[ ${#targets[@]} -gt 0 ]]; then
+        echo "  - target branches: ${targets[*]}"
     fi
+    echo "  - hooks from .git/hooks"
 
     if ! $force; then
         echo ""
-        read -p "Reset dispatch metadata? [y/N] " confirm
+        read -p "Proceed? [y/N] " confirm
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
     fi
 
-    # Collect parent-task pairs before modifying config
-    local -a parents=()
-    for task in "${tasks[@]}"; do
-        parents+=("$(find_stack_parent "$task")")
-    done
+    local cur
+    cur=$(current_branch)
 
-    for i in "${!tasks[@]}"; do
-        local task="${tasks[$i]}"
-        local parent="${parents[$i]}"
+    # Delete target branches and metadata
+    for target in "${targets[@]}"; do
+        local parent
+        parent=$(find_stack_parent "$target")
 
-        # Remove dispatchsource from task
-        git config --unset "branch.${task}.dispatchsource" 2>/dev/null || true
+        git config --unset "branch.${target}.dispatchsource" 2>/dev/null || true
+        [[ -n "$parent" ]] && stack_remove "$target" "$parent"
+        git config --unset-all "branch.${target}.dispatchtargets" 2>/dev/null || true
 
-        # Remove task from parent's dispatchtargets
-        if [[ -n "$parent" ]]; then
-            stack_remove "$task" "$parent"
-        fi
-
-        # Remove any dispatchtargets on this task itself
-        git config --unset-all "branch.${task}.dispatchtargets" 2>/dev/null || true
-
-        if $delete_branches; then
-            local cur
-            cur=$(current_branch)
-            if [[ "$cur" == "$task" ]]; then
-                warn "  Skipping delete of $task (currently checked out)"
-            else
-                git branch -D "$task" 2>/dev/null || warn "  Could not delete $task"
-                info "  Deleted $task"
-            fi
+        if [[ "$cur" == "$target" ]]; then
+            warn "  Skipping delete of $target (currently checked out)"
         else
-            info "  Cleaned $task"
+            git branch -D "$target" 2>/dev/null || true
+            info "  Deleted $target"
         fi
     done
+
+    # Delete dispatch config
+    git config --unset dispatch.base 2>/dev/null || true
+    git config --unset dispatch.prefix 2>/dev/null || true
+    git config --unset dispatch.mode 2>/dev/null || true
 
     echo ""
     info "Reset complete."
-}
-
-# ---------- tree ----------
-
-cmd_tree() {
-    local branch="${1:-}"
-    if [[ -z "$branch" ]]; then
-        # Auto-detect: find root by walking dispatchsource or use current branch
-        branch=$(current_branch)
-        local source_ref
-        source_ref=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
-        if [[ -n "$source_ref" ]]; then
-            # Walk up to find the base
-            local parent
-            parent=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                if get_targets "$b" | grep -Fxq "$branch"; then echo "$b"; break; fi
-            done)
-            # Find root of the stack
-            while [[ -n "$parent" ]]; do
-                local gp
-                gp=$(git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-                    if get_targets "$b" | grep -Fxq "$parent"; then echo "$b"; break; fi
-                done)
-                [[ -z "$gp" ]] && break
-                parent="$gp"
-            done
-            [[ -n "$parent" ]] && branch="$parent"
-        fi
-    fi
-    stack_show_all "$branch"
-}
-
-# ---------- hook install ----------
-
-cmd_hook_install() {
-    local hook_dir
-    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
-    if [[ -z "$hook_dir" ]]; then
-        hook_dir="$(git rev-parse --git-dir)/hooks"
-    elif [[ "$hook_dir" != /* ]]; then
-        # Resolve relative paths (e.g. ".husky") against repo root
-        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
-    fi
-    mkdir -p "$hook_dir"
-    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$hook_dir/prepare-commit-msg"
-    chmod +x "$hook_dir/prepare-commit-msg"
-    cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
-    chmod +x "$hook_dir/commit-msg"
-    info "Installed prepare-commit-msg hook to $hook_dir/prepare-commit-msg"
-    info "Installed commit-msg hook to $hook_dir/commit-msg"
 }
 
 # ---------- help ----------
 
 cmd_help() {
     cat <<'HELP'
-git-dispatch: Split a source branch into stacked task branches and keep them in sync.
+git-dispatch: Create target branches from a source branch and keep them in sync.
+
+SETUP
+  git dispatch init [--base <branch>] [--prefix <str>] [--mode <independent|stacked>]
+
+  Initialize dispatch on the current branch. Stores config, installs hooks.
+  Defaults: --base master, --prefix task-, --mode independent.
 
 WORKFLOW
-  1. Code on a source branch, tagging each commit with a Target-Id trailer:
-       git commit -m "Add feature X" --trailer "Target-Id=3"
+  1. Tag every commit with a Target-Id trailer:
+       git commit -m "Add feature" --trailer "Target-Id=1"
 
-  2. Split into stacked branches:
-       git dispatch split source/feature --base master --name feat/feature
+  2. Create target branches:
+       git dispatch apply
 
-  3. Continue working on source or task branches, then sync:
-       git dispatch sync                                      # auto-detect source, sync all
-       git dispatch sync source/feature                       # explicit source, sync all
-       git dispatch sync source/feature feat/feature/3       # sync one task
+  3. Propagate changes:
+       git dispatch apply                              # source to all targets
+       git dispatch cherry-pick --from source --to 2   # source to one target
+       git dispatch cherry-pick --from 2 --to source   # target back to source
 
-  4. View the stack:
-       git dispatch tree
+  4. Update source with base changes:
+       git dispatch merge --from base --to source      # safe, no force-push
+       git dispatch rebase --from base --to source     # rewrites history
 
 COMMANDS
-  split <source> --name <prefix> [--base <base>] [--dry-run]
-      Parse Target-Id trailers from <source>, group commits by task, create stacked
-      branches named <prefix>/<task-id>. Each branch stacks on the previous.
+  init      Configure dispatch on current source branch
+  apply     Make all targets match source (create/update)
+  cherry-pick  Move commits between source and target (--from/--to)
+  rebase    Rebase source onto base (--from base --to source)
+  merge     Merge base into source (--from base --to source)
+  push      Push branches (--from <id|all|source>)
+  status    Show mode, base, source, and all targets with sync state
+  reset     Delete all dispatch metadata and target branches
 
-  sync [source] [task-branch]
-      Bidirectional sync using git cherry (patch-id comparison).
-      Source->task: new commits for the task appear in the task branch.
-      Task->source: direct fixes on task appear back in the source (Target-Id added).
-      If <source> is omitted, auto-detects from current branch context.
-
-  status [source]
-      Show pending sync counts per task branch without applying changes.
-      Quick check before running sync.
-
-  push [source] [--branch <name>] [--force] [--dry-run]
-      Push task branches to origin. Walks the dispatch stack in order.
-      --branch targets a single branch instead of all tasks.
-      --force uses --force-with-lease (safe after sync rewrites history).
-      --dry-run shows what would be pushed without doing it.
-
-  pr [source] [--branch <name>] [--title <title>] [--body <body>] [--push] [--dry-run]
-      Create stacked PRs with correct --base flags via gh CLI.
-      Walks the dispatch stack in order. --push pushes branches first.
-      --branch targets a single branch instead of all tasks.
-      --title and --body override the auto-generated PR title and empty body.
-      --dry-run shows what would be created without doing it.
-
-  resolve
-      Convert a merge commit (HEAD) on a task branch into a regular commit
-      with Target-Id trailer. Use after merging master to resolve conflicts.
-
-  update-base [source] [--merge|--rebase]
-      Update source branch with latest base. Auto-detects strategy:
-      --merge when open PRs exist (preserves history), --rebase otherwise.
-      Explicit flag overrides auto-detection.
-
-  pr-status [source]
-      Show PR state for each task branch (requires gh CLI).
-
-  restack [source] [--dry-run]
-      Rebase stack onto updated base after merge. Walks the stack in order;
-      merged branches are skipped, remaining branches are rebased onto the
-      updated base. Stops on conflict. Use after a PR is merged to master.
-      --dry-run shows what would happen without modifying branches.
-
-  reset [source] [--branches] [--force]
-      Clean up dispatch metadata from git config.
-      --branches also deletes the task branches.
-      --force skips confirmation prompt.
-
-  tree [branch]
-      Show the dispatch stack hierarchy.
-
-  hook install
-      Install hooks: prepare-commit-msg (auto-carries Target-Id from previous
-      commit) and commit-msg (rejects commits without Target-Id).
-
-  help
-      Show this message.
+FLAGS (on propagation commands)
+  --dry-run   Show plan, make no changes
+  --resolve   Enter conflict resolution mode
+  --force     Override safety checks
 
 TRAILERS
-  Target-Id (required):
-    git commit -m "message" --trailer "Target-Id=3"
+  Target-Id (required): numeric integer or decimal (1, 2, 1.5)
+    git commit -m "message" --trailer "Target-Id=1"
 
-  Target-Order-REMOVE (optional): Controls stack position during split. Tasks with
-  Target-Order-REMOVE sort first (ascending), unordered tasks follow in commit order.
-    git commit -m "fix" --trailer "Target-Id=3" --trailer "Target-Order-REMOVE=1"
-
-  The hooks (install with `git dispatch hook install`) auto-carry Target-Id from
-  the previous commit and reject commits without a Target-Id trailer.
+  Hook auto-carries Target-Id from previous commit when absent.
 HELP
 }
 
@@ -1673,22 +1074,15 @@ main() {
     local cmd="$1"; shift
     case "$cmd" in
         init)         cmd_init "$@" ;;
-        split)        cmd_split "$@" ;;
-        sync)         cmd_sync "$@" ;;
-        status)       cmd_status "$@" ;;
+        apply)        cmd_apply "$@" ;;
+        cherry-pick)  cmd_cherry_pick "$@" ;;
+        rebase)       cmd_rebase "$@" ;;
+        merge)        cmd_merge "$@" ;;
         push)         cmd_push "$@" ;;
-        pr)           cmd_pr "$@" ;;
+        status)       cmd_status "$@" ;;
         reset)        cmd_reset "$@" ;;
-        resolve)      cmd_resolve "$@" ;;
-        restack)      cmd_restack "$@" ;;
-        update-base)  cmd_update_base "$@" ;;
-        pr-status)    cmd_pr_status "$@" ;;
-        tree)         cmd_tree "$@" ;;
-        hook)
-            [[ "${1:-}" == "install" ]] || die "Usage: git dispatch hook install"
-            shift; cmd_hook_install "$@" ;;
         help|--help|-h) cmd_help ;;
-        *)            die "Unknown command: $cmd. Run 'git dispatch help' for usage." ;;
+        *)            die "Unknown command: $cmd" ;;
     esac
 }
 
