@@ -78,6 +78,36 @@ worktree_for_branch() {
     '
 }
 
+# Read dispatch config shorthand
+_get_config() {
+    local key="$1"
+    git config "dispatch.${key}" 2>/dev/null || true
+}
+
+# Require dispatch init has been run
+_require_init() {
+    local base
+    base=$(_get_config base)
+    [[ -n "$base" ]] || die "Not initialized. Run: git dispatch init"
+}
+
+# Install hooks (prepare-commit-msg + commit-msg only)
+_install_hooks() {
+    local hook_dir
+    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
+    if [[ -z "$hook_dir" ]]; then
+        hook_dir="$(git rev-parse --git-dir)/hooks"
+    elif [[ "$hook_dir" != /* ]]; then
+        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
+    fi
+    mkdir -p "$hook_dir"
+    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$hook_dir/prepare-commit-msg"
+    chmod +x "$hook_dir/prepare-commit-msg"
+    cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
+    chmod +x "$hook_dir/commit-msg"
+    info "Installed hooks to $hook_dir"
+}
+
 # Check if a branch's content has been merged (e.g. squash-merged) into base
 _is_content_merged() {
     local branch_tip="$1" base_ref="$2"
@@ -268,6 +298,85 @@ cherry_pick_into() {
 
     $stashed && "${git_cmd[@]}" stash pop --quiet
     [[ -z "$wt" ]] && git checkout "$orig" --quiet
+}
+
+# ---------- init ----------
+
+cmd_init() {
+    local base="" prefix="task-" mode="independent"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base)   base="$2"; shift 2 ;;
+            --prefix) prefix="$2"; shift 2 ;;
+            --mode)   mode="$2"; shift 2 ;;
+            --force)  shift ;;  # consumed but not currently used differently
+            -*)       die "Unknown flag: $1" ;;
+            *)        die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    # Validate mode
+    [[ "$mode" == "independent" || "$mode" == "stacked" ]] || \
+        die "Invalid mode '$mode'. Use: independent or stacked"
+
+    # Must be on a branch
+    local source
+    source=$(current_branch)
+    [[ -n "$source" ]] || die "Not on a branch (detached HEAD)"
+
+    # Auto-detect base if not specified
+    if [[ -z "$base" ]]; then
+        if git rev-parse --verify master &>/dev/null; then
+            base="master"
+        elif git rev-parse --verify main &>/dev/null; then
+            base="main"
+        else
+            die "Cannot auto-detect base branch. Use --base <branch>"
+        fi
+    fi
+
+    git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
+    [[ "$source" != "$base" ]] || die "Cannot init on the base branch itself"
+
+    # Check for existing config
+    local existing_base
+    existing_base=$(_get_config base)
+    if [[ -n "$existing_base" ]]; then
+        local existing_mode existing_prefix
+        existing_mode=$(_get_config mode)
+        existing_prefix=$(_get_config prefix)
+        local target_count
+        target_count=$(find_dispatch_targets "$source" | wc -l | tr -d ' ')
+
+        warn "Warning: dispatch already configured on this branch:"
+        warn "  mode:   ${existing_mode:-independent}"
+        warn "  base:   $existing_base"
+        warn "  prefix: ${existing_prefix:-task-}"
+        [[ "$target_count" -gt 0 ]] && warn "  targets: $target_count branches exist"
+        echo ""
+        warn "Overwriting config will orphan existing target branches."
+
+        # Non-interactive: require --force (already consumed above, but presence means intent)
+        if [[ -t 0 ]]; then
+            read -p "Proceed? [y/N] " confirm
+            [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        fi
+    fi
+
+    # Store config
+    git config dispatch.base "$base"
+    git config dispatch.prefix "$prefix"
+    git config dispatch.mode "$mode"
+
+    # Install hooks
+    _install_hooks
+
+    echo ""
+    info "Initialized dispatch on '$source'"
+    echo -e "  ${CYAN}mode:${NC}   $mode"
+    echo -e "  ${CYAN}base:${NC}   $base"
+    echo -e "  ${CYAN}prefix:${NC} $prefix"
 }
 
 # ---------- split ----------
@@ -1563,6 +1672,7 @@ main() {
 
     local cmd="$1"; shift
     case "$cmd" in
+        init)         cmd_init "$@" ;;
         split)        cmd_split "$@" ;;
         sync)         cmd_sync "$@" ;;
         status)       cmd_status "$@" ;;

@@ -104,6 +104,133 @@ create_source() {
     git commit -m "Implement validation$(printf '\n\nTarget-Id: 5')" -q
 }
 
+# ---------- init tests ----------
+
+test_init_basic() {
+    echo "=== test: init basic ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --base master --prefix "task-" --mode independent
+
+    local base mode prefix
+    base=$(git config dispatch.base)
+    mode=$(git config dispatch.mode)
+    prefix=$(git config dispatch.prefix)
+
+    assert_eq "master" "$base" "dispatch.base set"
+    assert_eq "independent" "$mode" "dispatch.mode set"
+    assert_eq "task-" "$prefix" "dispatch.prefix set"
+
+    teardown
+}
+
+test_init_defaults() {
+    echo "=== test: init defaults ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init
+
+    local base mode prefix
+    base=$(git config dispatch.base)
+    mode=$(git config dispatch.mode)
+    prefix=$(git config dispatch.prefix)
+
+    assert_eq "master" "$base" "default base is master"
+    assert_eq "independent" "$mode" "default mode is independent"
+    assert_eq "task-" "$prefix" "default prefix is task-"
+
+    teardown
+}
+
+test_init_stacked_mode() {
+    echo "=== test: init stacked mode ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --mode stacked
+
+    local mode
+    mode=$(git config dispatch.mode)
+    assert_eq "stacked" "$mode" "mode set to stacked"
+
+    teardown
+}
+
+test_init_custom_prefix() {
+    echo "=== test: init custom prefix ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --prefix "phase-"
+
+    local prefix
+    prefix=$(git config dispatch.prefix)
+    assert_eq "phase-" "$prefix" "custom prefix set"
+
+    teardown
+}
+
+test_init_reinit_warns() {
+    echo "=== test: init reinit warns ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --base master
+
+    local output
+    output=$(echo "n" | bash "$DISPATCH" init --base master 2>&1) || true
+
+    assert_contains "$output" "already configured" "warns about existing config"
+
+    teardown
+}
+
+test_init_installs_hooks() {
+    echo "=== test: init installs hooks ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init
+
+    local hook_dir
+    hook_dir="$(git rev-parse --git-dir)/hooks"
+
+    if [[ -f "$hook_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} commit-msg hook installed"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} commit-msg hook not found"
+        FAIL=$((FAIL + 1))
+    fi
+
+    if [[ -f "$hook_dir/prepare-commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} prepare-commit-msg hook installed"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} prepare-commit-msg hook not found"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # post-merge should NOT be installed
+    if [[ -f "$hook_dir/post-merge" ]]; then
+        echo -e "  ${RED}FAIL${NC} post-merge hook should not be installed"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} post-merge hook correctly absent"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
 # ---------- tests ----------
 
 test_split() {
@@ -2292,6 +2419,12 @@ echo "git-dispatch test suite"
 echo "======================="
 echo ""
 
+test_init_basic
+test_init_defaults
+test_init_stacked_mode
+test_init_custom_prefix
+test_init_reinit_warns
+test_init_installs_hooks
 test_split
 test_split_dry_run
 test_tree
