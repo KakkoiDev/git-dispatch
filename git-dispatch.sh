@@ -1458,14 +1458,7 @@ cmd_hook_install() {
     cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
     chmod +x "$hook_dir/commit-msg"
     info "Installed prepare-commit-msg hook to $hook_dir/prepare-commit-msg"
-    cp "$SCRIPT_DIR/hooks/post-merge" "$hook_dir/post-merge"
-    chmod +x "$hook_dir/post-merge"
     info "Installed commit-msg hook to $hook_dir/commit-msg"
-    info "Installed post-merge hook to $hook_dir/post-merge"
-    echo ""
-    echo "Hint: configure conventions with:"
-    echo "  git config dispatch.taskIdPattern '^task-[0-9]+\$'"
-    echo "  git config dispatch.requireTaskOrder true"
 }
 
 # ---------- help ----------

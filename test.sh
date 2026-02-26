@@ -92,16 +92,16 @@ assert_branch_not_exists() {
 create_source() {
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add enum$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Add enum$(printf '\n\nTarget-Id: 3')" -q
 
     echo "b" > api.txt; git add api.txt
-    git commit -m "Create GET endpoint$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Create GET endpoint$(printf '\n\nTarget-Id: 4')" -q
 
     echo "c" > dto.txt; git add dto.txt
-    git commit -m "Add DTOs$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Add DTOs$(printf '\n\nTarget-Id: 4')" -q
 
     echo "d" > validate.txt; git add validate.txt
-    git commit -m "Implement validation$(printf '\n\nTask-Id: 5')" -q
+    git commit -m "Implement validation$(printf '\n\nTarget-Id: 5')" -q
 }
 
 # ---------- tests ----------
@@ -134,15 +134,15 @@ test_split() {
 
     # Stack config
     local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    tasks_master=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/3" "$tasks_master" "master has task-3 in stack"
 
     local tasks_3
-    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/4" "$tasks_3" "task-3 has task-4 in stack"
 
     local tasks_4
-    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/5" "$tasks_4" "task-4 has task-5 in stack"
 
     # Source association
@@ -206,7 +206,7 @@ test_sync_source_to_task() {
     # Add a new commit to source for task-4
     git checkout source/feature -q
     echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix DTO validation$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Fix DTO validation$(printf '\n\nTarget-Id: 4')" -q
 
     local before
     before=$(git log --oneline master..feat/4 | wc -l | tr -d ' ')
@@ -240,7 +240,7 @@ test_sync_task_to_source() {
     # Add a commit directly on task-3
     git checkout feat/3 -q
     echo "hotfix" > hotfix.txt; git add hotfix.txt
-    git commit -m "Hotfix alignment$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Hotfix alignment$(printf '\n\nTarget-Id: 3')" -q
 
     local before
     before=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
@@ -277,7 +277,7 @@ test_sync_worktree() {
     # Add commit to source for task-4
     git checkout source/feature -q
     echo "wt-fix" > wt-fix.txt; git add wt-fix.txt
-    git commit -m "Worktree fix$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Worktree fix$(printf '\n\nTarget-Id: 4')" -q
 
     bash "$DISPATCH" sync source/feature feat/4 || true
 
@@ -304,17 +304,17 @@ test_hook() {
     # Commit without trailer should fail
     echo "x" > x.txt; git add x.txt
     if git commit -m "no trailer" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject commit without Task-Id"
+        echo -e "  ${RED}FAIL${NC} hook should reject commit without Target-Id"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Task-Id"
+        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Target-Id"
         PASS=$((PASS + 1))
     fi
 
     # Commit with trailer should succeed
-    git commit -m "with trailer$(printf '\n\nTask-Id: 1')" -q
+    git commit -m "with trailer$(printf '\n\nTarget-Id: 1')" -q
     if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows commit with Task-Id"
+        echo -e "  ${GREEN}PASS${NC} hook allows commit with Target-Id"
         PASS=$((PASS + 1))
     fi
 
@@ -398,67 +398,81 @@ test_hook_install_default_without_hooks_path() {
     teardown
 }
 
-test_hook_auto_carry_task_id() {
-    echo "=== test: hook auto-carries Task-Id from previous commit ==="
+test_hook_auto_carry_target_id() {
+    echo "=== test: hook auto-carries Target-Id from previous commit ==="
     setup
 
     bash "$DISPATCH" hook install
 
-    # First commit with explicit Task-Id
+    # First commit with explicit Target-Id
     echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
 
-    # Second commit without trailer — should auto-carry Task-Id=3
+    # Second commit without trailer - should auto-carry Target-Id=3
     echo "b" > b.txt; git add b.txt
     git commit -m "second" -q
 
     local carried
-    carried=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "$carried" "3" "Task-Id auto-carried from previous commit"
+    carried=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "$carried" "3" "Target-Id auto-carried from previous commit"
 
     teardown
 }
 
 test_hook_auto_carry_no_override() {
-    echo "=== test: hook does not override explicit Task-Id ==="
+    echo "=== test: hook does not override explicit Target-Id ==="
     setup
 
     bash "$DISPATCH" hook install
 
-    # First commit with Task-Id=3
+    # First commit with Target-Id=3
     echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
 
-    # Second commit with explicit Task-Id=4 — should keep 4, not carry 3
+    # Second commit with explicit Target-Id=4 - should keep 4, not carry 3
     echo "b" > b.txt; git add b.txt
-    git commit -m "second" --trailer "Task-Id=4" -q
+    git commit -m "second" --trailer "Target-Id=4" -q
 
-    local task_id
-    task_id=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "$task_id" "4" "explicit Task-Id not overridden by auto-carry"
+    local target_id
+    target_id=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "$target_id" "4" "explicit Target-Id not overridden by auto-carry"
 
     teardown
 }
 
-test_hook_auto_carry_task_order() {
-    echo "=== test: hook auto-carries Task-Id and Task-Order ==="
+test_hook_rejects_non_numeric_target_id() {
+    echo "=== test: hook rejects non-numeric Target-Id ==="
     setup
 
     bash "$DISPATCH" hook install
 
-    # First commit with Task-Id=3 and Task-Order=1
-    echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTask-Id: 3\nTask-Order: 1')" -q
+    echo "x" > x.txt; git add x.txt
+    if git commit -m "bad id$(printf '\n\nTarget-Id: task-3')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Target-Id"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Target-Id"
+        PASS=$((PASS + 1))
+    fi
 
-    # Second commit without trailers — should auto-carry both
-    echo "b" > b.txt; git add b.txt
-    git commit -m "second" -q
+    teardown
+}
 
-    local carried_id carried_order
-    carried_id=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
-    carried_order=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" | tr -d '[:space:]')
-    assert_eq "$carried_id" "3" "Task-Id auto-carried"
-    assert_eq "$carried_order" "1" "Task-Order auto-carried"
+test_hook_allows_decimal_target_id() {
+    echo "=== test: hook allows decimal Target-Id ==="
+    setup
+
+    bash "$DISPATCH" hook install
+
+    echo "x" > x.txt; git add x.txt
+    git commit -m "decimal id$(printf '\n\nTarget-Id: 1.5')" -q
+    if [[ $? -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook allows decimal Target-Id"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hook should allow decimal Target-Id"
+        FAIL=$((FAIL + 1))
+    fi
 
     teardown
 }
@@ -482,7 +496,7 @@ test_sync_auto_detect_from_source() {
     # Add a new commit to source for task-3
     git checkout source/feature -q
     echo "auto" > auto.txt; git add auto.txt
-    git commit -m "Auto detect fix$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Auto detect fix$(printf '\n\nTarget-Id: 3')" -q
 
     local before
     before=$(git log --oneline master..feat/3 | wc -l | tr -d ' ')
@@ -508,7 +522,7 @@ test_sync_auto_detect_from_task() {
     # Add a commit to source for task-4
     git checkout source/feature -q
     echo "task-auto" > task-auto.txt; git add task-auto.txt
-    git commit -m "Task auto fix$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Task auto fix$(printf '\n\nTarget-Id: 4')" -q
 
     # Switch to task branch, sync without args
     git checkout feat/4 -q
@@ -527,13 +541,13 @@ test_sync_auto_detect_from_task() {
 }
 
 test_sync_adds_trailer() {
-    echo "=== test: sync task→source adds Task-Id trailer ==="
+    echo "=== test: sync task->source adds Target-Id trailer ==="
     setup
     create_source
 
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Commit on task branch WITHOUT Task-Id trailer
+    # Commit on task branch WITHOUT Target-Id trailer
     git checkout feat/3 -q
     echo "no-trailer" > notrailer.txt; git add notrailer.txt
     git commit --no-verify -m "Fix without trailer" -q
@@ -542,13 +556,13 @@ test_sync_adds_trailer() {
 
     # Check trailer was added on task branch commit (amended in-place)
     local task_trailer
-    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/3 | tr -d '[:space:]')
-    assert_eq "3" "$task_trailer" "Task-Id trailer added on task branch commit"
+    task_trailer=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" feat/3 | tr -d '[:space:]')
+    assert_eq "3" "$task_trailer" "Target-Id trailer added on task branch commit"
 
-    # Check the cherry-picked commit on source also has Task-Id trailer
+    # Check the cherry-picked commit on source also has Target-Id trailer
     local source_trailer
-    source_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "3" "$source_trailer" "Task-Id trailer present on source after sync"
+    source_trailer=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_trailer" "Target-Id trailer present on source after sync"
 
     teardown
 }
@@ -563,12 +577,12 @@ test_status() {
     # Add a commit to source for task-4
     git checkout source/feature -q
     echo "status-fix" > status-fix.txt; git add status-fix.txt
-    git commit -m "Status fix$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Status fix$(printf '\n\nTarget-Id: 4')" -q
 
     # Add a commit directly on task-3
     git checkout feat/3 -q
     echo "task-fix" > task-fix.txt; git add task-fix.txt
-    git commit -m "Task fix$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Task fix$(printf '\n\nTarget-Id: 3')" -q
 
     local output
     output=$(bash "$DISPATCH" status source/feature)
@@ -661,16 +675,16 @@ test_reset() {
     assert_eq "" "$src4" "task-4 dispatchsource removed"
 
     local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
-    assert_eq "" "$tasks_master" "master dispatchtasks removed"
+    tasks_master=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
+    assert_eq "" "$tasks_master" "master dispatchtargets removed"
 
     local tasks_3
-    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
-    assert_eq "" "$tasks_3" "task-3 dispatchtasks removed"
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtargets 2>/dev/null || true)
+    assert_eq "" "$tasks_3" "task-3 dispatchtargets removed"
 
     local tasks_4
-    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
-    assert_eq "" "$tasks_4" "task-4 dispatchtasks removed"
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtargets 2>/dev/null || true)
+    assert_eq "" "$tasks_4" "task-4 dispatchtargets removed"
 
     # Branches should still exist
     assert_branch_exists "feat/3" "task-3 still exists after reset"
@@ -733,12 +747,12 @@ test_sync_cherry_pick_conflict() {
     # Create conflicting commit on source for task-3 (modifies file.txt which task-3 created)
     git checkout source/feature -q
     echo "conflict" > file.txt; git add file.txt
-    git commit -m "Conflict change$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Conflict change$(printf '\n\nTarget-Id: 3')" -q
 
     # Create conflicting commit on task-3 (different content in same file)
     git checkout feat/3 -q
     echo "different" > file.txt; git add file.txt
-    git commit -m "Conflicting fix$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "Conflicting fix$(printf '\n\nTarget-Id: 3')" -q
 
     # Sync should fail with error message
     local output
@@ -807,30 +821,6 @@ test_resolve_source_error_message() {
         FAIL=$((FAIL + 1))
     else
         assert_contains "$output" "random/branch" "error includes current branch name"
-    fi
-
-    teardown
-}
-
-test_split_non_numeric_task_id() {
-    echo "=== test: non-numeric task ID accepted ==="
-    setup
-
-    git checkout -b source/alpha master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add alpha$(printf '\n\nTask-Id: task-6')" -q
-
-    bash "$DISPATCH" split source/alpha --base master --name feat
-
-    assert_branch_exists "feat/task-6" "non-numeric task-6 branch created"
-
-    # Verify no double prefix (should NOT be feat/task-task-6)
-    if git rev-parse --verify "feat/task-task-6" >/dev/null 2>&1; then
-        echo -e "  ${RED}FAIL${NC} double prefix feat/task-task-6 should not exist"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} no double prefix"
-        PASS=$((PASS + 1))
     fi
 
     teardown
@@ -926,60 +916,29 @@ test_pr_branch_not_found() {
     teardown
 }
 
-test_split_task_order() {
-    echo "=== test: split with Task-Order ==="
+test_split_decimal_target_id() {
+    echo "=== test: split with decimal Target-Id ==="
     setup
 
     git checkout -b source/ordered master -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
 
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
 
     bash "$DISPATCH" split source/ordered --base master --name feat
 
-    assert_branch_exists "feat/task-A" "task-A branch created"
-    assert_branch_exists "feat/task-B" "task-B branch created"
+    assert_branch_exists "feat/1" "feat/1 branch created"
+    assert_branch_exists "feat/2" "feat/2 branch created"
 
     local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-A" "$tasks_master" "master -> task-A (order 1 first)"
+    tasks_master=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/1" "$tasks_master" "master -> feat/1 (numeric sort, 1 first)"
 
-    local tasks_a
-    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (order 2 second)"
-
-    teardown
-}
-
-test_split_task_order_partial() {
-    echo "=== test: split with partial Task-Order ==="
-    setup
-
-    git checkout -b source/partial master -q
-    echo "c" > c.txt; git add c.txt
-    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 1')" -q
-
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A')" -q
-
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B')" -q
-
-    bash "$DISPATCH" split source/partial --base master --name feat
-
-    local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-C" "$tasks_master" "master -> task-C (ordered first)"
-
-    local tasks_c
-    tasks_c=$(git config --get-all branch.feat/task-C.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-A" "$tasks_c" "task-C -> task-A (unordered, commit order)"
-
-    local tasks_a
-    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (unordered, commit order)"
+    local tasks_1
+    tasks_1=$(git config --get-all branch.feat/1.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/2" "$tasks_1" "feat/1 -> feat/2 (numeric sort, 2 second)"
 
     teardown
 }
@@ -992,15 +951,15 @@ test_split_no_task_order_backward_compat() {
     bash "$DISPATCH" split source/feature --base master --name feat
 
     local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    tasks_master=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/3" "$tasks_master" "master -> task-3 (commit order preserved)"
 
     local tasks_3
-    tasks_3=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    tasks_3=$(git config --get-all branch.feat/3.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/4" "$tasks_3" "task-3 -> task-4 (commit order preserved)"
 
     local tasks_4
-    tasks_4=$(git config --get-all branch.feat/4.dispatchtasks 2>/dev/null || true)
+    tasks_4=$(git config --get-all branch.feat/4.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/5" "$tasks_4" "task-4 -> task-5 (commit order preserved)"
 
     teardown
@@ -1010,17 +969,17 @@ test_status_stack_order() {
     echo "=== test: status shows branches in stack order ==="
     setup
 
-    # Create source with task IDs that sort differently alphabetically vs numerically
-    # Alpha order: 10, 20, 3 — Stack order: 3, 10, 20
+    # Create source with target IDs that sort differently alphabetically vs numerically
+    # Alpha order: 10, 20, 3 - Stack order: 3, 10, 20
     git checkout -b source/order master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "First$(printf '\n\nTarget-Id: 3')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+    git commit -m "Second$(printf '\n\nTarget-Id: 10')" -q
 
     echo "c" > c.txt; git add c.txt
-    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+    git commit -m "Third$(printf '\n\nTarget-Id: 20')" -q
 
     bash "$DISPATCH" split source/order --base master --name feat >/dev/null
 
@@ -1048,22 +1007,22 @@ test_status_no_false_pending() {
 
     git checkout -b source/fresh master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "First$(printf '\n\nTarget-Id: 3')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Second$(printf '\n\nTask-Id: 4')" -q
+    git commit -m "Second$(printf '\n\nTarget-Id: 4')" -q
 
     # Advance master again after source fork
     git checkout master -q
     echo "base3" > base3.txt; git add base3.txt
     git commit -m "Base advance 3" -q
 
-    # Split — task branches are on current master, ahead of source fork point
+    # Split - task branches are on current master, ahead of source fork point
     bash "$DISPATCH" split source/fresh --base master --name feat >/dev/null
 
     local output
     output=$(bash "$DISPATCH" status source/fresh | sed $'s/\033\\[[0-9;]*m//g')
 
-    # After a fresh split, all tasks should be in sync — no false pending
+    # After a fresh split, all tasks should be in sync - no false pending
     assert_not_contains "$output" "pending" "no false pending after fresh split"
     assert_contains "$output" "in sync" "shows in sync after fresh split"
 
@@ -1076,13 +1035,13 @@ test_sync_stack_order() {
 
     git checkout -b source/order master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "First$(printf '\n\nTarget-Id: 3')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+    git commit -m "Second$(printf '\n\nTarget-Id: 10')" -q
 
     echo "c" > c.txt; git add c.txt
-    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+    git commit -m "Third$(printf '\n\nTarget-Id: 20')" -q
 
     bash "$DISPATCH" split source/order --base master --name feat >/dev/null
 
@@ -1104,13 +1063,13 @@ test_pr_stack_order() {
 
     git checkout -b source/order master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "First$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "First$(printf '\n\nTarget-Id: 3')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "Second$(printf '\n\nTask-Id: 10')" -q
+    git commit -m "Second$(printf '\n\nTarget-Id: 10')" -q
 
     echo "c" > c.txt; git add c.txt
-    git commit -m "Third$(printf '\n\nTask-Id: 20')" -q
+    git commit -m "Third$(printf '\n\nTarget-Id: 20')" -q
 
     bash "$DISPATCH" split source/order --base master --name feat >/dev/null
 
@@ -1207,10 +1166,10 @@ test_resolve_basic() {
     parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
     assert_eq "2" "$parent_count" "HEAD is merge after resolve (re-merge)"
 
-    # Verify HEAD~1 is the resolution commit with Task-Id
+    # Verify HEAD~1 is the resolution commit with Target-Id
     local tid
-    tid=$(git log -1 --skip=1 --format="%(trailers:key=Task-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "3" "$tid" "Task-Id trailer on resolution commit"
+    tid=$(git log -1 --skip=1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$tid" "Target-Id trailer on resolution commit"
 
     # Verify resolution commit is regular (1 parent)
     local res_parents
@@ -1354,34 +1313,6 @@ test_status_merge_warning() {
     teardown
 }
 
-test_hook_install_post_merge() {
-    echo "=== test: hook install includes post-merge ==="
-    setup
-
-    bash "$DISPATCH" hook install
-
-    local hook_dir
-    hook_dir="$(git rev-parse --git-dir)/hooks"
-
-    if [[ -f "$hook_dir/post-merge" ]]; then
-        echo -e "  ${GREEN}PASS${NC} post-merge hook installed"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} post-merge hook not found"
-        FAIL=$((FAIL + 1))
-    fi
-
-    if [[ -x "$hook_dir/post-merge" ]]; then
-        echo -e "  ${GREEN}PASS${NC} post-merge hook is executable"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} post-merge hook not executable"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
 test_resplit_recovers_metadata() {
     echo "=== test: re-split recovers --base and --name from metadata ==="
     setup
@@ -1477,51 +1408,51 @@ test_resplit_idempotent() {
 }
 
 test_resplit_new_task_mid_stack() {
-    echo "=== test: re-split inserts new task mid-stack with Task-Order ==="
+    echo "=== test: re-split inserts new task mid-stack ==="
     setup
 
     git checkout -b source/midstack master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
 
     echo "c" > c.txt; git add c.txt
-    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 3')" -q
+    git commit -m "Add C$(printf '\n\nTarget-Id: 3')" -q
 
-    # First split: A -> C
+    # First split: 1 -> 3
     bash "$DISPATCH" split source/midstack --base master --name feat >/dev/null
 
     local tree_before
     tree_before=$(bash "$DISPATCH" tree master)
-    assert_contains "$tree_before" "feat/task-A" "task-A in initial tree"
-    assert_contains "$tree_before" "feat/task-C" "task-C in initial tree"
+    assert_contains "$tree_before" "feat/1" "feat/1 in initial tree"
+    assert_contains "$tree_before" "feat/3" "feat/3 in initial tree"
 
-    # Add task-B with Task-Order=2 (should go between A and C)
+    # Add Target-Id: 2 (should go between 1 and 3 by numeric sort)
     git checkout source/midstack -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
 
     # Re-split
     bash "$DISPATCH" split source/midstack >/dev/null
 
-    # Verify stack order: master -> A -> B -> C
+    # Verify stack order: master -> 1 -> 2 -> 3
     local tasks_master
-    tasks_master=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-A" "$tasks_master" "master -> task-A"
+    tasks_master=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/1" "$tasks_master" "master -> feat/1"
 
-    local tasks_a
-    tasks_a=$(git config --get-all branch.feat/task-A.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-B" "$tasks_a" "task-A -> task-B (mid-stack insert)"
+    local tasks_1
+    tasks_1=$(git config --get-all branch.feat/1.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/2" "$tasks_1" "feat/1 -> feat/2 (mid-stack insert)"
 
-    local tasks_b
-    tasks_b=$(git config --get-all branch.feat/task-B.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-C" "$tasks_b" "task-B -> task-C (re-linked)"
+    local tasks_2
+    tasks_2=$(git config --get-all branch.feat/2.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/3" "$tasks_2" "feat/2 -> feat/3 (re-linked)"
 
-    # Verify task-B has the commit
-    if git show feat/task-B:b.txt >/dev/null 2>&1; then
-        echo -e "  ${GREEN}PASS${NC} b.txt exists in task-B"
+    # Verify feat/2 has the commit
+    if git show feat/2:b.txt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC} b.txt exists in feat/2"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} b.txt missing from task-B"
+        echo -e "  ${RED}FAIL${NC} b.txt missing from feat/2"
         FAIL=$((FAIL + 1))
     fi
 
@@ -1534,66 +1465,25 @@ test_resplit_new_task_at_end() {
 
     git checkout -b source/append master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
 
     bash "$DISPATCH" split source/append --base master --name feat >/dev/null
 
-    # Add task-C at end
+    # Add task at end
     git checkout source/append -q
     echo "c" > c.txt; git add c.txt
-    git commit -m "Add C$(printf '\n\nTask-Id: task-C\nTask-Order: 3')" -q
+    git commit -m "Add C$(printf '\n\nTarget-Id: 3')" -q
 
     bash "$DISPATCH" split source/append >/dev/null
 
-    local tasks_b
-    tasks_b=$(git config --get-all branch.feat/task-B.dispatchtasks 2>/dev/null || true)
-    assert_eq "feat/task-C" "$tasks_b" "task-B -> task-C (appended at end)"
+    local tasks_2
+    tasks_2=$(git config --get-all branch.feat/2.dispatchtargets 2>/dev/null || true)
+    assert_eq "feat/3" "$tasks_2" "feat/2 -> feat/3 (appended at end)"
 
-    assert_branch_exists "feat/task-C" "task-C branch created"
-
-    teardown
-}
-
-test_resplit_warns_no_task_order() {
-    echo "=== test: re-split warns when new task has no Task-Order ==="
-    setup
-
-    git checkout -b source/warnorder master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
-
-    bash "$DISPATCH" split source/warnorder --base master --name feat >/dev/null
-
-    # Add task without Task-Order
-    git checkout source/warnorder -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B')" -q
-
-    local output
-    output=$(bash "$DISPATCH" split source/warnorder 2>&1)
-
-    assert_contains "$output" "WARNING" "warns about missing Task-Order"
-    assert_contains "$output" "task-B" "warning mentions the task"
-    assert_contains "$output" "Task-Order" "warning suggests Task-Order"
-
-    teardown
-}
-
-test_resplit_no_warn_first_split() {
-    echo "=== test: first split does not warn about Task-Order ==="
-    setup
-
-    git checkout -b source/nowarn master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A')" -q
-
-    local output
-    output=$(bash "$DISPATCH" split source/nowarn --base master --name feat 2>&1)
-
-    assert_not_contains "$output" "WARNING" "no warning on first split"
+    assert_branch_exists "feat/3" "feat/3 branch created"
 
     teardown
 }
@@ -1604,19 +1494,19 @@ test_split_cherry_pick_conflict_graceful() {
 
     git checkout -b source/conflict master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
 
     echo "b" > file.txt; git add file.txt
-    git commit -m "Modify file$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+    git commit -m "Modify file$(printf '\n\nTarget-Id: 2')" -q
 
     bash "$DISPATCH" split source/conflict --base master --name feat >/dev/null
 
-    # Merge master into task-A to create resolve scenario
+    # Merge master into feat/1 to create resolve scenario
     git checkout master -q
     echo "master-change" > file.txt; git add file.txt
     git commit -m "Master changes file" -q
 
-    git checkout feat/task-A -q
+    git checkout feat/1 -q
     git merge master -q 2>/dev/null || {
         echo "resolved" > file.txt
         git add file.txt
@@ -1624,23 +1514,23 @@ test_split_cherry_pick_conflict_graceful() {
     }
     bash "$DISPATCH" resolve
 
-    # Delete task-B to force re-creation
+    # Delete feat/2 to force re-creation
     git checkout master -q
-    git branch -D feat/task-B
-    git config --remove-section branch.feat/task-B 2>/dev/null || true
-    git config --unset "branch.feat/task-A.dispatchtasks" 2>/dev/null || true
+    git branch -D feat/2
+    git config --remove-section branch.feat/2 2>/dev/null || true
+    git config --unset "branch.feat/1.dispatchtargets" 2>/dev/null || true
 
     # Re-split should handle conflict gracefully
     local output
     output=$(bash "$DISPATCH" split source/conflict 2>&1)
 
     assert_contains "$output" "cherry-pick conflicted" "warns about cherry-pick conflict"
-    assert_branch_exists "feat/task-B" "task-B branch still created (metadata)"
+    assert_branch_exists "feat/2" "feat/2 branch still created (metadata)"
 
     # Branch should have dispatchsource set
     local src
-    src=$(git config branch.feat/task-B.dispatchsource 2>/dev/null || true)
-    assert_eq "source/conflict" "$src" "task-B linked to source despite conflict"
+    src=$(git config branch.feat/2.dispatchsource 2>/dev/null || true)
+    assert_eq "source/conflict" "$src" "feat/2 linked to source despite conflict"
 
     teardown
 }
@@ -1651,44 +1541,44 @@ test_resplit_after_reset_pr_feedback() {
 
     git checkout -b source/prfix master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTask-Id: task-B\nTask-Order: 2')" -q
+    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
 
     # Initial split
     bash "$DISPATCH" split source/prfix --base master --name feat >/dev/null
 
-    assert_branch_exists "feat/task-A" "task-A created"
-    assert_branch_exists "feat/task-B" "task-B created"
+    assert_branch_exists "feat/1" "feat/1 created"
+    assert_branch_exists "feat/2" "feat/2 created"
 
     # Reset all dispatch metadata + branches (simulates cleanup)
     bash "$DISPATCH" reset source/prfix --branches --force >/dev/null 2>&1
 
     # Verify branches are gone
-    assert_branch_not_exists "feat/task-A" "task-A removed after reset"
-    assert_branch_not_exists "feat/task-B" "task-B removed after reset"
+    assert_branch_not_exists "feat/1" "feat/1 removed after reset"
+    assert_branch_not_exists "feat/2" "feat/2 removed after reset"
 
-    # Reviewer left a comment on task-A -- add fix commit on source
+    # Reviewer left a comment on feat/1 -- add fix commit on source
     git checkout source/prfix -q
     echo "a-fix" >> a.txt; git add a.txt
-    git commit -m "fix: address PR comment on A$(printf '\n\nTask-Id: task-A\nTask-Order: 1')" -q
+    git commit -m "fix: address PR comment on A$(printf '\n\nTarget-Id: 1')" -q
 
     # Re-split recreates all branches including the fix
     bash "$DISPATCH" split source/prfix --base master --name feat >/dev/null
 
-    assert_branch_exists "feat/task-A" "task-A recreated after re-split"
-    assert_branch_exists "feat/task-B" "task-B recreated after re-split"
+    assert_branch_exists "feat/1" "feat/1 recreated after re-split"
+    assert_branch_exists "feat/2" "feat/2 recreated after re-split"
 
-    # task-A should have 2 commits (original + fix)
-    local count_a
-    count_a=$(git log --oneline master..feat/task-A | wc -l | tr -d ' ')
-    assert_eq "2" "$count_a" "task-A has 2 commits (original + fix)"
+    # feat/1 should have 2 commits (original + fix)
+    local count_1
+    count_1=$(git log --oneline master..feat/1 | wc -l | tr -d ' ')
+    assert_eq "2" "$count_1" "feat/1 has 2 commits (original + fix)"
 
     # Verify fix landed
     local content
-    content=$(git show feat/task-A:a.txt)
-    assert_contains "$content" "a-fix" "fix content present in task-A"
+    content=$(git show feat/1:a.txt)
+    assert_contains "$content" "a-fix" "fix content present in feat/1"
 
     teardown
 }
@@ -1960,198 +1850,6 @@ test_restack_middle_merged() {
     teardown
 }
 
-# ---------- dispatch config tests ----------
-
-test_hook_validates_task_id_pattern() {
-    echo "=== test: hook validates Task-Id pattern ==="
-    setup
-
-    bash "$DISPATCH" hook install
-    git config dispatch.taskIdPattern '^task-[0-9]+$'
-
-    echo "x" > x.txt; git add x.txt
-    if git commit -m "bad id$(printf '\n\nTask-Id: 3')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject Task-Id not matching pattern"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} hook rejects Task-Id not matching pattern"
-        PASS=$((PASS + 1))
-    fi
-
-    teardown
-}
-
-test_hook_allows_task_id_matching_pattern() {
-    echo "=== test: hook allows Task-Id matching pattern ==="
-    setup
-
-    bash "$DISPATCH" hook install
-    git config dispatch.taskIdPattern '^task-[0-9]+$'
-
-    echo "x" > x.txt; git add x.txt
-    git commit -m "good id$(printf '\n\nTask-Id: task-3')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows Task-Id matching pattern"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} hook should allow matching Task-Id"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
-test_hook_requires_task_order() {
-    echo "=== test: hook requires Task-Order when configured ==="
-    setup
-
-    bash "$DISPATCH" hook install
-    git config dispatch.requireTaskOrder true
-
-    echo "x" > x.txt; git add x.txt
-    if git commit -m "no order$(printf '\n\nTask-Id: 1')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject commit without Task-Order"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Task-Order"
-        PASS=$((PASS + 1))
-    fi
-
-    # With Task-Order should pass
-    git commit -m "with order$(printf '\n\nTask-Id: 1\nTask-Order: 1')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows commit with Task-Order"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} hook should allow commit with Task-Order"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
-test_hook_validates_task_order_format() {
-    echo "=== test: hook validates Task-Order format ==="
-    setup
-
-    bash "$DISPATCH" hook install
-
-    echo "x" > x.txt; git add x.txt
-    if git commit -m "bad order$(printf '\n\nTask-Id: 1\nTask-Order: first')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Task-Order"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Task-Order"
-        PASS=$((PASS + 1))
-    fi
-
-    teardown
-}
-
-test_hook_allows_decimal_task_order() {
-    echo "=== test: hook allows decimal Task-Order ==="
-    setup
-
-    bash "$DISPATCH" hook install
-
-    echo "x" > x.txt; git add x.txt
-    git commit -m "decimal order$(printf '\n\nTask-Id: 1\nTask-Order: 6.2')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows decimal Task-Order"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} hook should allow decimal Task-Order"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
-test_split_validates_pattern() {
-    echo "=== test: split validates Task-Id pattern ==="
-    setup
-
-    git config dispatch.taskIdPattern '^task-[0-9]+$'
-
-    git checkout -b source/feat master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "bad$(printf '\n\nTask-Id: 3')" -q
-
-    local output
-    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
-        echo -e "  ${RED}FAIL${NC} split should reject Task-Id not matching pattern"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} split rejects Task-Id not matching pattern"
-        PASS=$((PASS + 1))
-    fi
-    assert_contains "$output" "not matching pattern" "error mentions pattern"
-
-    teardown
-}
-
-test_split_validates_task_order_format() {
-    echo "=== test: split validates Task-Order format ==="
-    setup
-
-    git checkout -b source/feat master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "bad order$(printf '\n\nTask-Id: 1\nTask-Order: abc')" -q
-
-    local output
-    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
-        echo -e "  ${RED}FAIL${NC} split should reject non-numeric Task-Order"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} split rejects non-numeric Task-Order"
-        PASS=$((PASS + 1))
-    fi
-    assert_contains "$output" "non-numeric Task-Order" "error mentions non-numeric"
-
-    teardown
-}
-
-test_split_requires_task_order() {
-    echo "=== test: split requires Task-Order when configured ==="
-    setup
-
-    git config dispatch.requireTaskOrder true
-
-    git checkout -b source/feat master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "no order$(printf '\n\nTask-Id: 1')" -q
-
-    local output
-    if output=$(bash "$DISPATCH" split source/feat --base master --name feat 2>&1); then
-        echo -e "  ${RED}FAIL${NC} split should reject missing Task-Order"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} split rejects missing Task-Order"
-        PASS=$((PASS + 1))
-    fi
-    assert_contains "$output" "missing Task-Order" "error mentions missing Task-Order"
-
-    teardown
-}
-
-test_no_config_backward_compat() {
-    echo "=== test: no config = backward compatible ==="
-    setup
-
-    # No dispatch config set -- should behave as before
-    git checkout -b source/feat master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "plain$(printf '\n\nTask-Id: 3')" -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "another$(printf '\n\nTask-Id: 4')" -q
-
-    bash "$DISPATCH" split source/feat --base master --name feat
-    assert_branch_exists "feat/3" "branch feat/3 created without config"
-    assert_branch_exists "feat/4" "branch feat/4 created without config"
-
-    teardown
-}
-
 test_sync_cherry_pick_untracked_with_merge() {
     echo "=== test: sync cherry-picks untracked commits when merge detected ==="
     setup
@@ -2168,21 +1866,21 @@ test_sync_cherry_pick_untracked_with_merge() {
     git checkout feat/3 -q
     git merge master --no-edit -q
 
-    # Make untracked commit (no Task-Id trailer)
+    # Make untracked commit (no Target-Id trailer)
     echo "fix" > fix.txt; git add fix.txt
     git commit --no-verify -m "hotfix on task branch" -q
 
     # Sync
     bash "$DISPATCH" sync source/feature feat/3
 
-    # Verify: source has "hotfix" commit with Task-Id: 3
+    # Verify: source has "hotfix" commit with Target-Id: 3
     local source_msg
     source_msg=$(git log -1 --format="%s" source/feature)
     assert_eq "hotfix on task branch" "$source_msg" "commit message on source"
 
     local source_trailer
-    source_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "3" "$source_trailer" "Task-Id trailer added on source"
+    source_trailer=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_trailer" "Target-Id trailer added on source"
 
     teardown
 }
@@ -2233,53 +1931,15 @@ test_sync_rebase_path_without_merge() {
 
     bash "$DISPATCH" sync source/feature feat/3
 
-    # Task branch commit should have been amended with Task-Id (rebase path)
+    # Task branch commit should have been amended with Target-Id (rebase path)
     local task_trailer
-    task_trailer=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" feat/3 | tr -d '[:space:]')
-    assert_eq "3" "$task_trailer" "Task-Id added on task branch via rebase"
+    task_trailer=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" feat/3 | tr -d '[:space:]')
+    assert_eq "3" "$task_trailer" "Target-Id added on task branch via rebase"
 
     # Source should also have the commit
     local source_msg
     source_msg=$(git log -1 --format="%s" source/feature)
     assert_eq "plain fix" "$source_msg" "commit synced to source"
-
-    teardown
-}
-
-test_sync_cherry_pick_untracked_with_task_order() {
-    echo "=== test: sync cherry-pick infers Task-Order from existing commits ==="
-    setup
-
-    # Create source with Task-Order trailers
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add enum$(printf '\n\nTask-Id: 3\nTask-Order: 1')" -q
-    echo "b" > api.txt; git add api.txt
-    git commit -m "Create GET endpoint$(printf '\n\nTask-Id: 4\nTask-Order: 2')" -q
-
-    bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
-
-    # Advance master and merge into task branch
-    git checkout master -q
-    echo "advance" > adv.txt; git add adv.txt
-    git commit -m "advance" -q
-
-    git checkout feat/3 -q
-    git merge master --no-edit -q
-
-    # Untracked commit
-    echo "fix" > fix.txt; git add fix.txt
-    git commit --no-verify -m "ordered fix" -q
-
-    bash "$DISPATCH" sync source/feature feat/3
-
-    local source_order
-    source_order=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "1" "$source_order" "Task-Order inferred from existing source commits"
-
-    local source_tid
-    source_tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "3" "$source_tid" "Task-Id added"
 
     teardown
 }
@@ -2291,7 +1951,7 @@ test_status_shows_untracked_commits() {
 
     bash "$DISPATCH" split source/feature --base master --name feat >/dev/null
 
-    # Add untracked commit on feat/3 (no Task-Id)
+    # Add untracked commit on feat/3 (no Target-Id)
     git checkout feat/3 -q
     echo "notrailer" > notrailer.txt; git add notrailer.txt
     git commit --no-verify -m "untracked commit" -q
@@ -2334,7 +1994,7 @@ test_sync_cherry_pick_untracked_conflict() {
     # Create conflicting commit on source
     git checkout source/feature -q
     echo "source-version" > file.txt; git add file.txt
-    git commit -m "conflict on source$(printf '\n\nTask-Id: 3')" -q
+    git commit -m "conflict on source$(printf '\n\nTarget-Id: 3')" -q
 
     # Sync should fail gracefully
     local output
@@ -2454,7 +2114,7 @@ test_restack_squash_merge_reparents() {
 
     # Verify initial stack: master -> feat/3 -> feat/4 -> feat/5
     local tasks_master_before
-    tasks_master_before=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    tasks_master_before=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/3" "$tasks_master_before" "initial: master -> feat/3"
 
     # Squash-merge feat/3 into master
@@ -2466,54 +2126,13 @@ test_restack_squash_merge_reparents() {
 
     # After restack: feat/3 removed from stack, feat/4 reparented to master
     local tasks_master_after
-    tasks_master_after=$(git config --get-all branch.master.dispatchtasks 2>/dev/null || true)
+    tasks_master_after=$(git config --get-all branch.master.dispatchtargets 2>/dev/null || true)
     assert_eq "feat/4" "$tasks_master_after" "after restack: master -> feat/4 (reparented)"
 
     # feat/3 should have no children
     local tasks_3_after
-    tasks_3_after=$(git config --get-all branch.feat/3.dispatchtasks 2>/dev/null || true)
+    tasks_3_after=$(git config --get-all branch.feat/3.dispatchtargets 2>/dev/null || true)
     assert_eq "" "$tasks_3_after" "feat/3 has no children after reparenting"
-
-    teardown
-}
-
-test_hook_convention_warning() {
-    echo "=== test: hook warns on Task-Id convention mismatch ==="
-    setup
-
-    bash "$DISPATCH" hook install
-
-    # First commit with prefixed Task-Id
-    echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTask-Id: task-3')" -q
-
-    # Second commit with different prefix format
-    echo "b" > b.txt; git add b.txt
-    local output
-    output=$(git commit -m "second$(printf '\n\nTask-Id: 3')" 2>&1)
-
-    assert_contains "$output" "Warning" "warning shown for format mismatch"
-    assert_contains "$output" "different format" "warning mentions different format"
-
-    teardown
-}
-
-test_hook_convention_no_warning_when_matching() {
-    echo "=== test: hook no warning when Task-Id format matches ==="
-    setup
-
-    bash "$DISPATCH" hook install
-
-    # First commit with prefixed Task-Id
-    echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTask-Id: task-3')" -q
-
-    # Second commit with same prefix format
-    echo "b" > b.txt; git add b.txt
-    local output
-    output=$(git commit -m "second$(printf '\n\nTask-Id: task-4')" 2>&1)
-
-    assert_not_contains "$output" "Warning" "no warning when format matches"
 
     teardown
 }
@@ -2692,21 +2311,20 @@ test_hook
 test_hook_install_respects_hooks_path_relative
 test_hook_install_respects_hooks_path_absolute
 test_hook_install_default_without_hooks_path
-test_hook_auto_carry_task_id
+test_hook_auto_carry_target_id
 test_hook_auto_carry_no_override
-test_hook_auto_carry_task_order
+test_hook_rejects_non_numeric_target_id
+test_hook_allows_decimal_target_id
 test_help
 test_sync_cherry_pick_conflict
 test_split_no_commits
 test_split_already_exists
 test_resolve_source_error_message
-test_split_non_numeric_task_id
 test_install_chmod
 test_pr_single_branch
 test_pr_custom_title_body
 test_pr_branch_not_found
-test_split_task_order
-test_split_task_order_partial
+test_split_decimal_target_id
 test_split_no_task_order_backward_compat
 test_status_stack_order
 test_status_no_false_pending
@@ -2721,15 +2339,12 @@ test_resolve_no_task_changes
 test_resolve_not_merge
 test_resolve_not_task_branch
 test_status_merge_warning
-test_hook_install_post_merge
 test_resplit_recovers_metadata
 test_resplit_guards_wrong_prefix
 test_resplit_guards_wrong_base
 test_resplit_idempotent
 test_resplit_new_task_mid_stack
 test_resplit_new_task_at_end
-test_resplit_warns_no_task_order
-test_resplit_no_warn_first_split
 test_split_cherry_pick_conflict_graceful
 test_resplit_after_reset_pr_feedback
 test_restack_basic
@@ -2739,27 +2354,15 @@ test_restack_auto_detect
 test_restack_conflict_stops
 test_restack_worktree
 test_restack_middle_merged
-test_hook_validates_task_id_pattern
-test_hook_allows_task_id_matching_pattern
-test_hook_requires_task_order
-test_hook_validates_task_order_format
-test_hook_allows_decimal_task_order
-test_split_validates_pattern
-test_split_validates_task_order_format
-test_split_requires_task_order
-test_no_config_backward_compat
 test_sync_cherry_pick_untracked_with_merge
 test_sync_cherry_pick_untracked_preserves_message
 test_sync_rebase_path_without_merge
-test_sync_cherry_pick_untracked_with_task_order
 test_status_shows_untracked_commits
 test_sync_cherry_pick_untracked_conflict
 test_push_short_branch_name
 test_pr_short_branch_name
 test_restack_squash_merge
 test_restack_squash_merge_reparents
-test_hook_convention_warning
-test_hook_convention_no_warning_when_matching
 test_update_base_merge
 test_update_base_rebase
 test_update_base_auto_detect
