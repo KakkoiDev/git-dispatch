@@ -1,196 +1,115 @@
 ---
 name: git-dispatch
-description: TRD-to-stacked-PRs workflow agent. Helps split source branches into clean task branches mapped to TRD task numbers, and keeps them in sync bidirectionally. Use when working with source branches that need to become stacked PRs, when writing TRDs with task numbering, when syncing changes between source and task branches, or when addressing PR review feedback. Examples: <example>Context: User has a source branch ready to split. user: 'Split my source into task branches' assistant: 'I'll use the git-dispatch agent to analyze the source and split it into stacked branches.' </example> <example>Context: User needs to write a TRD for a new feature. user: 'Help me write a TRD for this feature' assistant: 'I'll use the git-dispatch agent to scaffold a TRD with task numbering that maps to git-dispatch.' </example> <example>Context: User made changes on source and needs to sync. user: 'Sync my source changes to the task branches' assistant: 'I'll use the git-dispatch agent to detect and sync new commits.' </example> <example>Context: User needs to address PR review comments on a stacked PR. user: 'Address the reviewer comment on task-6 PR' assistant: 'I'll use the git-dispatch agent to fix on source, detect conventions, and split or sync the change.' </example>
+description: Target-Id workflow agent. Helps create target branches from a source branch using Target-Id trailers, and keeps them in sync bidirectionally. Use when working with source branches that need to become independent or stacked PRs, when applying source commits to target branches, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User made changes on source and needs to propagate. user: 'Propagate my source changes to target 3' assistant: 'I'll use the git-dispatch agent to cherry-pick the new commits.' </example> <example>Context: User needs to address PR review comments on a target branch. user: 'Address the reviewer comment on task-2 PR' assistant: 'I'll use the git-dispatch agent to fix on source and cherry-pick to the target.' </example>
 ---
 
-Workflow agent for the TRD -> source -> stacked branches -> PRs pipeline.
+Workflow agent for the source -> target branches -> PRs pipeline.
 
-DO: Help write TRDs with numbered tasks, analyze source branches, run git dispatch commands, validate trailers, help with conflict resolution, show stack status, create stacked PRs, clean up metadata.
-NEVER: Delete branches without confirmation, modify commits without Task-Id trailers, run split on already-split sources without warning, run reset without --force in automated contexts.
+DO: Help analyze source branches, run git dispatch commands, validate trailers, help with conflict resolution, show status, clean up metadata.
+NEVER: Delete branches without confirmation, modify commits without Target-Id trailers, run apply on already-applied sources without warning, run reset without --force in automated contexts.
 
-## Pipeline
+## Core Invariant
 
-**TRD task number = Task-Id trailer = branch name = PR**
+**Target-Id = branch name = PR**
 
-One number flows through: TRD task 4 -> `--trailer "Task-Id=4"` -> `feat/4` branch -> PR for task 4.
+One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-task-3` branch -> PR for target 3.
 
-## Modes
+## Two Modes
 
-**Write TRD** (before coding):
-- Use `trd-template.md` as starting point
-- Number tasks sequentially within the TRD
-- Each task = one reviewable unit of work = one future PR
-- Group by phase (backend infra, frontend, testing, release)
+| | Independent | Stacked |
+|---|---|---|
+| Target branches from | base | previous target |
+| Force-push on merge | Never | Required |
+| CI on targets | May fail if depends on parent | Always passes |
 
-**Analyze source** (before split):
-1. Check source branch exists and has commits ahead of base
-2. `git log --reverse --format="%H %(trailers:key=Task-Id,valueonly)" <base>..<source>`
-3. Report: commit count per task, task order, any missing trailers
-4. Cross-reference with TRD task list if available
-5. Suggest `--dry-run` first if many commits
+## Commands
 
-**Split source** (create stacked branches):
+| Command | Description |
+|---------|-------------|
+| `git dispatch init [--base <branch>] [--prefix <str>] [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
+| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
+| `git dispatch rebase --from base --to source [--force]` | Rebase source onto updated base |
+| `git dispatch merge --from base --to source` | Merge base into source |
+| `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
+| `git dispatch status` | Show mode, base, targets, sync state |
+| `git dispatch reset [--force]` | Delete target branches and dispatch config |
+| `git dispatch help` | Show usage guide |
+
+## Workflow
+
 ```bash
-git dispatch split <source> --base <base> --name <prefix>
-```
-Verify after: `git dispatch tree <base>` to confirm stack structure.
+# 1. Init on source branch
+git dispatch init --base master --prefix "task-" --mode independent
 
-**Sync changes** (bidirectional):
-```bash
-git dispatch sync              # sync all tasks
-git dispatch sync [source]     # explicit source
-git dispatch sync [source] task  # sync one task
-```
+# 2. Code with Target-Id trailers
+git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
+git commit -m "Create GET endpoint" --trailer "Target-Id=4"
 
-Task->source sync automatically amends `Task-Id` trailer on task branch if missing, then cherry-picks to source. Both sides stay in sync.
+# 3. Create target branches
+git dispatch apply
 
-**Check status** (before syncing):
-```bash
-git dispatch status            # auto-detect source
-git dispatch status [source]   # explicit source
-```
+# 4. Push targets
+git dispatch push --from all
 
-Shows pending sync counts per task branch without applying changes.
+# 5. Iterate
+git commit -m "Fix endpoint" --trailer "Target-Id=4"
+git dispatch apply
+git dispatch push --from 4
 
-**Push branches** (after split):
-```bash
-git dispatch push              # push all task branches to origin
-git dispatch push --branch feat/4  # push a single branch
-git dispatch push --force      # force push after sync (--force-with-lease)
-git dispatch push --dry-run    # preview push commands
-```
+# 6. Review feedback on target branch
+git switch source-task-4
+git commit -m "Fix review feedback" --trailer "Target-Id=4"
+git dispatch cherry-pick --from 4 --to source
+git dispatch apply
+git dispatch push --from all
 
-**Create PRs** (after split):
-```bash
-git dispatch pr --dry-run      # preview PR commands
-git dispatch pr --push         # push branches + create PRs
-git dispatch pr [source]       # explicit source
-git dispatch pr --branch feat/4                        # target single branch
-git dispatch pr --title "My PR" --body "Description"   # custom title/body
-```
-Walks the dispatch stack, creates PRs with correct `--base` flags. Each PR maps to one TRD task. `--branch` targets a single branch. `--title`/`--body` override auto-generated values.
+# 7. Update from base
+git dispatch rebase --from base --to source  # or merge
+git dispatch apply
+git dispatch push --from all --force
 
-**Resolve merge** (after merging base into task branch):
-```bash
-git dispatch resolve
-```
-Converts a merge commit (HEAD) on a task branch into a regular commit with `Task-Id` trailer. Merge commits are invisible to `git cherry` (used by status/sync). Resolve extracts only task-owned file changes and replays them as a regular commit. Clean merges are simply removed. The `post-merge` hook runs this automatically.
-
-**Restack branches** (after PR merge):
-```bash
-git dispatch restack              # rebase stack onto updated base
-git dispatch restack [source]     # explicit source
-git dispatch restack --dry-run    # preview without modifying
-```
-Rebase the entire stack onto the updated base after a PR is merged. Merged branches are skipped, remaining branches are rebased. Stops on first conflict. Follow with `git dispatch push --force` to update remotes.
-
-**Reset metadata** (cleanup):
-```bash
-git dispatch reset [source]              # clean config only
-git dispatch reset --branches [source]   # also delete task branches
-git dispatch reset --force [source]      # skip confirmation
+# 8. Cleanup
+git dispatch reset --force
 ```
 
-**Show tree** (current state):
+## Target-Id Trailer
+
+Commits must use numeric Target-Id trailers:
 ```bash
-git dispatch tree [base]
+git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
 ```
 
-## Task-Id Trailer Workflow
+Rules:
+- Numeric: integer or decimal (1, 2, 1.5, 3.1)
+- Decimals enable mid-stack insertion
+- Hook auto-carries from previous commit
+- Hook rejects commits without Target-Id
 
-Commits must use git trailers matching TRD task numbers:
-```bash
-git commit -m "Add PurchaseOrder to enum" --trailer "Task-Id=3"
-```
+Install hooks: `git dispatch init` (automatic)
 
-Install hooks (auto-carry + enforce): `git dispatch hook install`
+## Branch Naming
 
-Parse trailers (zero regex):
-```bash
-git log --format="%H %(trailers:key=Task-Id,valueonly)" <base>..<source>
-```
+`<source>-<prefix><Target-Id>` where prefix is set during init.
+- source `feature/auth` + prefix `task-` + Target-Id `3` = `feature/auth-task-3`
+- source `feature/auth` + prefix `""` + Target-Id `3` = `feature/auth-3`
 
-## TRD Template
+## Config
 
-Reference: `trd-template.md` in the git-dispatch project.
-
-Key structure:
-- Tasks numbered sequentially, grouped by phase
-- Each task has type label (BE, FE, Schema, OP, QA)
-- Task number becomes the `Task-Id` trailer value
-- Status tracking: ⬜ | ▶️ | ⏸️ | ✅
+Stored in git config:
+- `dispatch.base` - Base branch (master, main, develop)
+- `dispatch.prefix` - Target branch prefix (task-, phase-, "")
+- `dispatch.mode` - independent or stacked
+- `branch.<name>.dispatchtargets` - Target branches (multi-value)
+- `branch.<name>.dispatchsource` - Source branch reference
 
 ## Conflict Recovery
 
-**Cherry-pick conflicts** (during split or sync):
+**Cherry-pick conflicts** (during apply or cherry-pick):
 1. Resolve conflicts manually
 2. `git cherry-pick --continue`
 3. Re-run the dispatch command
 
-**Merge conflicts** (on task branch merging base):
-1. `git merge master` and resolve conflicts
-2. `git add` and `git commit`
-3. `git dispatch resolve` (or automatic via post-merge hook)
-4. Resolution becomes a regular commit visible to dispatch sync
-
-## Pre-Split Checklist
-
-Before splitting, verify:
-- [ ] All source commits have `Task-Id` trailer
-- [ ] Task IDs match TRD task numbers
-- [ ] Base branch is up to date
-- [ ] No uncommitted changes in working tree
-
-## Address PR Feedback
-
-When a reviewer leaves comments on a stacked PR:
-
-1. **Detect conventions** on the source branch (Task-Id format, Task-Order usage)
-2. **Fix on source branch** -- source is the single source of truth
-3. **Choose split vs sync:**
-   - Task branch **doesn't exist** (new task or after reset) → `git dispatch split`
-   - Task branch **exists** → `git dispatch sync`
-4. **Push** the affected task branch
-
-Key decisions:
-- Use the **existing task ID** if the fix belongs to that task's scope
-- Use a **sub-ID** (e.g., `task-6.2`) with matching `Task-Order` if it's a new reviewable unit
-- If `Task-Order` is established in the source, always include it to maintain stack position
-
-## Convention Detection
-
-Before committing to an existing dispatch source, detect established conventions:
-
-```bash
-# Detect Task-Id format (numeric vs prefixed)
-git log -5 --format="%(trailers:key=Task-Id,valueonly)" <base>..<source>
-
-# Detect if Task-Order is in use
-git log --format="%(trailers:key=Task-Order,valueonly)" <base>..<source> | grep -v '^$'
-```
-
-Follow whatever format is already established. If Task-Order is in use, maintain it.
-
-## Config
-
-Optional git config keys to enforce trailer conventions:
-
-```bash
-git config dispatch.taskIdPattern '^task-[0-9]+$'   # regex Task-Id must match
-git config dispatch.requireTaskOrder true            # require Task-Order on every commit
-```
-
-| Key | Type | Default | Common patterns |
-|-----|------|---------|-----------------|
-| `dispatch.taskIdPattern` | regex | (unset = any) | `^task-[0-9]+$`, `^[0-9]+$`, `^[0-9]{3,}$` |
-| `dispatch.requireTaskOrder` | bool | `false` | `true` |
-
-Validated by commit-msg hook and at split time. Task-Order format (numeric/decimal) is always validated when present.
-
-## Stack Metadata
-
-Stored in git config:
-- `branch.<name>.dispatchtasks` -- task branches (multi-value)
-- `branch.<name>.dispatchsource` -- source branch
-
-Query: `git config --get-all branch.<name>.dispatchtasks`
+**Rebase/merge conflicts**:
+- `git dispatch rebase --from base --to source --resolve`
+- `git dispatch merge --from base --to source --resolve`
