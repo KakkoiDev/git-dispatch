@@ -78,21 +78,6 @@ worktree_for_branch() {
     '
 }
 
-# Infer Task-Order from existing commits for a task on source
-_infer_task_order() {
-    local source="$1" base="$2" task_id="$3"
-    while IFS= read -r h; do
-        local t
-        t=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$h" | tr -d '[:space:]')
-        if [[ "$t" == "$task_id" ]]; then
-            local o
-            o=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" "$h" | tr -d '[:space:]')
-            [[ -n "$o" ]] && echo "$o" && return 0
-        fi
-    done < <(git log --format="%H" "$base..$source")
-    return 0
-}
-
 # Check if a branch's content has been merged (e.g. squash-merged) into base
 _is_content_merged() {
     local branch_tip="$1" base_ref="$2"
@@ -123,9 +108,9 @@ _get_open_prs() {
     done < <(find_dispatch_tasks "$source")
 }
 
-# Amend commits on a branch to add Task-Id trailer (rewrites history)
+# Amend commits on a branch to add Target-Id trailer (rewrites history)
 _amend_trailers_on_branch() {
-    local branch="$1" task_id="$2"; shift 2
+    local branch="$1" target_id="$2"; shift 2
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
@@ -141,15 +126,15 @@ _amend_trailers_on_branch() {
 
     for hash in "${hashes[@]}"; do
         local tid
-        tid=$("${git_cmd[@]}" log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
-        if [[ "$tid" != "$task_id" ]]; then
+        tid=$("${git_cmd[@]}" log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$tid" != "$target_id" ]]; then
             # Rewrite this commit with the trailer using filter-branch on just this commit
             # Simpler: interactive rebase is not an option, so use commit --amend via rebase --exec
             # Even simpler: if it's the tip, just amend directly
             local tip
             tip=$("${git_cmd[@]}" rev-parse HEAD)
             if [[ "$hash" == "$tip" ]]; then
-                "${git_cmd[@]}" commit --amend --no-edit --trailer "Task-Id=$task_id" --quiet
+                "${git_cmd[@]}" commit --amend --no-edit --trailer "Target-Id=$target_id" --quiet
             else
                 # For non-tip commits, use rebase with GIT_SEQUENCE_EDITOR
                 local parent
@@ -159,7 +144,7 @@ _amend_trailers_on_branch() {
                     "${git_cmd[@]}" rebase --abort 2>/dev/null || true
                     die "Rebase failed while amending trailer on $hash in $branch. Resolve manually."
                 }
-                "${git_cmd[@]}" commit --amend --no-edit --trailer "Task-Id=$task_id" --quiet
+                "${git_cmd[@]}" commit --amend --no-edit --trailer "Target-Id=$target_id" --quiet
                 "${git_cmd[@]}" rebase --continue --quiet 2>/dev/null || {
                     "${git_cmd[@]}" rebase --abort 2>/dev/null || true
                     die "Rebase --continue failed on $branch. Resolve manually."
@@ -173,9 +158,9 @@ _amend_trailers_on_branch() {
     fi
 }
 
-# Cherry-pick into a branch, adding Task-Id (and optionally Task-Order) to commits that lack them
+# Cherry-pick into a branch, adding Target-Id to commits that lack them
 _cherry_pick_with_trailers() {
-    local branch="$1" task_id="$2" task_order="$3"; shift 3
+    local branch="$1" target_id="$2"; shift 2
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
@@ -197,8 +182,8 @@ _cherry_pick_with_trailers() {
 
     for hash in "${hashes[@]}"; do
         local tid
-        tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-        if [[ "$tid" == "$task_id" ]]; then
+        tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        if [[ "$tid" == "$target_id" ]]; then
             # Already has correct trailer — cherry-pick normally
             if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
                 if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
@@ -230,8 +215,7 @@ _cherry_pick_with_trailers() {
             fi
             local msg
             msg=$(git log -1 --format="%B" "$hash")
-            "${git_cmd[@]}" commit -m "$msg" --trailer "Task-Id=$task_id" \
-                ${task_order:+--trailer "Task-Order=$task_order"} --quiet
+            "${git_cmd[@]}" commit -m "$msg" --trailer "Target-Id=$target_id" --quiet
         fi
     done
 
@@ -333,120 +317,35 @@ cmd_split() {
 
     git rev-parse --verify "$base" >/dev/null 2>&1 || die "Base '$base' does not exist"
 
-    # Parse trailer-tagged commits into temp file: "hash task-id" per line
+    # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file
     commit_file=$(mktemp)
     trap "rm -f '$commit_file'" RETURN
 
     while IFS= read -r _h; do
-        _t=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$_h" | tr -d '[:space:]')
-        _o=$(git log -1 --format="%(trailers:key=Task-Order,valueonly)" "$_h" | tr -d '[:space:]')
-        echo "$_h $_t $_o"
+        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
     [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
 
-    # Validate all commits have Task-Id
-    while read -r hash task _order; do
-        [[ -z "$task" ]] && die "Commit $hash has no Task-Id trailer"
-    done < "$commit_file"
-
-    # Validate Task-Id matches configured pattern
-    local id_pattern
-    id_pattern=$(git config dispatch.taskIdPattern 2>/dev/null || true)
-    if [[ -n "$id_pattern" ]]; then
-        while read -r hash task _order; do
-            if ! echo "$task" | grep -Eq "$id_pattern"; then
-                die "Commit $(echo "$hash" | cut -c1-8) has Task-Id '$task' not matching pattern: $id_pattern"
-            fi
-        done < "$commit_file"
-    fi
-
-    # Validate Task-Order is present if required
-    local require_order
-    require_order=$(git config dispatch.requireTaskOrder 2>/dev/null || true)
-    if [[ "$require_order" == "true" ]]; then
-        while read -r hash task order; do
-            if [[ -z "$order" ]]; then
-                die "Commit $(echo "$hash" | cut -c1-8) (Task-Id: $task) is missing Task-Order (required by dispatch.requireTaskOrder)"
-            fi
-        done < "$commit_file"
-    fi
-
-    # Validate Task-Order format when present (must be numeric)
-    while read -r hash task order; do
-        if [[ -n "$order" ]] && ! echo "$order" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Task-Order '$order'. Use integer or decimal (e.g., 6, 6.2)."
+    # Validate all commits have Target-Id and it's numeric
+    while read -r hash tid; do
+        [[ -z "$tid" ]] && die "Commit $hash has no Target-Id trailer"
+        if ! echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'. Use integer or decimal (e.g., 1, 2, 1.5)."
         fi
     done < "$commit_file"
 
-    # Ordered unique task ids (Task-Order aware: ordered tasks first, then unordered in commit order)
-    local order_output
-    if ! order_output=$(awk '
-        !seen[$2]++ {
-            task = $2; order = $3; tasks[++n] = task
-            if (order != "") {
-                if (order in order_used) {
-                    print "Duplicate Task-Order " order " on tasks " order_used[order] " and " task
-                    err = 1
-                }
-                order_used[order] = task; task_order[task] = order + 0
-            }
-        }
-        END {
-            if (err) exit 1
-            for (i = 1; i <= n; i++) {
-                t = tasks[i]
-                if (t in task_order) { ordered[++oc] = t; ord_val[oc] = task_order[t] }
-                else { unordered[++uc] = t }
-            }
-            for (i = 2; i <= oc; i++) {
-                key = ordered[i]; kv = ord_val[i]; j = i - 1
-                while (j > 0 && ord_val[j] > kv) {
-                    ordered[j+1] = ordered[j]; ord_val[j+1] = ord_val[j]; j--
-                }
-                ordered[j+1] = key; ord_val[j+1] = kv
-            }
-            for (i = 1; i <= oc; i++) print ordered[i]
-            for (i = 1; i <= uc; i++) print unordered[i]
-        }
-    ' "$commit_file"); then
-        die "$order_output"
-    fi
-
-    local -a task_ids=()
+    # Ordered unique target ids (numeric sort on Target-Id)
+    local -a target_ids=()
     while IFS= read -r tid; do
-        task_ids+=("$tid")
-    done <<< "$order_output"
-
-    # Warn about new tasks without Task-Order during re-split
-    if [[ -n "$existing_tasks_str" ]]; then
-        local -a existing_tids=()
-        while IFS= read -r eb; do
-            [[ -n "$eb" ]] && existing_tids+=("${eb##*/}")
-        done <<< "$existing_tasks_str"
-
-        for tid in "${task_ids[@]}"; do
-            # Is this a new task?
-            local is_new=true
-            for et in "${existing_tids[@]}"; do
-                [[ "$et" == "$tid" ]] && { is_new=false; break; }
-            done
-            $is_new || continue
-
-            # Does it have Task-Order?
-            local has_order
-            has_order=$(awk -v t="$tid" '$2 == t && $3 != "" {found=1} END {print found+0}' "$commit_file")
-            if [[ "$has_order" == "0" ]]; then
-                warn "WARNING: New task '$tid' has no Task-Order and will be appended at end of stack."
-                warn "  Add Task-Order to control position: git commit --amend --trailer \"Task-Order=N\""
-            fi
-        done
-    fi
+        target_ids+=("$tid")
+    done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
 
     echo -e "${CYAN}Source:${NC} $source"
     echo -e "${CYAN}Base:${NC}   $base"
-    echo -e "${CYAN}Tasks:${NC}  ${task_ids[*]}"
+    echo -e "${CYAN}Tasks:${NC}  ${target_ids[*]}"
     echo ""
 
     # Warn about open PRs before re-creating branches
@@ -466,7 +365,7 @@ cmd_split() {
     fi
 
     local prev_branch="$base"
-    for tid in "${task_ids[@]}"; do
+    for tid in "${target_ids[@]}"; do
         local branch_name="${name}/${tid}"
         # Collect hashes for this task
         local -a hashes=()
@@ -511,10 +410,10 @@ cmd_split() {
                 stack_remove "$branch_name" "$stale_parent"
             fi
 
-            # Find next existing branch in task_ids order (for splice)
+            # Find next existing branch in target_ids order (for splice)
             local next_existing=""
             local found_self=false
-            for check_tid in "${task_ids[@]}"; do
+            for check_tid in "${target_ids[@]}"; do
                 if $found_self; then
                     local check_branch="${name}/${check_tid}"
                     if git rev-parse --verify "$check_branch" &>/dev/null; then
@@ -716,8 +615,8 @@ cmd_sync() {
         echo -e "${CYAN}Syncing:${NC} $task_branch"
 
         # Extract task-id from branch name (last path segment)
-        local task_id="${task_branch##*/}"
-        [[ -n "$task_id" ]] || die "Empty task ID in branch '${task_branch}'"
+        local target_id="${task_branch##*/}"
+        [[ -n "$target_id" ]] || die "Empty task ID in branch '${task_branch}'"
 
         # Source → task: commits in source for this task not yet in task branch
         local -a source_to_task=()
@@ -727,10 +626,10 @@ cmd_sync() {
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
-            # Check if this commit has matching Task-Id
+            # Check if this commit has matching Target-Id
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$task_id" ]] && source_to_task+=("$hash")
+            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" == "$target_id" ]] && source_to_task+=("$hash")
         done <<< "$cherry_out"
 
         if [[ ${#source_to_task[@]} -gt 0 ]]; then
@@ -759,8 +658,8 @@ cmd_sync() {
                 continue
             fi
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            if [[ "$tid" != "$task_id" ]]; then
+            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            if [[ "$tid" != "$target_id" ]]; then
                 needs_trailer=true
             fi
             task_to_source+=("$hash")
@@ -776,13 +675,11 @@ cmd_sync() {
 
                 if $has_merges; then
                     info "  Cherry-picking untracked commits to source (merge commits detected)..."
-                    local task_order=""
-                    task_order=$(_infer_task_order "$source" "$base" "$task_id")
                     info "  Task → source: ${#task_to_source[@]} commit(s)"
-                    _cherry_pick_with_trailers "$source" "$task_id" "$task_order" "${task_to_source[@]}"
+                    _cherry_pick_with_trailers "$source" "$target_id" "${task_to_source[@]}"
                 else
-                    info "  Fixing Task-Id on task commits..."
-                    _amend_trailers_on_branch "$task_branch" "$task_id" "${task_to_source[@]}"
+                    info "  Fixing Target-Id on task commits..."
+                    _amend_trailers_on_branch "$task_branch" "$target_id" "${task_to_source[@]}"
                     # Re-read hashes after rewrite
                     task_to_source=()
                     cherry_out=$(git cherry -v "$source" "$task_branch" ${parent:+"$parent"} 2>&1) || die "git cherry failed: $cherry_out"
@@ -837,8 +734,8 @@ cmd_status() {
     echo ""
 
     for task_branch in "${targets[@]}"; do
-        local task_id="${task_branch##*/}"
-        [[ -n "$task_id" ]] || die "Empty task ID in branch '${task_branch}'"
+        local target_id="${task_branch##*/}"
+        [[ -n "$target_id" ]] || die "Empty task ID in branch '${task_branch}'"
 
         # Source -> task: commits in source for this task not yet in task branch
         local source_to_task=0
@@ -849,14 +746,14 @@ cmd_status() {
             local hash
             hash=$(echo "$line" | awk '{print $2}')
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$task_id" ]] && source_to_task=$((source_to_task + 1))
+            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" == "$target_id" ]] && source_to_task=$((source_to_task + 1))
         done <<< "$cherry_out"
 
         # Task -> source: commits in task branch not yet in source
         # Use stack parent as limit so we only count this task's commits,
         # not ancestor commits from base/master
-        # Filter by Task-Id to exclude master commits merged into the branch
+        # Filter by Target-Id to exclude master commits merged into the branch
         local task_to_source=0
         local untracked_count=0
         local parent
@@ -873,8 +770,8 @@ cmd_status() {
                 continue
             fi
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Task-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            if [[ "$tid" == "$task_id" ]]; then
+            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            if [[ "$tid" == "$target_id" ]]; then
                 task_to_source=$((task_to_source + 1))
             else
                 untracked_count=$((untracked_count + 1))
@@ -1059,9 +956,9 @@ cmd_resolve() {
     source=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
     [[ -n "$source" ]] || die "Not a dispatch task branch: $branch"
 
-    # Extract task_id from branch name (last segment)
-    local task_id="${branch##*/}"
-    [[ -n "$task_id" ]] || die "Cannot extract task ID from branch '$branch'"
+    # Extract target_id from branch name (last segment)
+    local target_id="${branch##*/}"
+    [[ -n "$target_id" ]] || die "Cannot extract task ID from branch '$branch'"
 
     # Verify HEAD is a merge commit (2+ parents)
     local parent_count
@@ -1127,12 +1024,12 @@ cmd_resolve() {
         fi
     done <<< "$changed_files"
 
-    git commit --no-verify -m "fix: resolve merge conflicts with base" --trailer "Task-Id=$task_id" -q
+    git commit --no-verify -m "fix: resolve merge conflicts with base" --trailer "Target-Id=$target_id" -q
 
     # 3. Re-merge with -X ours (no conflicts since resolution already applied)
     git merge -X ours "$second_parent" --no-verify --no-edit -q
 
-    info "Resolved: resolution commit + clean re-merge (Task-Id=$task_id)"
+    info "Resolved: resolution commit + clean re-merge (Target-Id=$target_id)"
 }
 
 # ---------- restack ----------
@@ -1578,8 +1475,8 @@ cmd_help() {
 git-dispatch: Split a source branch into stacked task branches and keep them in sync.
 
 WORKFLOW
-  1. Code on a source branch, tagging each commit with a Task-Id trailer:
-       git commit -m "Add feature X" --trailer "Task-Id=3"
+  1. Code on a source branch, tagging each commit with a Target-Id trailer:
+       git commit -m "Add feature X" --trailer "Target-Id=3"
 
   2. Split into stacked branches:
        git dispatch split source/feature --base master --name feat/feature
@@ -1594,13 +1491,13 @@ WORKFLOW
 
 COMMANDS
   split <source> --name <prefix> [--base <base>] [--dry-run]
-      Parse Task-Id trailers from <source>, group commits by task, create stacked
+      Parse Target-Id trailers from <source>, group commits by task, create stacked
       branches named <prefix>/<task-id>. Each branch stacks on the previous.
 
   sync [source] [task-branch]
       Bidirectional sync using git cherry (patch-id comparison).
       Source->task: new commits for the task appear in the task branch.
-      Task->source: direct fixes on task appear back in the source (Task-Id added).
+      Task->source: direct fixes on task appear back in the source (Target-Id added).
       If <source> is omitted, auto-detects from current branch context.
 
   status [source]
@@ -1622,7 +1519,7 @@ COMMANDS
 
   resolve
       Convert a merge commit (HEAD) on a task branch into a regular commit
-      with Task-Id trailer. Use after merging master to resolve conflicts.
+      with Target-Id trailer. Use after merging master to resolve conflicts.
 
   update-base [source] [--merge|--rebase]
       Update source branch with latest base. Auto-detects strategy:
@@ -1647,22 +1544,22 @@ COMMANDS
       Show the dispatch stack hierarchy.
 
   hook install
-      Install hooks: prepare-commit-msg (auto-carries Task-Id from previous
-      commit) and commit-msg (rejects commits without Task-Id).
+      Install hooks: prepare-commit-msg (auto-carries Target-Id from previous
+      commit) and commit-msg (rejects commits without Target-Id).
 
   help
       Show this message.
 
 TRAILERS
-  Task-Id (required):
-    git commit -m "message" --trailer "Task-Id=3"
+  Target-Id (required):
+    git commit -m "message" --trailer "Target-Id=3"
 
-  Task-Order (optional): Controls stack position during split. Tasks with
-  Task-Order sort first (ascending), unordered tasks follow in commit order.
-    git commit -m "fix" --trailer "Task-Id=3" --trailer "Task-Order=1"
+  Target-Order-REMOVE (optional): Controls stack position during split. Tasks with
+  Target-Order-REMOVE sort first (ascending), unordered tasks follow in commit order.
+    git commit -m "fix" --trailer "Target-Id=3" --trailer "Target-Order-REMOVE=1"
 
-  The hooks (install with `git dispatch hook install`) auto-carry Task-Id from
-  the previous commit and reject commits without a Task-Id trailer.
+  The hooks (install with `git dispatch hook install`) auto-carry Target-Id from
+  the previous commit and reject commits without a Target-Id trailer.
 HELP
 }
 
