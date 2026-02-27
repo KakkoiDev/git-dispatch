@@ -939,9 +939,15 @@ cmd_push() {
         if $dry_run; then
             echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $branch"
         else
-            git push "${push_args[@]}" "$branch" 2>/dev/null && \
-                info "  Pushed $branch" || \
-                warn "  Push failed for $branch"
+            local push_out
+            if push_out=$(git push "${push_args[@]}" "$branch" 2>&1); then
+                info "  Pushed $branch"
+            else
+                local reason
+                reason=$(printf '%s\n' "$push_out" | sed '/^[[:space:]]*$/d' | tail -n 1)
+                [[ -z "$reason" ]] && reason="unknown error"
+                warn "  Push failed for $branch: $reason"
+            fi
         fi
     done
 }
