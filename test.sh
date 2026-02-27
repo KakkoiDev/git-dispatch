@@ -137,7 +137,7 @@ test_init_requires_base() {
 
     local output
     output=$(bash "$DISPATCH" init --target-pattern "source/feature-task-{id}" 2>&1) || true
-    assert_contains "$output" "Missing --base" "init fails without --base"
+    assert_contains "$output" "Missing required flags: --base and --target-pattern" "init shows combined required-flags error"
 
     teardown
 }
@@ -150,7 +150,7 @@ test_init_requires_target_pattern() {
 
     local output
     output=$(bash "$DISPATCH" init --base master 2>&1) || true
-    assert_contains "$output" "Missing --target-pattern" "init fails without --target-pattern"
+    assert_contains "$output" "Missing required flags: --base and --target-pattern" "init shows combined required-flags error"
 
     teardown
 }

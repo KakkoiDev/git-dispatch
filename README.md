@@ -202,6 +202,8 @@ git dispatch apply [--dry-run]
 
 Create or update target branches from source commits grouped by Target-Id. First run creates all branches. Subsequent runs cherry-pick only new commits. Idempotent and safe.
 
+If `apply` is interrupted by local uncommitted changes during branch switch, one or more targets may remain behind source (for example `1 behind source`). Fix by cleaning/stashing local changes and re-running `git dispatch apply`.
+
 ### cherry-pick
 
 ```bash

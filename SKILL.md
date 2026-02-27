@@ -93,3 +93,7 @@ git dispatch reset --force
 bash install.sh                # Creates git dispatch alias
 git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"   # Per-repo hooks + config
 ```
+
+## Recovery Tip
+
+If `git dispatch apply` stops with "local changes would be overwritten by checkout", clean/stash/commit your local changes and run `git dispatch apply` again. The affected target will otherwise show as behind source.

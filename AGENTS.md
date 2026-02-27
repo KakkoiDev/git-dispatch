@@ -110,6 +110,11 @@ Stored in git config:
 2. `git cherry-pick --continue`
 3. Re-run the dispatch command
 
+**Apply interrupted by local changes**:
+1. If checkout fails with "local changes would be overwritten", stash/commit/discard local changes
+2. Re-run `git dispatch apply`
+3. Verify with `git dispatch status` (behind targets should return to in sync)
+
 **Rebase/merge conflicts**:
 - `git dispatch rebase --from base --to source --resolve`
 - `git dispatch merge --from base --to source --resolve`

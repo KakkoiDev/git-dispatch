@@ -446,8 +446,9 @@ cmd_init() {
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch (detached HEAD)"
 
-    [[ -n "$base" ]] || die "Missing --base. Recommended: --base origin/master"
-    [[ -n "$target_pattern" ]] || die "Missing --target-pattern. Example: --target-pattern \"user/feat/task-{id}\""
+    if [[ -z "$base" || -z "$target_pattern" ]]; then
+        die "Missing required flags: --base and --target-pattern. Example: --base origin/master --target-pattern \"user/feat/task-{id}\""
+    fi
     [[ "$target_pattern" == *"{id}"* ]] || die "Invalid --target-pattern. Must include {id}"
 
     git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
