@@ -190,7 +190,7 @@ git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <indepe
 
 Configure dispatch on the current source branch. Stores config in git config. Installs hooks (Target-Id enforcement + auto-carry). Re-running warns if config already exists.
 
-Defaults: `--base master`, `--target-pattern "<current-branch>-task-{id}"`, `--mode independent`.
+Defaults: `--base master`, `--target-pattern "user/feat/task-{id}"`, `--mode independent`.
 
 ### apply
 

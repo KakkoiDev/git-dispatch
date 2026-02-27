@@ -457,7 +457,7 @@ cmd_init() {
     fi
 
     if [[ -z "$target_pattern" ]]; then
-        target_pattern="${source}-task-{id}"
+        target_pattern="user/feat/task-{id}"
     fi
     [[ "$target_pattern" == *"{id}"* ]] || die "Invalid --target-pattern. Must include {id}"
 
@@ -476,7 +476,7 @@ cmd_init() {
         warn "Warning: dispatch already configured on this branch:"
         warn "  mode:   ${existing_mode:-independent}"
         warn "  base:   $existing_base"
-        warn "  target-pattern: ${existing_pattern:-${source}-task-{id}}"
+        warn "  target-pattern: ${existing_pattern:-user/feat/task-{id}}"
         [[ "$target_count" -gt 0 ]] && warn "  targets: $target_count branches exist"
         echo ""
         warn "Overwriting config will orphan existing target branches."
@@ -1149,7 +1149,7 @@ SETUP
   git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent|stacked>]
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
-  Defaults: --base master, --target-pattern "<current-branch>-task-{id}", --mode independent.
+  Defaults: --base master, --target-pattern "user/feat/task-{id}", --mode independent.
 
 WORKFLOW
   1. Tag every commit with a Target-Id trailer:

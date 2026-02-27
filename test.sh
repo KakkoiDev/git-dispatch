@@ -144,7 +144,7 @@ test_init_defaults() {
 
     assert_eq "master" "$base" "default base is master"
     assert_eq "independent" "$mode" "default mode is independent"
-    assert_eq "source/feature-task-{id}" "$target_pattern" "default target pattern uses source branch"
+    assert_eq "user/feat/task-{id}" "$target_pattern" "default target pattern is neutral"
 
     teardown
 }
