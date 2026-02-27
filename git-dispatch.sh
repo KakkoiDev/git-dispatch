@@ -183,18 +183,28 @@ _cherry_pick_with_trailers() {
     local -a git_cmd=(git)
     [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
 
-    if [[ -z "$wt" ]]; then
-        local orig
-        orig=$(current_branch)
-        git checkout "$branch" --quiet
-    fi
-
     local stashed=false
     DISPATCH_LAST_PICKED=0
     DISPATCH_LAST_SKIPPED=0
-    if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
-        "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
-        stashed=true
+
+    if [[ -z "$wt" ]]; then
+        local orig
+        orig=$(current_branch)
+        # Stash everything (including untracked) before checkout to avoid conflicts
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+            warn "Uncommitted changes detected. Stash first with: git stash -u"
+            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
+            stashed=true
+        fi
+        if ! git checkout "$branch" --quiet 2>/dev/null; then
+            if $stashed; then git stash pop --quiet; fi
+            die "Cannot checkout $branch. Check for stale worktrees or conflicting files."
+        fi
+    else
+        if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
+            "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
+            stashed=true
+        fi
     fi
 
     for hash in "${hashes[@]}"; do
@@ -519,6 +529,10 @@ cmd_apply() {
     trap "rm -f '$commit_file'" RETURN
 
     while IFS= read -r _h; do
+        # Skip merge commits (they have no Target-Id and that's expected)
+        local _pc
+        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
+        (( _pc > 2 )) && continue
         local _t
         _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"
@@ -546,7 +560,7 @@ cmd_apply() {
     fi
 
     local prev_branch="$base"
-    local created=0 updated=0 skipped=0
+    local created=0 updated=0 skipped=0 failed=0
 
     for tid in "${target_ids[@]}"; do
         local branch_name
@@ -617,10 +631,27 @@ cmd_apply() {
             git branch "$branch_name" "$parent_branch" 2>/dev/null || \
                 die "Could not create branch $branch_name"
 
-            # Cherry-pick commits
+            # Stash untracked files before checkout to avoid conflicts
+            local apply_stashed=false
             local orig
             orig=$(current_branch)
-            git checkout "$branch_name" --quiet
+            if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+                warn "Uncommitted changes detected. Stash first with: git stash -u"
+                git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply checkout"
+                apply_stashed=true
+            fi
+
+            local checkout_err
+            if ! checkout_err=$(git checkout "$branch_name" --quiet 2>&1); then
+                if $apply_stashed; then git stash pop --quiet; fi
+                git branch -D "$branch_name" 2>/dev/null || true
+                warn "  Failed to checkout $branch_name:"
+                warn "  $checkout_err"
+                warn "  Skipping this target. Fix the issue and re-run apply."
+                failed=$((failed + 1))
+                prev_branch="$branch_name"
+                continue
+            fi
 
             local cherry_pick_failed=false
             for hash in "${hashes[@]}"; do
@@ -637,6 +668,7 @@ cmd_apply() {
             done
 
             git checkout "$orig" --quiet
+            if $apply_stashed; then git stash pop --quiet; fi
 
             # Set up stack metadata
             stack_add "$branch_name" "$parent_branch"
@@ -656,7 +688,9 @@ cmd_apply() {
     if $dry_run; then
         echo -e "${CYAN}Summary (dry-run):${NC} ${#target_ids[@]} targets"
     else
-        echo -e "${CYAN}Summary:${NC} $created created, $updated updated, $skipped in sync"
+        local summary="$created created, $updated updated, $skipped in sync"
+        [[ $failed -gt 0 ]] && summary="$summary, ${RED}$failed failed${NC}"
+        echo -e "${CYAN}Summary:${NC} $summary"
     fi
 }
 
@@ -859,36 +893,77 @@ cmd_merge() {
 
     [[ -n "$from" ]] || die "Missing --from"
     [[ -n "$to" ]] || die "Missing --to"
-    [[ "$from" == "base" && "$to" == "source" ]] || \
-        die "Only --from base --to source is supported"
+    [[ "$from" == "base" ]] || die "Only --from base is supported"
 
     local base source
     base=$(_get_config base)
     source=$(resolve_source "")
 
+    # Build list of branches to merge into
+    local -a branches=()
+    if [[ "$to" == "source" ]]; then
+        branches=("$source")
+    elif [[ "$to" == "all" ]]; then
+        branches=("$source")
+        while IFS= read -r c; do
+            [[ -n "$c" ]] && branches+=("$c")
+        done < <(find_dispatch_targets "$source" | order_by_stack)
+        [[ ${#branches[@]} -gt 1 ]] || die "No targets found"
+    else
+        # Numeric target id
+        local target_branch
+        target_branch=$(_target_branch_name "$to")
+        git rev-parse --verify "$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist"
+        branches=("$target_branch")
+    fi
+
     if $dry_run; then
-        local count
-        count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
-        echo -e "${YELLOW}[dry-run]${NC} merge $base ($count commits) into $source"
+        for branch in "${branches[@]}"; do
+            local count
+            count=$(git rev-list --count "$branch..$base" 2>/dev/null || echo 0)
+            if [[ "$count" -eq 0 ]]; then
+                echo -e "  ${GREEN}$branch${NC}: up to date"
+            else
+                echo -e "  ${YELLOW}[dry-run]${NC} merge $base ($count commits) into $branch"
+            fi
+        done
         return
     fi
 
     local orig
     orig=$(current_branch)
-    git checkout "$source" --quiet
+    local merged=0 uptodate=0 failed=0
 
-    if ! git merge "$base" --no-edit; then
-        if $resolve; then
-            warn "Merge conflict. Resolve, then: git commit"
-            exit 1
+    for branch in "${branches[@]}"; do
+        local count
+        count=$(git rev-list --count "$branch..$base" 2>/dev/null || echo 0)
+        if [[ "$count" -eq 0 ]]; then
+            info "  $branch: up to date"
+            uptodate=$((uptodate + 1))
+            continue
         fi
-        git merge --abort 2>/dev/null || true
-        [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-        die "Merge conflict. Use --resolve to enter resolution mode."
-    fi
 
-    [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-    info "Merged $base into $source"
+        git checkout "$branch" --quiet
+
+        if ! git merge "$base" --no-edit; then
+            if $resolve; then
+                warn "Merge conflict on $branch. Resolve, then: git commit"
+                exit 1
+            fi
+            git merge --abort 2>/dev/null || true
+            warn "  $branch: merge conflict (skipped)"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        info "  Merged $base into $branch"
+        merged=$((merged + 1))
+    done
+
+    git checkout "$orig" --quiet 2>/dev/null || true
+    echo ""
+    info "Summary: $merged merged, $uptodate up to date${failed:+, $failed failed}"
 }
 
 # ---------- push ----------
@@ -1161,8 +1236,10 @@ WORKFLOW
        git dispatch cherry-pick --from source --to 2   # source to one target
        git dispatch cherry-pick --from 2 --to source   # target back to source
 
-  4. Update source with base changes:
-       git dispatch merge --from base --to source      # safe, no force-push
+  4. Update with base changes:
+       git dispatch merge --from base --to source      # source only, safe
+       git dispatch merge --from base --to all         # source + all targets
+       git dispatch merge --from base --to 8           # one target
        git dispatch rebase --from base --to source     # rewrites history
 
 COMMANDS
@@ -1170,7 +1247,7 @@ COMMANDS
   apply     Make all targets match source (create/update)
   cherry-pick  Move commits between source and target (--from/--to)
   rebase    Rebase source onto base (--from base --to source)
-  merge     Merge base into source (--from base --to source)
+  merge     Merge base into branches (--from base --to <source|id|all>)
   push      Push branches (--from <id|all|source>)
   status    Show mode, base, source, and all targets with sync state
   reset     Delete all dispatch metadata and target branches
