@@ -26,7 +26,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force]` | Rebase source onto updated base |
@@ -40,7 +40,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 
 ```bash
 # 1. Init on source branch
-git dispatch init --base master --target-pattern "feature/auth-task-{id}" --mode independent
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode independent
 
 # 2. Code with Target-Id trailers
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
@@ -86,7 +86,7 @@ Rules:
 - Hook auto-carries from previous commit
 - Hook rejects commits without Target-Id
 
-Install hooks: `git dispatch init` (automatic)
+Install hooks: `git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"` (automatic)
 
 ## Branch Naming
 
@@ -97,7 +97,7 @@ Install hooks: `git dispatch init` (automatic)
 ## Config
 
 Stored in git config:
-- `dispatch.base` - Base branch (master, main, develop)
+- `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)

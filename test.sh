@@ -129,22 +129,28 @@ test_init_basic() {
     teardown
 }
 
-test_init_defaults() {
-    echo "=== test: init defaults ==="
+test_init_requires_base() {
+    echo "=== test: init requires --base ==="
     setup
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init
+    local output
+    output=$(bash "$DISPATCH" init --target-pattern "source/feature-task-{id}" 2>&1) || true
+    assert_contains "$output" "Missing --base" "init fails without --base"
 
-    local base mode target_pattern
-    base=$(git config dispatch.base)
-    mode=$(git config dispatch.mode)
-    target_pattern=$(git config dispatch.targetPattern)
+    teardown
+}
 
-    assert_eq "master" "$base" "default base is master"
-    assert_eq "independent" "$mode" "default mode is independent"
-    assert_eq "user/feat/task-{id}" "$target_pattern" "default target pattern is neutral"
+test_init_requires_target_pattern() {
+    echo "=== test: init requires --target-pattern ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    local output
+    output=$(bash "$DISPATCH" init --base master 2>&1) || true
+    assert_contains "$output" "Missing --target-pattern" "init fails without --target-pattern"
 
     teardown
 }
@@ -155,7 +161,7 @@ test_init_stacked_mode() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --mode stacked
+    bash "$DISPATCH" init --base master --mode stacked --target-pattern "source/feature-task-{id}"
 
     local mode
     mode=$(git config dispatch.mode)
@@ -170,7 +176,7 @@ test_init_custom_pattern() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --target-pattern "custom/path-{id}-done"
+    bash "$DISPATCH" init --base master --target-pattern "custom/path-{id}-done"
 
     local target_pattern
     target_pattern=$(git config dispatch.targetPattern)
@@ -185,10 +191,10 @@ test_init_reinit_warns() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --base master
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
     local output
-    output=$(echo "n" | bash "$DISPATCH" init --base master 2>&1) || true
+    output=$(echo "n" | bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" 2>&1) || true
 
     assert_contains "$output" "already configured" "warns about existing config"
 
@@ -201,7 +207,7 @@ test_init_installs_hooks() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
     local hook_dir
     hook_dir="$(git rev-parse --git-dir)/hooks"
@@ -240,7 +246,7 @@ test_hook_rejects_missing_trailer() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
     if git commit -m "no trailer" 2>/dev/null; then
@@ -259,7 +265,7 @@ test_hook_allows_valid_trailer() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
     git commit -m "with trailer$(printf '\n\nTarget-Id: 1')" -q
@@ -276,7 +282,7 @@ test_hook_rejects_non_numeric_target_id() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
     if git commit -m "bad id$(printf '\n\nTarget-Id: task-3')" 2>/dev/null; then
@@ -295,7 +301,7 @@ test_hook_allows_decimal_target_id() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
     git commit -m "decimal$(printf '\n\nTarget-Id: 1.5')" -q
@@ -312,7 +318,7 @@ test_hook_auto_carry_target_id() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "a" > a.txt; git add a.txt
     git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
@@ -332,7 +338,7 @@ test_hook_auto_carry_no_override() {
     setup
 
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "a" > a.txt; git add a.txt
     git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
@@ -1055,7 +1061,8 @@ echo "======================="
 echo ""
 
 test_init_basic
-test_init_defaults
+test_init_requires_base
+test_init_requires_target_pattern
 test_init_stacked_mode
 test_init_custom_pattern
 test_init_reinit_warns

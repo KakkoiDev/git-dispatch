@@ -13,7 +13,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force]` | Rebase source onto base |
@@ -36,7 +36,7 @@ Decimals (1.5) enable mid-stack insertion. Hook auto-carries from previous commi
 
 ```bash
 # 1. Init on source branch
-git dispatch init --base master --target-pattern "feature/auth-task-{id}"
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"
 
 # 2. Code with Target-Id trailers
 git commit -m "Add enum" --trailer "Target-Id=3"
@@ -81,7 +81,7 @@ git dispatch reset --force
 
 ## Config
 
-- `dispatch.base` - Base branch
+- `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
 - `branch.<name>.dispatchtargets` - Target branches
@@ -91,5 +91,5 @@ git dispatch reset --force
 
 ```bash
 bash install.sh                # Creates git dispatch alias
-git dispatch init              # Per-repo hooks + config
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"   # Per-repo hooks + config
 ```

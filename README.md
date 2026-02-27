@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/insta
 
 # Init on your source branch
 git checkout -b feature/auth master
-git dispatch init --base master --target-pattern "feature/auth-task-{id}"
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"
 
 # Code with Target-Id trailers (hook auto-carries from previous commit)
 git commit -m "Add PurchaseOrder to enum"      --trailer "Target-Id=3"
@@ -49,8 +49,8 @@ git dispatch push --from all
 Choose at init time:
 
 ```bash
-git dispatch init --mode independent   # default
-git dispatch init --mode stacked
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode independent   # default mode
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode stacked
 ```
 
 Independent mode eliminates the industry-wide force-push problem. Each target branches from base, carrying only its own commits. When a parent PR merges, sibling targets are unaffected.
@@ -108,7 +108,7 @@ git log --format="%H %(trailers:key=Target-Id,valueonly)" master..source
 
 ```bash
 git checkout -b cyril/source/po-transactions master
-git dispatch init --base master --target-pattern "cyril/source/po-transactions-task-{id}" --mode independent
+git dispatch init --base origin/master --target-pattern "cyril/source/po-transactions-task-{id}" --mode independent
 
 # Task 3 - Schema
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
@@ -185,12 +185,14 @@ git dispatch reset --force
 ### init
 
 ```bash
-git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent|stacked>]
+git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
 ```
 
 Configure dispatch on the current source branch. Stores config in git config. Installs hooks (Target-Id enforcement + auto-carry). Re-running warns if config already exists.
 
-Defaults: `--base master`, `--target-pattern "user/feat/task-{id}"`, `--mode independent`.
+Defaults: `--mode independent`.
+Required: `--base` and `--target-pattern` (must include `{id}`).
+Recommended base: `origin/master` (or your remote default branch).
 
 ### apply
 
@@ -281,7 +283,7 @@ Stored in git config:
 
 | Key | Set by | Description |
 |-----|--------|-------------|
-| `dispatch.base` | init | Base branch (master, main, develop) |
+| `dispatch.base` | init | Base branch (recommended: origin/master) |
 | `dispatch.targetPattern` | init | Target branch naming pattern, must include `{id}` |
 | `dispatch.mode` | init | independent or stacked |
 | `branch.<name>.dispatchtargets` | apply | Target branches (multi-value) |
@@ -360,7 +362,7 @@ Both installers:
 Quick start (one-liner after install):
 
 ```bash
-git dispatch init --base master --target-pattern "$(git branch --show-current)-task-{id}" --mode independent
+git dispatch init --base origin/master --target-pattern "$(git branch --show-current)-task-{id}" --mode independent
 ```
 
 ## Testing

@@ -446,19 +446,8 @@ cmd_init() {
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch (detached HEAD)"
 
-    if [[ -z "$base" ]]; then
-        if git rev-parse --verify master &>/dev/null; then
-            base="master"
-        elif git rev-parse --verify main &>/dev/null; then
-            base="main"
-        else
-            die "Cannot auto-detect base branch. Use --base <branch>"
-        fi
-    fi
-
-    if [[ -z "$target_pattern" ]]; then
-        target_pattern="user/feat/task-{id}"
-    fi
+    [[ -n "$base" ]] || die "Missing --base. Recommended: --base origin/master"
+    [[ -n "$target_pattern" ]] || die "Missing --target-pattern. Example: --target-pattern \"user/feat/task-{id}\""
     [[ "$target_pattern" == *"{id}"* ]] || die "Invalid --target-pattern. Must include {id}"
 
     git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
@@ -476,7 +465,7 @@ cmd_init() {
         warn "Warning: dispatch already configured on this branch:"
         warn "  mode:   ${existing_mode:-independent}"
         warn "  base:   $existing_base"
-        warn "  target-pattern: ${existing_pattern:-user/feat/task-{id}}"
+        warn "  target-pattern: ${existing_pattern:-<unset>}"
         [[ "$target_count" -gt 0 ]] && warn "  targets: $target_count branches exist"
         echo ""
         warn "Overwriting config will orphan existing target branches."
@@ -1146,10 +1135,12 @@ cmd_help() {
 git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
-  git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent|stacked>]
+  git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
-  Defaults: --base master, --target-pattern "user/feat/task-{id}", --mode independent.
+  Defaults: --mode independent.
+  Required: --base (recommended: "origin/master").
+  Required: --target-pattern (must include "{id}"), e.g. "user/feat/task-{id}".
 
 WORKFLOW
   1. Tag every commit with a Target-Id trailer:
