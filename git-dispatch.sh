@@ -562,6 +562,16 @@ cmd_apply() {
     local prev_branch="$base"
     local created=0 updated=0 skipped=0 failed=0
 
+    # Stash once before the loop to avoid per-target stash/pop churn
+    local apply_stashed=false
+    if ! $dry_run; then
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+            warn "Uncommitted changes detected. Stash first with: git stash -u"
+            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply"
+            apply_stashed=true
+        fi
+    fi
+
     for tid in "${target_ids[@]}"; do
         local branch_name
         branch_name=$(_target_branch_name "$tid")
@@ -579,7 +589,7 @@ cmd_apply() {
         fi
 
         if $dry_run; then
-            if git rev-parse --verify "$branch_name" &>/dev/null; then
+            if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
                 # Check for new commits
                 local new_count=0
                 local cherry_out
@@ -604,8 +614,8 @@ cmd_apply() {
             continue
         fi
 
-        if git rev-parse --verify "$branch_name" &>/dev/null; then
-            # Target exists - cherry-pick new commits
+        if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
+            # Target exists locally - cherry-pick new commits
             local -a new_hashes=()
             local cherry_out
             cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
@@ -631,19 +641,11 @@ cmd_apply() {
             git branch "$branch_name" "$parent_branch" 2>/dev/null || \
                 die "Could not create branch $branch_name"
 
-            # Stash untracked files before checkout to avoid conflicts
-            local apply_stashed=false
             local orig
             orig=$(current_branch)
-            if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-                warn "Uncommitted changes detected. Stash first with: git stash -u"
-                git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply checkout"
-                apply_stashed=true
-            fi
 
             local checkout_err
             if ! checkout_err=$(git checkout "$branch_name" --quiet 2>&1); then
-                if $apply_stashed; then git stash pop --quiet; fi
                 git branch -D "$branch_name" 2>/dev/null || true
                 warn "  Failed to checkout $branch_name:"
                 warn "  $checkout_err"
@@ -668,7 +670,6 @@ cmd_apply() {
             done
 
             git checkout "$orig" --quiet
-            if $apply_stashed; then git stash pop --quiet; fi
 
             # Set up stack metadata
             stack_add "$branch_name" "$parent_branch"
@@ -683,6 +684,8 @@ cmd_apply() {
         fi
         prev_branch="$branch_name"
     done
+
+    if $apply_stashed; then git stash pop --quiet; fi
 
     echo ""
     if $dry_run; then
@@ -730,8 +733,8 @@ cmd_cherry_pick() {
         # Cherry-pick from source to target <id>
         local target_branch
         target_branch=$(_target_branch_name "$to")
-        git rev-parse --verify "$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist"
+        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
 
         local -a new_hashes=()
         local cherry_out
@@ -765,8 +768,8 @@ cmd_cherry_pick() {
 
         local target_branch
         target_branch=$(_target_branch_name "$from")
-        git rev-parse --verify "$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist"
+        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
 
         local parent
         parent=$(find_stack_parent "$target_branch")
@@ -913,8 +916,8 @@ cmd_merge() {
         # Numeric target id
         local target_branch
         target_branch=$(_target_branch_name "$to")
-        git rev-parse --verify "$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist"
+        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
         branches=("$target_branch")
     fi
 
@@ -1002,8 +1005,8 @@ cmd_push() {
         # Numeric target id
         local target_branch
         target_branch=$(_target_branch_name "$from")
-        git rev-parse --verify "$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist"
+        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
+            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
         branches=("$target_branch")
     fi
 
@@ -1086,7 +1089,7 @@ cmd_status() {
             [[ -n "$pr_num" ]] && pr_suffix=" [PR #${pr_num}]"
         fi
 
-        if ! git rev-parse --verify "$branch_name" &>/dev/null; then
+        if ! git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
             printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created\n" "$tid" "$branch_name"
             continue
         fi
