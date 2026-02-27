@@ -26,7 +26,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init [--base <branch>] [--prefix <str>] [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent\|stacked>]` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force]` | Rebase source onto updated base |
@@ -40,7 +40,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 
 ```bash
 # 1. Init on source branch
-git dispatch init --base master --prefix "task-" --mode independent
+git dispatch init --base master --target-pattern "feature/auth-task-{id}" --mode independent
 
 # 2. Code with Target-Id trailers
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
@@ -90,15 +90,15 @@ Install hooks: `git dispatch init` (automatic)
 
 ## Branch Naming
 
-`<source>-<prefix><Target-Id>` where prefix is set during init.
-- source `feature/auth` + prefix `task-` + Target-Id `3` = `feature/auth-task-3`
-- source `feature/auth` + prefix `""` + Target-Id `3` = `feature/auth-3`
+`<target-pattern>` where `{id}` is replaced with Target-Id.
+- pattern `feature/auth-task-{id}` + Target-Id `3` = `feature/auth-task-3`
+- pattern `feature/auth-{id}` + Target-Id `3` = `feature/auth-3`
 
 ## Config
 
 Stored in git config:
 - `dispatch.base` - Base branch (master, main, develop)
-- `dispatch.prefix` - Target branch prefix (task-, phase-, "")
+- `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference

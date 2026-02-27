@@ -413,21 +413,25 @@ find_stack_parent() {
     done
 }
 
-# Derive target branch name from source, prefix, and target id
+# Derive target branch name from configured pattern and target id
 _target_branch_name() {
-    local source="$1" prefix="$2" tid="$3"
-    echo "${source}-${prefix}${tid}"
+    local tid="$1"
+    local pattern
+    pattern=$(_get_config targetPattern)
+    [[ -n "$pattern" ]] || die "Missing dispatch.targetPattern. Re-run: git dispatch init"
+    [[ "$pattern" == *"{id}"* ]] || die "Invalid dispatch.targetPattern (missing {id})"
+    echo "${pattern//\{id\}/$tid}"
 }
 
 # ---------- init ----------
 
 cmd_init() {
-    local base="" prefix="task-" mode="independent"
+    local base="" target_pattern="" mode="independent"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --base)   base="$2"; shift 2 ;;
-            --prefix) prefix="$2"; shift 2 ;;
+            --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   mode="$2"; shift 2 ;;
             --force)  shift ;;
             -*)       die "Unknown flag: $1" ;;
@@ -452,22 +456,27 @@ cmd_init() {
         fi
     fi
 
+    if [[ -z "$target_pattern" ]]; then
+        target_pattern="${source}-task-{id}"
+    fi
+    [[ "$target_pattern" == *"{id}"* ]] || die "Invalid --target-pattern. Must include {id}"
+
     git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
     [[ "$source" != "$base" ]] || die "Cannot init on the base branch itself"
 
     local existing_base
     existing_base=$(_get_config base)
     if [[ -n "$existing_base" ]]; then
-        local existing_mode existing_prefix
+        local existing_mode existing_pattern
         existing_mode=$(_get_config mode)
-        existing_prefix=$(_get_config prefix)
+        existing_pattern=$(_get_config targetPattern)
         local target_count
         target_count=$(find_dispatch_targets "$source" | wc -l | tr -d ' ')
 
         warn "Warning: dispatch already configured on this branch:"
         warn "  mode:   ${existing_mode:-independent}"
         warn "  base:   $existing_base"
-        warn "  prefix: ${existing_prefix:-task-}"
+        warn "  target-pattern: ${existing_pattern:-${source}-task-{id}}"
         [[ "$target_count" -gt 0 ]] && warn "  targets: $target_count branches exist"
         echo ""
         warn "Overwriting config will orphan existing target branches."
@@ -479,7 +488,7 @@ cmd_init() {
     fi
 
     git config dispatch.base "$base"
-    git config dispatch.prefix "$prefix"
+    git config dispatch.targetPattern "$target_pattern"
     git config dispatch.mode "$mode"
 
     _install_hooks
@@ -488,7 +497,7 @@ cmd_init() {
     info "Initialized dispatch on '$source'"
     echo -e "  ${CYAN}mode:${NC}   $mode"
     echo -e "  ${CYAN}base:${NC}   $base"
-    echo -e "  ${CYAN}prefix:${NC} $prefix"
+    echo -e "  ${CYAN}target-pattern:${NC} $target_pattern"
 }
 
 # ---------- apply ----------
@@ -508,9 +517,8 @@ cmd_apply() {
         esac
     done
 
-    local base prefix mode source
+    local base mode source
     base=$(_get_config base)
-    prefix=$(_get_config prefix)
     mode=$(_get_config mode)
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch"
@@ -552,7 +560,7 @@ cmd_apply() {
 
     for tid in "${target_ids[@]}"; do
         local branch_name
-        branch_name=$(_target_branch_name "$source" "$prefix" "$tid")
+        branch_name=$(_target_branch_name "$tid")
 
         # Collect hashes for this target
         local -a hashes=()
@@ -684,9 +692,8 @@ cmd_cherry_pick() {
     [[ -n "$from" ]] || die "Missing --from"
     [[ -n "$to" ]] || die "Missing --to"
 
-    local base prefix source
+    local base source
     base=$(_get_config base)
-    prefix=$(_get_config prefix)
     source=$(resolve_source "")
 
     # --from source --to all -> delegate to apply
@@ -698,7 +705,7 @@ cmd_cherry_pick() {
     if [[ "$from" == "source" ]]; then
         # Cherry-pick from source to target <id>
         local target_branch
-        target_branch=$(_target_branch_name "$source" "$prefix" "$to")
+        target_branch=$(_target_branch_name "$to")
         git rev-parse --verify "$target_branch" &>/dev/null || \
             die "Target branch '$target_branch' does not exist"
 
@@ -733,7 +740,7 @@ cmd_cherry_pick() {
         [[ "$to" == "source" ]] || die "Invalid --to '$to'. Use: source or a Target-Id"
 
         local target_branch
-        target_branch=$(_target_branch_name "$source" "$prefix" "$from")
+        target_branch=$(_target_branch_name "$from")
         git rev-parse --verify "$target_branch" &>/dev/null || \
             die "Target branch '$target_branch' does not exist"
 
@@ -913,9 +920,8 @@ cmd_push() {
 
     [[ -n "$from" ]] || die "Missing --from"
 
-    local base prefix source
+    local base source
     base=$(_get_config base)
-    prefix=$(_get_config prefix)
     source=$(resolve_source "")
 
     local -a branches=()
@@ -930,7 +936,7 @@ cmd_push() {
     else
         # Numeric target id
         local target_branch
-        target_branch=$(_target_branch_name "$source" "$prefix" "$from")
+        target_branch=$(_target_branch_name "$from")
         git rev-parse --verify "$target_branch" &>/dev/null || \
             die "Target branch '$target_branch' does not exist"
         branches=("$target_branch")
@@ -955,15 +961,15 @@ cmd_push() {
 cmd_status() {
     _require_init
 
-    local base prefix mode source
+    local base target_pattern mode source
     base=$(_get_config base)
-    prefix=$(_get_config prefix)
+    target_pattern=$(_get_config targetPattern)
     mode=$(_get_config mode)
     source=$(resolve_source "")
 
     echo -e "${CYAN}mode:${NC}   $mode"
     echo -e "${CYAN}base:${NC}   $base"
-    echo -e "${CYAN}prefix:${NC} ${prefix:-\"\"}"
+    echo -e "${CYAN}target-pattern:${NC} ${target_pattern:-\"\"}"
     echo -e "${CYAN}source:${NC} $source"
     echo ""
 
@@ -994,13 +1000,13 @@ cmd_status() {
     for tid in "${unique_tids[@]}"; do
         (( ${#tid} > max_tid )) && max_tid=${#tid}
         local bn
-        bn=$(_target_branch_name "$source" "$prefix" "$tid")
+        bn=$(_target_branch_name "$tid")
         (( ${#bn} > max_branch )) && max_branch=${#bn}
     done
 
     for tid in "${unique_tids[@]}"; do
         local branch_name
-        branch_name=$(_target_branch_name "$source" "$prefix" "$tid")
+        branch_name=$(_target_branch_name "$tid")
 
         local pr_suffix=""
         if [[ -n "$pr_cache" ]]; then
@@ -1125,6 +1131,7 @@ cmd_reset() {
 
     # Delete dispatch config
     git config --unset dispatch.base 2>/dev/null || true
+    git config --unset dispatch.targetPattern 2>/dev/null || true
     git config --unset dispatch.prefix 2>/dev/null || true
     git config --unset dispatch.mode 2>/dev/null || true
 
@@ -1139,10 +1146,10 @@ cmd_help() {
 git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
-  git dispatch init [--base <branch>] [--prefix <str>] [--mode <independent|stacked>]
+  git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent|stacked>]
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
-  Defaults: --base master, --prefix task-, --mode independent.
+  Defaults: --base master, --target-pattern "<current-branch>-task-{id}", --mode independent.
 
 WORKFLOW
   1. Tag every commit with a Target-Id trailer:

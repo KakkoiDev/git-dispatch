@@ -104,7 +104,7 @@ create_source() {
     git commit -m "Implement validation$(printf '\n\nTarget-Id: 5')" -q
 
     # Init dispatch
-    bash "$DISPATCH" init --base master --prefix "" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 }
 
 # ---------- init tests ----------
@@ -115,16 +115,16 @@ test_init_basic() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --base master --prefix "task-" --mode independent
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" --mode independent
 
-    local base mode prefix
+    local base mode target_pattern
     base=$(git config dispatch.base)
     mode=$(git config dispatch.mode)
-    prefix=$(git config dispatch.prefix)
+    target_pattern=$(git config dispatch.targetPattern)
 
     assert_eq "master" "$base" "dispatch.base set"
     assert_eq "independent" "$mode" "dispatch.mode set"
-    assert_eq "task-" "$prefix" "dispatch.prefix set"
+    assert_eq "source/feature-task-{id}" "$target_pattern" "dispatch.targetPattern set"
 
     teardown
 }
@@ -137,14 +137,14 @@ test_init_defaults() {
 
     bash "$DISPATCH" init
 
-    local base mode prefix
+    local base mode target_pattern
     base=$(git config dispatch.base)
     mode=$(git config dispatch.mode)
-    prefix=$(git config dispatch.prefix)
+    target_pattern=$(git config dispatch.targetPattern)
 
     assert_eq "master" "$base" "default base is master"
     assert_eq "independent" "$mode" "default mode is independent"
-    assert_eq "task-" "$prefix" "default prefix is task-"
+    assert_eq "source/feature-task-{id}" "$target_pattern" "default target pattern uses source branch"
 
     teardown
 }
@@ -164,17 +164,17 @@ test_init_stacked_mode() {
     teardown
 }
 
-test_init_custom_prefix() {
-    echo "=== test: init custom prefix ==="
+test_init_custom_pattern() {
+    echo "=== test: init custom target pattern ==="
     setup
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --prefix "phase-"
+    bash "$DISPATCH" init --target-pattern "custom/path-{id}-done"
 
-    local prefix
-    prefix=$(git config dispatch.prefix)
-    assert_eq "phase-" "$prefix" "custom prefix set"
+    local target_pattern
+    target_pattern=$(git config dispatch.targetPattern)
+    assert_eq "custom/path-{id}-done" "$target_pattern" "custom target pattern set"
 
     teardown
 }
@@ -435,7 +435,7 @@ test_apply_new_target_mid_stack() {
     echo "c" > c.txt; git add c.txt
     git commit -m "Add C$(printf '\n\nTarget-Id: 3')" -q
 
-    bash "$DISPATCH" init --base master --prefix "" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
 
     assert_branch_exists "source/feature-1" "target-1 created"
@@ -487,7 +487,7 @@ test_apply_stacked_mode() {
     echo "c" > validate.txt; git add validate.txt
     git commit -m "Add validation$(printf '\n\nTarget-Id: 3')" -q
 
-    bash "$DISPATCH" init --base master --prefix "" --mode stacked >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
     bash "$DISPATCH" apply
 
     assert_branch_exists "source/feature-1" "target-1 created"
@@ -517,7 +517,7 @@ test_apply_conflict_aborts() {
     echo "b" > file.txt; git add file.txt
     git commit -m "Modify file$(printf '\n\nTarget-Id: 2')" -q
 
-    bash "$DISPATCH" init --base master --prefix "" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     # Advance master with conflicting content
     git checkout master -q
@@ -889,7 +889,7 @@ test_status_not_created() {
     echo "a" > a.txt; git add a.txt
     git commit -m "A$(printf '\n\nTarget-Id: 1')" -q
 
-    bash "$DISPATCH" init --base master --prefix "" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     # Don't apply - targets don't exist yet
     local output
@@ -979,7 +979,7 @@ test_apply_decimal_target_id() {
     echo "mid" > mid.txt; git add mid.txt
     git commit -m "Add mid$(printf '\n\nTarget-Id: 1.5')" -q
 
-    bash "$DISPATCH" init --base master --prefix "" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply
 
     assert_branch_exists "source/feature-1" "target-1 created"
@@ -1004,7 +1004,7 @@ test_full_lifecycle() {
 
     # 1. Setup
     git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --prefix "task-" >/dev/null 2>&1
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     # 2. Build
     echo "schema" > schema.sql; git add schema.sql
@@ -1057,7 +1057,7 @@ echo ""
 test_init_basic
 test_init_defaults
 test_init_stacked_mode
-test_init_custom_prefix
+test_init_custom_pattern
 test_init_reinit_warns
 test_init_installs_hooks
 test_hook_rejects_missing_trailer

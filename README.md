@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/insta
 
 # Init on your source branch
 git checkout -b feature/auth master
-git dispatch init --base master --prefix "task-"
+git dispatch init --base master --target-pattern "feature/auth-task-{id}"
 
 # Code with Target-Id trailers (hook auto-carries from previous commit)
 git commit -m "Add PurchaseOrder to enum"      --trailer "Target-Id=3"
@@ -94,13 +94,13 @@ git log --format="%H %(trailers:key=Target-Id,valueonly)" master..source
 
 ## Branch Naming
 
-`<source>-<prefix><Target-Id>` where prefix is set during init.
+`<target-pattern>` where `{id}` is replaced by `Target-Id`.
 
-| Source | Prefix | Target-Id | Branch |
-|--------|--------|-----------|--------|
-| `feature/auth` | `task-` | `3` | `feature/auth-task-3` |
-| `feature/auth` | `""` | `3` | `feature/auth-3` |
-| `cyril/source` | `phase-` | `1` | `cyril/source-phase-1` |
+| Target Pattern | Target-Id | Branch |
+|---------------|-----------|--------|
+| `feature/auth-task-{id}` | `3` | `feature/auth-task-3` |
+| `feature/auth-{id}` | `3` | `feature/auth-3` |
+| `cyril/feat/po-{id}-done` | `1` | `cyril/feat/po-1-done` |
 
 ## Example: Full Workflow
 
@@ -108,7 +108,7 @@ git log --format="%H %(trailers:key=Target-Id,valueonly)" master..source
 
 ```bash
 git checkout -b cyril/source/po-transactions master
-git dispatch init --base master --prefix "task-" --mode independent
+git dispatch init --base master --target-pattern "cyril/source/po-transactions-task-{id}" --mode independent
 
 # Task 3 - Schema
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
@@ -185,12 +185,12 @@ git dispatch reset --force
 ### init
 
 ```bash
-git dispatch init [--base <branch>] [--prefix <str>] [--mode <independent|stacked>]
+git dispatch init [--base <branch>] [--target-pattern <pattern>] [--mode <independent|stacked>]
 ```
 
 Configure dispatch on the current source branch. Stores config in git config. Installs hooks (Target-Id enforcement + auto-carry). Re-running warns if config already exists.
 
-Defaults: `--base master`, `--prefix task-`, `--mode independent`.
+Defaults: `--base master`, `--target-pattern "<current-branch>-task-{id}"`, `--mode independent`.
 
 ### apply
 
@@ -282,7 +282,7 @@ Stored in git config:
 | Key | Set by | Description |
 |-----|--------|-------------|
 | `dispatch.base` | init | Base branch (master, main, develop) |
-| `dispatch.prefix` | init | Target branch prefix (task-, phase-, "") |
+| `dispatch.targetPattern` | init | Target branch naming pattern, must include `{id}` |
 | `dispatch.mode` | init | independent or stacked |
 | `branch.<name>.dispatchtargets` | apply | Target branches (multi-value) |
 | `branch.<name>.dispatchsource` | apply | Source branch reference |
@@ -340,6 +340,8 @@ mkdir -p ~/.claude/agents && cp AGENTS.md ~/.claude/agents/git-dispatch.md
 
 ## Installation
 
+Install via curl:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/install-remote.sh | bash
 ```
@@ -351,12 +353,20 @@ git clone git@github.com:KakkoiDev/git-dispatch.git && cd git-dispatch
 bash install.sh
 ```
 
-Creates a global git alias: `git dispatch` -> `git-dispatch.sh`.
+Both installers:
+- Create a global git alias: `git dispatch` -> `git-dispatch.sh`.
+- Do not auto-install AI agent/skill files (they print optional commands for Claude/Codex/Gemini).
+
+Quick start (one-liner after install):
+
+```bash
+git dispatch init --base master --target-pattern "$(git branch --show-current)-task-{id}" --mode independent
+```
 
 ## Testing
 
 ```bash
-bash test.sh    # 89 tests
+bash test.sh    # 93 tests
 ```
 
 ## Requirements
