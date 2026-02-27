@@ -628,6 +628,43 @@ test_cherry_pick_dry_run() {
     teardown
 }
 
+test_cherry_pick_target_to_source_noop_semantic_sync() {
+    echo "=== test: cherry-pick --from <id> --to source skips no-op semantic commit ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" apply >/dev/null
+
+    # Target-only commit (Target-Id 3): add "hotfix" line.
+    git checkout source/feature-3 -q
+    printf "a\nhotfix\n" > file.txt; git add file.txt
+    git commit --no-verify -m "Target hotfix" -q
+
+    # Source independently contains the same hotfix already, plus extra change in same commit.
+    # Patch-id differs, but cherry-picking target commit to source is a semantic no-op.
+    git checkout source/feature -q
+    printf "a\nhotfix\n" > file.txt
+    echo "extra" > extra.txt
+    git add file.txt extra.txt
+    git commit -m "Broader source change$(printf '\n\nTarget-Id: 4')" -q
+
+    local before after cp_output status_output target3_line
+    before=$(git rev-list --count master..source/feature)
+
+    cp_output=$(bash "$DISPATCH" cherry-pick --from 3 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    after=$(git rev-list --count master..source/feature)
+
+    assert_eq "$before" "$after" "no new source commit created for no-op semantic cherry-pick"
+    assert_contains "$cp_output" "Source already has all commits from target 3" "reports semantic no-op target->source sync"
+
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    target3_line=$(echo "$status_output" | grep "source/feature-3" || true)
+    assert_contains "$target3_line" "in sync" "target-3 treated as semantically in sync"
+    assert_not_contains "$target3_line" "ahead" "target-3 no longer shown ahead on no-op semantic commit"
+
+    teardown
+}
+
 # ---------- rebase tests ----------
 
 test_rebase_base_to_source() {
@@ -1040,6 +1077,7 @@ test_cherry_pick_source_to_target
 test_cherry_pick_target_to_source
 test_cherry_pick_adds_trailer
 test_cherry_pick_dry_run
+test_cherry_pick_target_to_source_noop_semantic_sync
 test_rebase_base_to_source
 test_rebase_dry_run
 test_merge_base_to_source

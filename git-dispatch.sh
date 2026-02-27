@@ -100,6 +100,63 @@ _is_content_merged() {
     git diff --quiet "$base_ref" "$branch_tip" -- $changed_files 2>/dev/null
 }
 
+# Return 0 if a commit's resulting file content is already present on a branch.
+# This treats "same final content, different history/patch-id" as semantically synced.
+_commit_effect_in_branch() {
+    local commit="$1" branch="$2"
+    local file
+
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        local commit_obj="" branch_obj=""
+        commit_obj=$(git rev-parse "${commit}:${file}" 2>/dev/null || true)
+        branch_obj=$(git rev-parse "${branch}:${file}" 2>/dev/null || true)
+        if [[ "$commit_obj" != "$branch_obj" ]]; then
+            return 1
+        fi
+    done < <(git diff-tree --no-commit-id --name-only -r "$commit")
+
+    return 0
+}
+
+# Return 0 if cherry-picking commit onto branch would result in no staged changes.
+_would_cherry_pick_be_empty_on_branch() {
+    local commit="$1" branch="$2"
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/git-dispatch-empty-check.XXXXXX")
+
+    if ! git worktree add --detach -q "$tmpdir" "$branch" >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    local -a g=(git -C "$tmpdir")
+    local is_empty=1
+
+    if "${g[@]}" cherry-pick --no-commit "$commit" >/dev/null 2>&1; then
+        if "${g[@]}" diff --cached --quiet; then
+            is_empty=0
+        fi
+        "${g[@]}" reset --hard --quiet >/dev/null 2>&1 || true
+    else
+        if "${g[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && "${g[@]}" diff --cached --quiet; then
+            is_empty=0
+        fi
+        "${g[@]}" cherry-pick --abort >/dev/null 2>&1 || "${g[@]}" reset --hard --quiet >/dev/null 2>&1 || true
+    fi
+
+    git worktree remove --force "$tmpdir" >/dev/null 2>&1 || rm -rf "$tmpdir"
+    return $is_empty
+}
+
+# Return 0 if commit should be treated as already integrated in branch.
+_commit_semantically_in_branch() {
+    local commit="$1" branch="$2"
+    _commit_effect_in_branch "$commit" "$branch" && return 0
+    _would_cherry_pick_be_empty_on_branch "$commit" "$branch" && return 0
+    return 1
+}
+
 # Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
 _get_open_prs() {
     local source="$1"
@@ -133,6 +190,8 @@ _cherry_pick_with_trailers() {
     fi
 
     local stashed=false
+    DISPATCH_LAST_PICKED=0
+    DISPATCH_LAST_SKIPPED=0
     if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
         "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
         stashed=true
@@ -147,6 +206,7 @@ _cherry_pick_with_trailers() {
                     if "${git_cmd[@]}" diff --cached --quiet; then
                         warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
                         "${git_cmd[@]}" cherry-pick --skip
+                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     fi
                 fi
@@ -155,6 +215,7 @@ _cherry_pick_with_trailers() {
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash. Resolve manually."
             fi
+            DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         else
             if ! "${git_cmd[@]}" cherry-pick --no-commit "$hash"; then
                 if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
@@ -169,9 +230,33 @@ _cherry_pick_with_trailers() {
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash. Resolve manually."
             fi
+            # Some no-op picks can succeed with --no-commit but stage nothing.
+            # Treat them as empty cherry-picks instead of failing on commit.
+            if "${git_cmd[@]}" diff --cached --quiet; then
+                warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
+                fi
+                DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                continue
+            fi
             local msg
             msg=$(git log -1 --format="%B" "$hash")
-            "${git_cmd[@]}" commit -m "$msg" --trailer "Target-Id=$target_id" --quiet
+            if ! "${git_cmd[@]}" commit -m "$msg" --trailer "Target-Id=$target_id" --quiet; then
+                if "${git_cmd[@]}" diff --cached --quiet; then
+                    warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                    if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                        "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
+                    fi
+                    DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                    continue
+                fi
+                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
+            fi
+            DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         fi
     done
 
@@ -667,6 +752,10 @@ cmd_cherry_pick() {
             if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
                 continue
             fi
+            # Skip commits already integrated in source, even with different history.
+            if _commit_semantically_in_branch "$hash" "$source"; then
+                continue
+            fi
             new_hashes+=("$hash")
         done <<< "$cherry_out"
 
@@ -682,7 +771,11 @@ cmd_cherry_pick() {
 
         # Cherry-pick with trailer addition
         _cherry_pick_with_trailers "$source" "$from" "${new_hashes[@]}"
-        info "Cherry-picked ${#new_hashes[@]} commit(s) from $target_branch to source"
+        if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
+            info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
+        else
+            info "Cherry-picked ${DISPATCH_LAST_PICKED} commit(s) from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} skipped)"
+        fi
     fi
 }
 
@@ -870,6 +963,7 @@ cmd_status() {
 
     echo -e "${CYAN}mode:${NC}   $mode"
     echo -e "${CYAN}base:${NC}   $base"
+    echo -e "${CYAN}prefix:${NC} ${prefix:-\"\"}"
     echo -e "${CYAN}source:${NC} $source"
     echo ""
 
@@ -895,6 +989,15 @@ cmd_status() {
     local pr_cache=""
     pr_cache=$(_get_open_prs "$source" 2>/dev/null) || true
 
+    # Pre-compute column widths
+    local max_tid=0 max_branch=0
+    for tid in "${unique_tids[@]}"; do
+        (( ${#tid} > max_tid )) && max_tid=${#tid}
+        local bn
+        bn=$(_target_branch_name "$source" "$prefix" "$tid")
+        (( ${#bn} > max_branch )) && max_branch=${#bn}
+    done
+
     for tid in "${unique_tids[@]}"; do
         local branch_name
         branch_name=$(_target_branch_name "$source" "$prefix" "$tid")
@@ -907,7 +1010,7 @@ cmd_status() {
         fi
 
         if ! git rev-parse --verify "$branch_name" &>/dev/null; then
-            echo -e "  ${YELLOW}$tid${NC}  $branch_name  not created"
+            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created\n" "$tid" "$branch_name"
             continue
         fi
 
@@ -925,8 +1028,12 @@ cmd_status() {
         done <<< "$cherry_out"
 
         # Count pending target -> source
+        # Two-phase:
+        # 1) cheap history-based candidate detection
+        # 2) semantic no-op filtering only for branches with candidates
         local target_to_source=0
         local parent
+        local -a target_to_source_candidates=()
         parent=$(find_stack_parent "$branch_name")
         cherry_out=$(git cherry -v "$source" "$branch_name" ${parent:+"$parent"} 2>/dev/null) || true
         while IFS= read -r line; do
@@ -936,16 +1043,26 @@ cmd_status() {
             if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
                 continue
             fi
-            target_to_source=$((target_to_source + 1))
+            target_to_source_candidates+=("$hash")
         done <<< "$cherry_out"
 
+        # Only run semantic checks for branches that are history-ahead.
+        if [[ ${#target_to_source_candidates[@]} -gt 0 ]]; then
+            for hash in "${target_to_source_candidates[@]}"; do
+                if _commit_semantically_in_branch "$hash" "$source"; then
+                    continue
+                fi
+                target_to_source=$((target_to_source + 1))
+            done
+        fi
+
         if [[ $source_to_target -eq 0 && $target_to_source -eq 0 ]]; then
-            echo -e "  ${GREEN}$tid${NC}  $branch_name  in sync${pr_suffix}"
+            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
         else
             local status_parts=""
             [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
             [[ $target_to_source -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${target_to_source} ahead"
-            echo -e "  ${YELLOW}$tid${NC}  $branch_name  $status_parts${pr_suffix}"
+            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${pr_suffix}\n" "$tid" "$branch_name"
         fi
     done
 }

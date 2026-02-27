@@ -214,6 +214,12 @@ Move commits between source and a target:
 | `--from 4 --to source` | Cherry-pick target commits back to source (adds Target-Id trailer) |
 | `--from source --to all` | Same as `apply` |
 
+Notes for `--from <id> --to source`:
+- If a target commit is already integrated in source semantically (cherry-picking it would be a no-op), dispatch skips it.
+- In that case output reports either:
+  - `Source already has all commits from target <id>` (filtered before pick), or
+  - `No new commits applied ... (N empty/no-op)` (detected during pick).
+
 ### rebase
 
 ```bash
@@ -245,6 +251,10 @@ git dispatch status
 ```
 
 Show mode, base, source, and all targets with sync state.
+
+`status` is semantic-aware for target -> source sync:
+- A target commit is not counted as `ahead` when cherry-picking it onto source would be empty/no-op.
+- This avoids false out-of-sync states after equivalent changes were integrated through different commit history.
 
 ### reset
 
