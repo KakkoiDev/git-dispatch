@@ -566,7 +566,6 @@ cmd_apply() {
     local apply_stashed=false
     if ! $dry_run; then
         if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-            warn "Uncommitted changes detected. Stash first with: git stash -u"
             git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply"
             apply_stashed=true
         fi
