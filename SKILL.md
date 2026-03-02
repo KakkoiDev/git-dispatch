@@ -15,11 +15,12 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
-| `git dispatch rebase --from base --to source [--force]` | Rebase source onto base |
-| `git dispatch merge --from base --to source` | Merge base into source |
+| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
+| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
+| `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
-| `git dispatch status` | Show mode, base, targets, sync state |
+| `git dispatch status` | Show mode, base, targets, sync state, divergence |
+| `git dispatch diff --target <id>` | Show file-level diff between source and a target |
 | `git dispatch reset [--force]` | Delete target branches and config |
 | `git dispatch help` | Show usage guide |
 
@@ -93,6 +94,21 @@ git dispatch reset --force
 bash install.sh                # Creates git dispatch alias
 git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"   # Per-repo hooks + config
 ```
+
+## Conflict Handling
+
+All conflict commands (`cherry-pick`, `rebase`, `merge`) show conflicted files and diff on failure.
+
+- **Default**: aborts cleanly, prints "Re-run with --resolve to keep conflict active"
+- **`--resolve`**: leaves conflict active for manual resolution, shows remaining work
+
+## Divergence Detection
+
+`status` tags targets that are both behind and ahead:
+- `(DIVERGED)` - file content actually differs (likely lost changes after manual conflict resolution)
+- `(cosmetic)` - same content, different SHAs
+
+Use `git dispatch diff --target <id>` to inspect what files diverged.
 
 ## Recovery Tip
 

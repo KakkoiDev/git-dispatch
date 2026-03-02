@@ -28,11 +28,12 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all>` | Propagate commits between source and targets |
-| `git dispatch rebase --from base --to source [--force]` | Rebase source onto updated base |
-| `git dispatch merge --from base --to source` | Merge base into source |
+| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
+| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto updated base |
+| `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
-| `git dispatch status` | Show mode, base, targets, sync state |
+| `git dispatch status` | Show mode, base, targets, sync state, divergence |
+| `git dispatch diff --target <id>` | Show file-level diff between source and a target |
 | `git dispatch reset [--force]` | Delete target branches and dispatch config |
 | `git dispatch help` | Show usage guide |
 
@@ -103,12 +104,18 @@ Stored in git config:
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference
 
-## Conflict Recovery
+## Conflict Handling
+
+All conflict commands (`cherry-pick`, `apply`, `rebase`, `merge`) show conflicted files and diff on failure.
+
+- **Default**: aborts the failing operation cleanly, shows "Re-run with --resolve to keep conflict active"
+- **`--resolve`**: leaves conflict active for manual resolution, prints the continue command and remaining work
+- Cherry-pick shows batch progress (commit X/Y) and lists remaining commits
 
 **Cherry-pick conflicts** (during apply or cherry-pick):
-1. Resolve conflicts manually
-2. `git cherry-pick --continue`
-3. Re-run the dispatch command
+1. Without `--resolve`: aborts cleanly, previously applied commits in the batch remain
+2. With `--resolve`: conflict stays active. Resolve, then `git cherry-pick --continue`
+3. Re-run the dispatch command for remaining commits
 
 **Apply interrupted by local changes**:
 1. If checkout fails with "local changes would be overwritten", stash/commit/discard local changes
@@ -118,3 +125,11 @@ Stored in git config:
 **Rebase/merge conflicts**:
 - `git dispatch rebase --from base --to source --resolve`
 - `git dispatch merge --from base --to source --resolve`
+
+## Divergence Detection
+
+`status` detects when a target is both behind and ahead of source (diverged):
+- `(DIVERGED)` - file content actually differs. Likely lost changes after manual conflict resolution.
+- `(cosmetic)` - same file content, different SHAs from cherry-pick resolution.
+
+Use `git dispatch diff --target <id>` to see exactly which files diverged and the diff.
