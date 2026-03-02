@@ -70,38 +70,21 @@ _require_init() {
     local base
     base=$(_get_config base)
     [[ -n "$base" ]] || die "Not initialized. Run: git dispatch init"
-    _ensure_hooks
 }
 
-# Ensure hooks are present (auto-install in worktrees)
-_ensure_hooks() {
-    local hook_dir
-    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
-    if [[ -z "$hook_dir" ]]; then
-        hook_dir="$(git rev-parse --git-dir)/hooks"
-    elif [[ "$hook_dir" != /* ]]; then
-        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
-    fi
-    if [[ ! -f "$hook_dir/commit-msg" ]] || [[ ! -f "$hook_dir/prepare-commit-msg" ]]; then
-        _install_hooks
-    fi
-}
-
-# Install hooks (prepare-commit-msg + commit-msg only)
+# Install hooks to the main repo .git/hooks and set core.hooksPath
+# so all worktrees share the same hooks.
 _install_hooks() {
-    local hook_dir
-    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
-    if [[ -z "$hook_dir" ]]; then
-        hook_dir="$(git rev-parse --git-dir)/hooks"
-    elif [[ "$hook_dir" != /* ]]; then
-        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
-    fi
-    mkdir -p "$hook_dir"
-    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$hook_dir/prepare-commit-msg"
-    chmod +x "$hook_dir/prepare-commit-msg"
-    cp "$SCRIPT_DIR/hooks/commit-msg" "$hook_dir/commit-msg"
-    chmod +x "$hook_dir/commit-msg"
-    info "Installed hooks to $hook_dir"
+    local common_dir
+    common_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/hooks"
+    mkdir -p "$common_dir"
+    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$common_dir/prepare-commit-msg"
+    chmod +x "$common_dir/prepare-commit-msg"
+    cp "$SCRIPT_DIR/hooks/commit-msg" "$common_dir/commit-msg"
+    chmod +x "$common_dir/commit-msg"
+    # core.hooksPath ensures worktrees use the main repo's hooks
+    git config core.hooksPath "$common_dir"
+    info "Installed hooks to $common_dir"
 }
 
 # Check if a branch's content has been merged (e.g. squash-merged) into base
@@ -1010,8 +993,18 @@ cmd_rebase() {
 
     local orig
     orig=$(current_branch)
+
+    # Auto-stash dirty working tree
+    local did_stash=false
+    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
+       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        git stash --include-untracked -m "git-dispatch: auto-stash before rebase" --quiet
+        did_stash=true
+    fi
+
     local checkout_err
     if ! checkout_err=$(git checkout "$source" --quiet 2>&1); then
+        $did_stash && git stash pop --quiet 2>/dev/null || true
         die "Cannot checkout $source: $checkout_err"
     fi
 
@@ -1022,16 +1015,19 @@ cmd_rebase() {
         if $resolve; then
             echo ""
             warn "Resolve conflicts, then run: git rebase --continue"
+            $did_stash && warn "Auto-stashed changes will be restored after rebase completes."
             exit 1
         fi
         git rebase --abort 2>/dev/null || true
         [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+        $did_stash && git stash pop --quiet 2>/dev/null || true
         echo ""
         warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
         exit 1
     fi
 
     [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
+    $did_stash && git stash pop --quiet 2>/dev/null || true
     info "Rebased $source onto $base"
 }
 
@@ -1456,7 +1452,7 @@ cmd_reset() {
     if [[ ${#targets[@]} -gt 0 ]]; then
         echo "  - target branches: ${targets[*]}"
     fi
-    echo "  - hooks from .git/hooks"
+    echo "  - hooks and core.hooksPath config"
 
     if ! $force; then
         echo ""
@@ -1489,6 +1485,12 @@ cmd_reset() {
     git config --unset dispatch.targetPattern 2>/dev/null || true
     git config --unset dispatch.prefix 2>/dev/null || true
     git config --unset dispatch.mode 2>/dev/null || true
+
+    # Remove hooks and core.hooksPath
+    local common_hooks
+    common_hooks="$(cd "$(git rev-parse --git-common-dir)" && pwd)/hooks"
+    rm -f "$common_hooks/commit-msg" "$common_hooks/prepare-commit-msg"
+    git config --unset core.hooksPath 2>/dev/null || true
 
     echo ""
     info "Reset complete."
