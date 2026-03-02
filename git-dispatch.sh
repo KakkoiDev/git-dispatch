@@ -157,6 +157,18 @@ _commit_semantically_in_branch() {
     return 1
 }
 
+# Check if source and target have diverged content (not just different SHAs).
+# Returns 0 if content actually differs, 1 if cosmetic only.
+_target_content_diverged() {
+    local source="$1" target_branch="$2" base="$3"
+    local target_files
+    target_files=$(git log --format="" --name-only "$base..$target_branch" 2>/dev/null | grep . | sort -u)
+    [[ -n "$target_files" ]] || return 1
+    # shellcheck disable=SC2086
+    git diff --quiet "$source" "$target_branch" -- $target_files 2>/dev/null && return 1
+    return 0
+}
+
 # Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
 _get_open_prs() {
     local source="$1"
@@ -1214,9 +1226,74 @@ cmd_status() {
             local status_parts=""
             [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
             [[ $target_to_source -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${target_to_source} ahead"
-            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${pr_suffix}\n" "$tid" "$branch_name"
+
+            local diverge_tag=""
+            if [[ $source_to_target -gt 0 && $target_to_source -gt 0 ]]; then
+                if _target_content_diverged "$source" "$branch_name" "$base"; then
+                    diverge_tag=" ${RED}(DIVERGED)${NC}"
+                    has_diverged=true
+                else
+                    diverge_tag=" (cosmetic)"
+                fi
+            fi
+
+            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${diverge_tag}${pr_suffix}\n" "$tid" "$branch_name"
         fi
     done
+
+    if [[ "${has_diverged:-}" == "true" ]]; then
+        echo ""
+        warn "Diverged targets have different file content than source."
+        warn "Run: git dispatch diff --target <id>  to inspect."
+    fi
+}
+
+# ---------- diff ----------
+
+cmd_diff() {
+    _require_init
+
+    local target=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target) target="$2"; shift 2 ;;
+            -*)       die "Unknown flag: $1" ;;
+            *)        die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    [[ -n "$target" ]] || die "Missing --target <id>"
+
+    local base source target_branch
+    base=$(_get_config base)
+    source=$(resolve_source "")
+    target_branch=$(_target_branch_name "$target")
+
+    git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
+        die "Target branch '$target_branch' does not exist locally."
+
+    local target_files
+    target_files=$(git log --format="" --name-only "$base..$target_branch" 2>/dev/null | grep . | sort -u)
+
+    if [[ -z "$target_files" ]]; then
+        info "No files changed on $target_branch"
+        return
+    fi
+
+    # shellcheck disable=SC2086
+    local diff_files
+    diff_files=$(git diff --name-only "$source" "$target_branch" -- $target_files 2>/dev/null)
+
+    if [[ -z "$diff_files" ]]; then
+        info "No content difference between $source and $target_branch"
+    else
+        warn "Files diverged between $source and $target_branch:"
+        echo "$diff_files" | while IFS= read -r f; do echo "  $f"; done
+        echo ""
+        # shellcheck disable=SC2086
+        git diff "$source" "$target_branch" -- $target_files 2>/dev/null
+    fi
 }
 
 # ---------- reset ----------
@@ -1354,6 +1431,7 @@ main() {
         merge)        cmd_merge "$@" ;;
         push)         cmd_push "$@" ;;
         status)       cmd_status "$@" ;;
+        diff)         cmd_diff "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
