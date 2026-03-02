@@ -1262,8 +1262,8 @@ cmd_status() {
     if [[ "${has_cosmetic:-}" == "true" ]]; then
         echo ""
         echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
-        echo "  conflict resolution). Safe to ignore, or fix with:"
-        echo "  git dispatch cherry-pick --from <id> --to source  then  git dispatch apply"
+        echo "  conflict resolution). Safe to ignore, or fix by regenerating the target:"
+        echo "  git branch -D <target-branch>  then  git dispatch apply"
     fi
 }
 

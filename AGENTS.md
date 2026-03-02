@@ -214,7 +214,15 @@ git dispatch push --from all
 
 Source and target have diverged. Two sub-cases:
 
-**If tagged `(cosmetic)`** - safe to ignore. Or fix with: `cherry-pick --from <id> --to source` then `apply`.
+**If tagged `(cosmetic)`** - same file content, different commit SHAs. Normal after conflict resolution. Safe to ignore, or fix by regenerating the target:
+
+```bash
+git branch -D <target-branch>
+git dispatch apply
+git dispatch push --from <id>
+```
+
+**Why cherry-pick won't fix cosmetic:** Cherry-picking back from the target often conflicts on generated/shared files. Since the content is already identical, regeneration is the clean fix.
 
 **If tagged `(DIVERGED)`** - changes were lost. Fix:
 

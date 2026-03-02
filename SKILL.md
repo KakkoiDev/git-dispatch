@@ -107,7 +107,7 @@ All conflict commands (`cherry-pick`, `apply`, `rebase`, `merge`) show conflicte
 
 `status` tags targets that are both behind and ahead:
 - `(DIVERGED)` - file content actually differs (likely lost changes after manual conflict resolution)
-- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore.
+- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore, or fix by regenerating: `git branch -D <target-branch>` then `git dispatch apply`.
 
 Only files from that target's own commits are checked (avoids false positives from generated files in independent mode).
 
@@ -127,6 +127,7 @@ git dispatch apply                           # sync everything
 | Target behind source | `git dispatch apply` or `cherry-pick --from source --to <id>` |
 | Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
 | DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
+| Cosmetic divergence | Safe to ignore, or `git branch -D <target>` then `git dispatch apply` |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
 | Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |
