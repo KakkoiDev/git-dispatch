@@ -170,7 +170,7 @@ _target_id_files() {
 # Check if source and target have diverged content (not just different SHAs).
 # Only checks files from commits with the matching Target-Id (avoids false
 # positives from generated files or other tasks' changes in independent mode).
-# Returns 0 if content actually differs, 1 if cosmetic only.
+# Returns 0 if content actually differs, 1 if same content (different commits only).
 _target_content_diverged() {
     local source="$1" target_branch="$2" base="$3" tid="$4"
     local target_files
@@ -1245,7 +1245,8 @@ cmd_status() {
                     diverge_tag=" ${RED}(DIVERGED)${NC}"
                     has_diverged=true
                 else
-                    diverge_tag=" (cosmetic)"
+                    diverge_tag=" (same content, different commits)"
+                    has_cosmetic=true
                 fi
             fi
 
@@ -1257,6 +1258,12 @@ cmd_status() {
         echo ""
         warn "Diverged targets have different file content than source."
         warn "Run: git dispatch diff --target <id>  to inspect."
+    fi
+    if [[ "${has_cosmetic:-}" == "true" ]]; then
+        echo ""
+        echo "  \"same content, different commits\" = file content is identical but commit"
+        echo "  SHAs differ (normal after conflict resolution). Safe to ignore, or fix with:"
+        echo "  git dispatch cherry-pick --from <id> --to source  then  git dispatch apply"
     fi
 }
 
