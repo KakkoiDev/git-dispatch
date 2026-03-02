@@ -128,6 +128,7 @@ git dispatch apply                           # sync everything
 | Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
 | DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
 | Cosmetic divergence | Safe to ignore, or `git dispatch apply --reset <id>` |
+| Generated file conflict on create | Auto-resolved with `--theirs` (takes source version) |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
 | Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |

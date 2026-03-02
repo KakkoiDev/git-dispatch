@@ -161,6 +161,16 @@ git dispatch merge --from base --to source --resolve
 # Verify with git dispatch status
 ```
 
+### Apply auto-resolves conflicts on fresh targets
+
+When creating new target branches (not updating), `apply` retries conflicting cherry-picks with `--strategy-option theirs`. This auto-resolves conflicts by taking the source commit's version, which is correct since the target is a fresh branch from base with no manual work to preserve.
+
+This commonly happens with generated files (OpenAPI specs, swagger.json) in independent mode where base and source have diverged.
+
+After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless - file content is identical.
+
+**Note:** Auto-resolve only applies during initial target creation. Updates to existing targets use normal cherry-pick and will show conflicts for manual resolution.
+
 ### Apply interrupted by local changes
 
 1. Stash/commit/discard local changes

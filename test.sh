@@ -542,6 +542,53 @@ test_apply_conflict_aborts() {
     teardown
 }
 
+test_apply_create_auto_resolves_with_theirs() {
+    echo "=== test: apply create auto-resolves conflicts with --theirs ==="
+    setup
+
+    # Create a file on master that will conflict
+    echo "base-generated-content" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Base generated file" -q
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Commit 1: modify generated file (will conflict since master has different content after next step)
+    echo "source-v1" > generated.txt; git add generated.txt
+    git commit -m "Update generated file$(printf '\n\nTarget-Id: 1')" -q
+
+    # Commit 2: another change to same target
+    echo "source-v2" > generated.txt; git add generated.txt
+    git commit -m "Update generated again$(printf '\n\nTarget-Id: 1')" -q
+
+    # Advance master so the file diverges from base
+    git checkout master -q
+    echo "master-diverged" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Master diverges generated file" -q
+
+    git checkout source/feature -q
+
+    # Apply - target branches from master, cherry-pick will conflict on generated.txt
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1) || true
+
+    # Should auto-resolve with --theirs and create the branch
+    assert_contains "$output" "Auto-resolved conflict" "reports auto-resolution"
+    assert_branch_exists "source/feature-1" "target created despite conflict"
+
+    # Target should have the source version of the file
+    local target_content
+    target_content=$(git show source/feature-1:generated.txt)
+    assert_eq "source-v2" "$target_content" "target has source version of conflicted file"
+
+    # Status shows cosmetic (same content, different SHAs from --theirs resolution)
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_not_contains "$status_output" "DIVERGED" "no real divergence after auto-resolve"
+
+    teardown
+}
+
 # ---------- cherry-pick tests ----------
 
 test_cherry_pick_source_to_target() {
@@ -1433,6 +1480,7 @@ test_apply_new_target_mid_stack
 test_apply_idempotent
 test_apply_stacked_mode
 test_apply_conflict_aborts
+test_apply_create_auto_resolves_with_theirs
 test_cherry_pick_source_to_target
 test_cherry_pick_target_to_source
 test_cherry_pick_adds_trailer

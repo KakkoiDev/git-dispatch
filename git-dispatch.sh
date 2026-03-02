@@ -779,6 +779,13 @@ cmd_apply() {
                         git cherry-pick --skip
                         continue
                     fi
+                    # Retry with --theirs to auto-resolve conflicts (safe on fresh targets)
+                    git cherry-pick --abort 2>/dev/null || true
+                    if git cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Auto-resolved conflict (--theirs): $(git log -1 --oneline "$hash")"
+                        continue
+                    fi
+                    # --theirs also failed
                     warn "  Cherry-pick failed on $(git log -1 --oneline "$hash")"
                     [[ -n "$cp_err" ]] && warn "  $cp_err"
                     git cherry-pick --abort 2>/dev/null || true
