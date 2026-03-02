@@ -643,18 +643,6 @@ cmd_apply() {
         echo ""
     fi
 
-    # --reset <id>: delete the target branch so apply recreates it fresh
-    if [[ -n "$reset_target" ]]; then
-        local reset_branch
-        reset_branch=$(_target_branch_name "$reset_target")
-        if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
-            git branch -D "$reset_branch" 2>/dev/null
-            info "Deleted $reset_branch (will regenerate)"
-        else
-            warn "Branch $reset_branch does not exist, nothing to reset"
-        fi
-    fi
-
     local prev_branch="$base"
     local created=0 updated=0 skipped=0 failed=0
 
@@ -664,6 +652,24 @@ cmd_apply() {
         if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
             git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply"
             apply_stashed=true
+        fi
+    fi
+
+    # --reset <id>: delete the target branch so apply recreates it fresh
+    if [[ -n "$reset_target" ]]; then
+        local reset_branch
+        reset_branch=$(_target_branch_name "$reset_target")
+        if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
+            local delete_err
+            if delete_err=$(git branch -D "$reset_branch" 2>&1); then
+                info "Deleted $reset_branch (will regenerate)"
+            else
+                if $apply_stashed; then git stash pop --quiet 2>/dev/null || true; fi
+                die "Could not delete $reset_branch: $delete_err"
+            fi
+        else
+            if $apply_stashed; then git stash pop --quiet 2>/dev/null || true; fi
+            die "Branch $reset_branch does not exist"
         fi
     fi
 
@@ -780,7 +786,11 @@ cmd_apply() {
         prev_branch="$branch_name"
     done
 
-    if $apply_stashed; then git stash pop --quiet; fi
+    if $apply_stashed; then
+        if ! git stash pop --quiet 2>/dev/null; then
+            warn "Auto-stash pop had conflicts. Run: git stash pop"
+        fi
+    fi
 
     echo ""
     if $dry_run; then
