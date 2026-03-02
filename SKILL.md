@@ -14,7 +14,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve]` | Create/update target branches from source commits |
+| `git dispatch apply [--dry-run] [--resolve] [--reset <id>]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
@@ -107,7 +107,7 @@ All conflict commands (`cherry-pick`, `apply`, `rebase`, `merge`) show conflicte
 
 `status` tags targets that are both behind and ahead:
 - `(DIVERGED)` - file content actually differs (likely lost changes after manual conflict resolution)
-- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore, or fix by regenerating: `git branch -D <target-branch>` then `git dispatch apply`.
+- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore, or fix with `git dispatch apply --reset <id>`.
 
 Only files from that target's own commits are checked (avoids false positives from generated files in independent mode).
 
@@ -127,7 +127,7 @@ git dispatch apply                           # sync everything
 | Target behind source | `git dispatch apply` or `cherry-pick --from source --to <id>` |
 | Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
 | DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
-| Cosmetic divergence | Safe to ignore, or `git branch -D <target>` then `git dispatch apply` |
+| Cosmetic divergence | Safe to ignore, or `git dispatch apply --reset <id>` |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
 | Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |

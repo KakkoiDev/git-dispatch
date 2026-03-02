@@ -1317,6 +1317,46 @@ test_diff_no_difference() {
 
 # ---------- end-to-end lifecycle ----------
 
+test_apply_reset_regenerates_target() {
+    echo "=== test: apply --reset regenerates target branch ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "file1" > f1.txt; git add f1.txt
+    git commit -m "Task 1$(printf '\n\nTarget-Id: 1')" -q
+
+    echo "file2" > f2.txt; git add f2.txt
+    git commit -m "Task 2$(printf '\n\nTarget-Id: 2')" -q
+
+    bash "$DISPATCH" apply >/dev/null
+
+    # Record original commit count on target 1
+    local orig_count
+    orig_count=$(git log --oneline master..source/feature-task-1 | wc -l | tr -d ' ')
+    assert_eq "1" "$orig_count" "target-1 has 1 commit before reset"
+
+    # Reset target 1 - should delete and recreate
+    local reset_output
+    reset_output=$(bash "$DISPATCH" apply --reset 1 2>&1)
+    assert_contains "$reset_output" "Deleted source/feature-task-1" "reports branch deletion"
+    assert_contains "$reset_output" "Created source/feature-task-1" "reports branch recreation"
+
+    # Branch still exists with correct content
+    assert_branch_exists "source/feature-task-1" "target-1 exists after reset"
+    local new_count
+    new_count=$(git log --oneline master..source/feature-task-1 | wc -l | tr -d ' ')
+    assert_eq "1" "$new_count" "target-1 still has 1 commit after reset"
+
+    # Target 2 was not affected
+    local count2
+    count2=$(git log --oneline master..source/feature-task-2 | wc -l | tr -d ' ')
+    assert_eq "1" "$count2" "target-2 unaffected by reset of target-1"
+
+    teardown
+}
+
 test_full_lifecycle() {
     echo "=== test: full lifecycle ==="
     setup
@@ -1424,6 +1464,7 @@ test_merge_conflict_resolve
 test_status_shows_diverged
 test_diff_shows_diverged_files
 test_diff_no_difference
+test_apply_reset_regenerates_target
 test_full_lifecycle
 
 echo ""

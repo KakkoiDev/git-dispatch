@@ -588,13 +588,14 @@ cmd_init() {
 cmd_apply() {
     _require_init
 
-    local dry_run=false resolve=false force=false
+    local dry_run=false resolve=false force=false reset_target=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)  dry_run=true; shift ;;
             --resolve)  resolve=true; shift ;;
             --force)    force=true; shift ;;
+            --reset)    reset_target="$2"; shift 2 ;;
             -*)         die "Unknown flag: $1" ;;
             *)          die "Unexpected argument: $1" ;;
         esac
@@ -640,6 +641,18 @@ cmd_apply() {
     if $dry_run; then
         echo -e "${CYAN}mode:${NC} $mode (targets branch from ${mode/independent/base}${mode/stacked/previous target})"
         echo ""
+    fi
+
+    # --reset <id>: delete the target branch so apply recreates it fresh
+    if [[ -n "$reset_target" ]]; then
+        local reset_branch
+        reset_branch=$(_target_branch_name "$reset_target")
+        if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
+            git branch -D "$reset_branch" 2>/dev/null
+            info "Deleted $reset_branch (will regenerate)"
+        else
+            warn "Branch $reset_branch does not exist, nothing to reset"
+        fi
     fi
 
     local prev_branch="$base"
@@ -1263,7 +1276,7 @@ cmd_status() {
         echo ""
         echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
         echo "  conflict resolution). Safe to ignore, or fix by regenerating the target:"
-        echo "  git branch -D <target-branch>  then  git dispatch apply"
+        echo "  git dispatch apply --reset <id>"
     fi
 }
 
@@ -1421,7 +1434,7 @@ WORKFLOW
 
 COMMANDS
   init      Configure dispatch on current source branch
-  apply     Make all targets match source (create/update)
+  apply     Make all targets match source (create/update). --reset <id> to regenerate.
   cherry-pick  Move commits between source and target (--from/--to)
   rebase    Rebase source onto base (--from base --to source)
   merge     Merge base into branches (--from base --to <source|id|all>)

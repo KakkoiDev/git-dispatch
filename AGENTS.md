@@ -27,7 +27,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve]` | Create/update target branches from source commits |
+| `git dispatch apply [--dry-run] [--resolve] [--reset <id>]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto updated base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
@@ -217,8 +217,7 @@ Source and target have diverged. Two sub-cases:
 **If tagged `(cosmetic)`** - same file content, different commit SHAs. Normal after conflict resolution. Safe to ignore, or fix by regenerating the target:
 
 ```bash
-git branch -D <target-branch>
-git dispatch apply
+git dispatch apply --reset <id>
 git dispatch push --from <id>
 ```
 
