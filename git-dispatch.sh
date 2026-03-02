@@ -660,6 +660,17 @@ cmd_apply() {
         local reset_branch
         reset_branch=$(_target_branch_name "$reset_target")
         if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
+            # Remove worktree if branch is checked out in one
+            local wt_path
+            wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$reset_branch" '
+                /^worktree / { path=$2 }
+                /^branch refs\/heads\// { if ($2 == "refs/heads/" b) print path }
+            ')
+            if [[ -n "$wt_path" ]]; then
+                git worktree remove --force "$wt_path" 2>/dev/null || true
+                git worktree prune 2>/dev/null || true
+                info "Removed worktree $wt_path"
+            fi
             local delete_err
             if delete_err=$(git branch -D "$reset_branch" 2>&1); then
                 info "Deleted $reset_branch (will regenerate)"
