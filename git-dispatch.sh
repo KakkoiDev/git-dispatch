@@ -210,7 +210,7 @@ _show_conflict_diff() {
         warn "Conflicted files:"
         echo "$conflicted" | while IFS= read -r f; do echo "  $f"; done
         echo ""
-        "${gcmd[@]}" diff 2>/dev/null
+        "${gcmd[@]}" diff 2>/dev/null || true
     fi
 }
 
@@ -366,7 +366,10 @@ cherry_pick_into() {
     if [[ -z "$wt" ]]; then
         local orig
         orig=$(current_branch)
-        git checkout "$branch" --quiet
+        local checkout_err
+        if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
+            die "Cannot checkout $branch: $checkout_err"
+        fi
     fi
 
     local stashed=false
@@ -769,19 +772,25 @@ cmd_apply() {
 
             local cherry_pick_failed=false
             for hash in "${hashes[@]}"; do
-                if ! git cherry-pick -x "$hash" 2>/dev/null; then
+                local cp_err
+                if ! cp_err=$(git cherry-pick -x "$hash" 2>&1); then
                     if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && git diff --cached --quiet; then
                         warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
                         git cherry-pick --skip
                         continue
                     fi
+                    warn "  Cherry-pick failed on $(git log -1 --oneline "$hash")"
+                    [[ -n "$cp_err" ]] && warn "  $cp_err"
                     git cherry-pick --abort 2>/dev/null || true
                     cherry_pick_failed=true
                     break
                 fi
             done
 
-            git checkout "$orig" --quiet
+            local checkout_err
+            if ! checkout_err=$(git checkout "$orig" --quiet 2>&1); then
+                warn "Could not return to $orig: $checkout_err"
+            fi
 
             # Set up stack metadata
             stack_add "$branch_name" "$parent_branch"
@@ -979,7 +988,10 @@ cmd_rebase() {
 
     local orig
     orig=$(current_branch)
-    git checkout "$source" --quiet
+    local checkout_err
+    if ! checkout_err=$(git checkout "$source" --quiet 2>&1); then
+        die "Cannot checkout $source: $checkout_err"
+    fi
 
     if ! git rebase "$base"; then
         echo ""
@@ -1073,7 +1085,12 @@ cmd_merge() {
             continue
         fi
 
-        git checkout "$branch" --quiet
+        local checkout_err
+        if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
+            warn "  Cannot checkout $branch: $checkout_err"
+            failed=$((failed + 1))
+            continue
+        fi
 
         if ! git merge "$base" --no-edit; then
             echo ""
