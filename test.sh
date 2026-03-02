@@ -386,6 +386,11 @@ test_apply_creates_targets() {
     src3=$(git config branch.source/feature-3.dispatchsource 2>/dev/null || true)
     assert_eq "source/feature" "$src3" "target-3 linked to source"
 
+    # No upstream tracking inherited from base
+    local upstream
+    upstream=$(git config branch.source/feature-3.remote 2>/dev/null || echo "none")
+    assert_eq "none" "$upstream" "target does not inherit upstream from base"
+
     teardown
 }
 
