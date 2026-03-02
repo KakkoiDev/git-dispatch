@@ -353,37 +353,43 @@ test_hook_auto_carry_no_override() {
     teardown
 }
 
-test_worktree_auto_installs_hooks() {
-    echo "=== test: dispatch auto-installs hooks in worktree ==="
+test_worktree_shares_hooks_via_hookspath() {
+    echo "=== test: worktree shares hooks via core.hooksPath ==="
     setup
     create_source
 
-    # Create a worktree on a new branch from the same commit
-    local wt_path="$TMPDIR/worktree-test"
-    git worktree add "$wt_path" -b wt-branch source/feature -q 2>/dev/null
-
-    # Remove hooks from worktree's git dir
-    local wt_git_dir
-    wt_git_dir=$(git -C "$wt_path" rev-parse --git-dir)
-    rm -f "$wt_git_dir/hooks/commit-msg" "$wt_git_dir/hooks/prepare-commit-msg"
-
-    # Verify hooks are missing
-    if [[ -f "$wt_git_dir/hooks/commit-msg" ]]; then
-        echo -e "  ${RED}FAIL${NC} hook should be absent before test"
-        FAIL=$((FAIL + 1))
-        git worktree remove --force "$wt_path" 2>/dev/null || true
-        teardown
-        return
-    fi
-
-    # Run any dispatch command from the worktree
-    (cd "$wt_path" && bash "$DISPATCH" status >/dev/null 2>&1)
-
-    if [[ -f "$wt_git_dir/hooks/commit-msg" ]] && [[ -f "$wt_git_dir/hooks/prepare-commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} hooks auto-installed in worktree"
+    # Verify core.hooksPath is set to an absolute path
+    local hooks_path
+    hooks_path=$(git config core.hooksPath 2>/dev/null || echo "")
+    if [[ -n "$hooks_path" ]] && [[ "$hooks_path" == /* ]] && [[ -f "$hooks_path/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} core.hooksPath is absolute with hooks"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} hooks not auto-installed in worktree"
+        echo -e "  ${RED}FAIL${NC} core.hooksPath not absolute or hooks missing (got: $hooks_path)"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # Create worktree from master (no Target-Id on HEAD) to test rejection
+    local wt_path="$TMPDIR/worktree-test"
+    git worktree add "$wt_path" -b wt-branch master -q 2>/dev/null
+
+    # Verify commit without Target-Id is rejected from the worktree
+    (cd "$wt_path" && echo "wt" > wt.txt && git add wt.txt)
+    local wt_err
+    if wt_err=$(git -C "$wt_path" commit -m "no trailer" 2>&1); then
+        echo -e "  ${RED}FAIL${NC} worktree should reject commit without Target-Id"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} worktree rejects commit without Target-Id"
+        PASS=$((PASS + 1))
+    fi
+
+    # Verify commit with Target-Id works from the worktree
+    if git -C "$wt_path" commit -m "with trailer" --trailer "Target-Id=1" -q 2>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC} worktree allows commit with Target-Id"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} worktree should allow commit with Target-Id"
         FAIL=$((FAIL + 1))
     fi
 
@@ -1543,7 +1549,7 @@ test_hook_rejects_non_numeric_target_id
 test_hook_allows_decimal_target_id
 test_hook_auto_carry_target_id
 test_hook_auto_carry_no_override
-test_worktree_auto_installs_hooks
+test_worktree_shares_hooks_via_hookspath
 test_apply_creates_targets
 test_apply_dry_run
 test_apply_incremental
