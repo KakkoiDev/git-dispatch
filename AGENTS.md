@@ -173,7 +173,7 @@ git dispatch merge --from base --to source --resolve
 
 **Status output tags:**
 - `(DIVERGED)` - file content actually differs between source and target. Changes may be lost.
-- `(same content, different commits)` - file content is identical but commit SHAs differ (normal after conflict resolution). Safe to ignore.
+- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore.
 
 **Scope:** Both `status` and `diff` only check files touched by commits with the matching Target-Id. This avoids false positives from generated files or other tasks' changes in independent mode, where targets branch from base and never contain other tasks' code.
 
@@ -214,7 +214,7 @@ git dispatch push --from all
 
 Source and target have diverged. Two sub-cases:
 
-**If tagged `(same content, different commits)`** - safe to ignore. Or fix with: `cherry-pick --from <id> --to source` then `apply`.
+**If tagged `(cosmetic)`** - safe to ignore. Or fix with: `cherry-pick --from <id> --to source` then `apply`.
 
 **If tagged `(DIVERGED)`** - changes were lost. Fix:
 

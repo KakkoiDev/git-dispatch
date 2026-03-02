@@ -1245,7 +1245,7 @@ cmd_status() {
                     diverge_tag=" ${RED}(DIVERGED)${NC}"
                     has_diverged=true
                 else
-                    diverge_tag=" (same content, different commits)"
+                    diverge_tag=" (cosmetic)"
                     has_cosmetic=true
                 fi
             fi
@@ -1261,8 +1261,8 @@ cmd_status() {
     fi
     if [[ "${has_cosmetic:-}" == "true" ]]; then
         echo ""
-        echo "  \"same content, different commits\" = file content is identical but commit"
-        echo "  SHAs differ (normal after conflict resolution). Safe to ignore, or fix with:"
+        echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
+        echo "  conflict resolution). Safe to ignore, or fix with:"
         echo "  git dispatch cherry-pick --from <id> --to source  then  git dispatch apply"
     fi
 }

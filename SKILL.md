@@ -107,7 +107,7 @@ All conflict commands (`cherry-pick`, `apply`, `rebase`, `merge`) show conflicte
 
 `status` tags targets that are both behind and ahead:
 - `(DIVERGED)` - file content actually differs (likely lost changes after manual conflict resolution)
-- `(same content, different commits)` - file content is identical but commit SHAs differ (normal after conflict resolution). Safe to ignore.
+- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore.
 
 Only files from that target's own commits are checked (avoids false positives from generated files in independent mode).
 
