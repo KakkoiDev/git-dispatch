@@ -14,7 +14,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run]` | Create/update target branches from source commits |
+| `git dispatch apply [--dry-run] [--resolve]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
@@ -88,19 +88,20 @@ git dispatch reset --force
 - `branch.<name>.dispatchtargets` - Target branches
 - `branch.<name>.dispatchsource` - Source branch
 
-## Installation
-
-```bash
-bash install.sh                # Creates git dispatch alias
-git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"   # Per-repo hooks + config
-```
-
 ## Conflict Handling
 
-All conflict commands (`cherry-pick`, `rebase`, `merge`) show conflicted files and diff on failure.
+All conflict commands (`cherry-pick`, `apply`, `rebase`, `merge`) show conflicted files and diff on failure.
 
 - **Default**: aborts cleanly, prints "Re-run with --resolve to keep conflict active"
 - **`--resolve`**: leaves conflict active for manual resolution, shows remaining work
+- Cherry-pick shows batch progress (commit X/Y) and lists remaining commits
+
+**Resolve workflow:**
+1. Run command with `--resolve` to keep conflict active
+2. Edit conflicted files, `git add` them
+3. Run the continue command shown in output (`cherry-pick --continue`, `rebase --continue`, or `commit`)
+4. Re-run the dispatch command for any remaining work
+5. Verify with `git dispatch status`
 
 ## Divergence Detection
 
@@ -108,8 +109,31 @@ All conflict commands (`cherry-pick`, `rebase`, `merge`) show conflicted files a
 - `(DIVERGED)` - file content actually differs (likely lost changes after manual conflict resolution)
 - `(cosmetic)` - same content, different SHAs
 
-Use `git dispatch diff --target <id>` to inspect what files diverged.
+Only files from that target's own commits are checked (avoids false positives from generated files in independent mode).
 
-## Recovery Tip
+**When DIVERGED appears:**
+```bash
+git dispatch diff --target <id>              # see what files diverged + resolution commands
+git dispatch cherry-pick --from <id> --to source --resolve   # bring target version to source
+# or
+git dispatch cherry-pick --from source --to <id>              # push source version to target
+git dispatch apply                           # sync everything
+```
 
-If `git dispatch apply` stops with "local changes would be overwritten by checkout", clean/stash/commit your local changes and run `git dispatch apply` again. The affected target will otherwise show as behind source.
+## Common Fixes
+
+| Problem | Fix |
+|---------|-----|
+| Target behind source | `git dispatch apply` or `cherry-pick --from source --to <id>` |
+| Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
+| DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
+| Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
+| Local changes block checkout | `git stash -u` then retry |
+| Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |
+
+## Installation
+
+```bash
+bash install.sh                # Creates git dispatch alias
+git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"   # Per-repo hooks + config
+```

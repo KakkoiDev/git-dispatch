@@ -157,12 +157,24 @@ _commit_semantically_in_branch() {
     return 1
 }
 
+# Get files touched by commits with a specific Target-Id on a branch.
+_target_id_files() {
+    local base="$1" branch="$2" tid="$3"
+    while IFS= read -r hash; do
+        local ctid
+        ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        [[ "$ctid" == "$tid" ]] && git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null
+    done < <(git log --format="%H" "$base..$branch")
+}
+
 # Check if source and target have diverged content (not just different SHAs).
+# Only checks files from commits with the matching Target-Id (avoids false
+# positives from generated files or other tasks' changes in independent mode).
 # Returns 0 if content actually differs, 1 if cosmetic only.
 _target_content_diverged() {
-    local source="$1" target_branch="$2" base="$3"
+    local source="$1" target_branch="$2" base="$3" tid="$4"
     local target_files
-    target_files=$(git log --format="" --name-only "$base..$target_branch" 2>/dev/null | grep . | sort -u)
+    target_files=$(_target_id_files "$base" "$target_branch" "$tid" | sort -u)
     [[ -n "$target_files" ]] || return 1
     # shellcheck disable=SC2086
     git diff --quiet "$source" "$target_branch" -- $target_files 2>/dev/null && return 1
@@ -1229,7 +1241,7 @@ cmd_status() {
 
             local diverge_tag=""
             if [[ $source_to_target -gt 0 && $target_to_source -gt 0 ]]; then
-                if _target_content_diverged "$source" "$branch_name" "$base"; then
+                if _target_content_diverged "$source" "$branch_name" "$base" "$tid"; then
                     diverge_tag=" ${RED}(DIVERGED)${NC}"
                     has_diverged=true
                 else
@@ -1274,10 +1286,10 @@ cmd_diff() {
         die "Target branch '$target_branch' does not exist locally."
 
     local target_files
-    target_files=$(git log --format="" --name-only "$base..$target_branch" 2>/dev/null | grep . | sort -u)
+    target_files=$(_target_id_files "$base" "$target_branch" "$target" | sort -u)
 
     if [[ -z "$target_files" ]]; then
-        info "No files changed on $target_branch"
+        info "No files changed by target $target on $target_branch"
         return
     fi
 
@@ -1293,6 +1305,12 @@ cmd_diff() {
         echo ""
         # shellcheck disable=SC2086
         git diff "$source" "$target_branch" -- $target_files 2>/dev/null
+        echo ""
+        echo -e "${CYAN}To resolve:${NC}"
+        echo "  git dispatch cherry-pick --from $target --to source --resolve   # bring target changes to source"
+        echo "  git dispatch cherry-pick --from source --to $target              # push source version to target"
+        echo -e "${CYAN}Then sync:${NC}"
+        echo "  git dispatch apply"
     fi
 }
 

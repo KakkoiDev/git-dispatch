@@ -1002,6 +1002,319 @@ test_apply_decimal_target_id() {
     teardown
 }
 
+# ---------- conflict handling tests ----------
+
+test_cherry_pick_conflict_shows_details() {
+    echo "=== test: cherry-pick conflict shows file details ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict: modify file.txt on target, then add conflicting source commit
+    git checkout source/feature-1 -q
+    echo "target-change" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modifies file" -q
+
+    git checkout source/feature -q
+    echo "source-change" > file.txt; git add file.txt
+    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
+
+    assert_contains "$output" "Conflict on commit" "shows conflict position"
+    assert_contains "$output" "Conflicted files" "shows conflicted files header"
+    assert_contains "$output" "file.txt" "shows conflicted filename"
+    assert_contains "$output" "Aborted" "shows abort message"
+    assert_contains "$output" "--resolve" "suggests --resolve flag"
+
+    teardown
+}
+
+test_cherry_pick_conflict_resolve_leaves_active() {
+    echo "=== test: cherry-pick --resolve leaves conflict active ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    echo "d" > d.txt; git add d.txt
+    git commit -m "Add d$(printf '\n\nTarget-Id: 1')" -q
+    echo "e" > e.txt; git add e.txt
+    git commit -m "Add e$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict on file.txt
+    git checkout source/feature-1 -q
+    echo "target-change" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modifies file" -q
+
+    git checkout source/feature -q
+    echo "source-change" > file.txt; git add file.txt
+    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    echo "f" > f.txt; git add f.txt
+    git commit -m "Add f$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
+
+    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
+    assert_contains "$output" "cherry-pick --continue" "shows continue command"
+    assert_contains "$output" "Remaining commits" "shows remaining commits"
+
+    # Verify conflict state is active (we should be on target branch)
+    if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC} CHERRY_PICK_HEAD exists (conflict active)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} CHERRY_PICK_HEAD missing (conflict not active)"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # Clean up conflict state
+    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+    git checkout source/feature -q 2>/dev/null || true
+
+    teardown
+}
+
+test_cherry_pick_conflict_batch_reporting() {
+    echo "=== test: cherry-pick conflict shows batch progress ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict on a.txt
+    git checkout source/feature-1 -q
+    echo "conflict" > a.txt; git add a.txt
+    git commit --no-verify -m "Target modifies a" -q
+
+    # Add 3 new source commits for target 1 - first will conflict
+    git checkout source/feature -q
+    echo "source-a" > a.txt; git add a.txt
+    git commit -m "Source modifies a$(printf '\n\nTarget-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Add c$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
+
+    assert_contains "$output" "Conflict on commit 1/3" "shows batch position"
+    assert_contains "$output" "Remaining commits" "lists remaining commits"
+
+    # Clean up
+    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+    git checkout source/feature -q 2>/dev/null || true
+
+    teardown
+}
+
+test_rebase_conflict_shows_details() {
+    echo "=== test: rebase conflict shows details ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Advance master with conflicting content
+    git checkout master -q
+    echo "conflict" > file.txt; git add file.txt
+    git commit --no-verify -m "Master changes file" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" rebase --from base --to source 2>&1) || true
+
+    assert_contains "$output" "Rebase conflict" "shows rebase conflict header"
+    assert_contains "$output" "Conflicted files" "shows conflicted files"
+    assert_contains "$output" "file.txt" "shows conflicted filename"
+    assert_contains "$output" "Aborted" "shows abort message"
+
+    teardown
+}
+
+test_rebase_conflict_resolve() {
+    echo "=== test: rebase --resolve leaves conflict active ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    git checkout master -q
+    echo "conflict" > file.txt; git add file.txt
+    git commit --no-verify -m "Master changes file" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" rebase --from base --to source --resolve 2>&1) || true
+
+    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
+    assert_contains "$output" "rebase --continue" "shows rebase continue command"
+
+    # Clean up rebase state
+    git rebase --abort 2>/dev/null || true
+
+    teardown
+}
+
+test_merge_conflict_shows_details() {
+    echo "=== test: merge conflict shows details ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    git checkout master -q
+    echo "conflict" > file.txt; git add file.txt
+    git commit --no-verify -m "Master changes file" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" merge --from base --to source 2>&1) || true
+
+    assert_contains "$output" "Merge conflict" "shows merge conflict header"
+    assert_contains "$output" "Conflicted files" "shows conflicted files"
+    assert_contains "$output" "file.txt" "shows conflicted filename"
+
+    teardown
+}
+
+test_merge_conflict_resolve() {
+    echo "=== test: merge --resolve leaves conflict active ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    git checkout master -q
+    echo "conflict" > file.txt; git add file.txt
+    git commit --no-verify -m "Master changes file" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" merge --from base --to source --resolve 2>&1) || true
+
+    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
+    assert_contains "$output" "git commit" "shows commit command"
+
+    # Clean up merge state
+    git merge --abort 2>/dev/null || true
+
+    teardown
+}
+
+# ---------- divergence detection tests ----------
+
+test_status_shows_diverged() {
+    echo "=== test: status detects DIVERGED targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create real divergence: different content on source and target
+    git checkout source/feature-1 -q
+    echo "target-version" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modification" -q
+
+    git checkout source/feature -q
+    echo "source-version" > file.txt; git add file.txt
+    git commit -m "Source modification$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "DIVERGED" "status shows DIVERGED tag"
+    assert_contains "$output" "git dispatch diff" "status shows diff hint"
+
+    teardown
+}
+
+test_diff_shows_diverged_files() {
+    echo "=== test: diff shows diverged files and resolution hints ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create divergence
+    git checkout source/feature-1 -q
+    echo "target-version" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modification" -q
+
+    git checkout source/feature -q
+    echo "source-version" > file.txt; git add file.txt
+    git commit -m "Source modification$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" diff --target 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "Files diverged" "diff shows diverged header"
+    assert_contains "$output" "file.txt" "diff shows diverged filename"
+    assert_contains "$output" "cherry-pick --from 1 --to source" "diff shows target-to-source resolution"
+    assert_contains "$output" "cherry-pick --from source --to 1" "diff shows source-to-target resolution"
+    assert_contains "$output" "git dispatch apply" "diff shows apply sync hint"
+
+    teardown
+}
+
+test_diff_no_difference() {
+    echo "=== test: diff reports no difference when in sync ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" diff --target 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "No content difference" "diff reports no difference"
+
+    teardown
+}
+
 # ---------- end-to-end lifecycle ----------
 
 test_full_lifecycle() {
@@ -1101,6 +1414,16 @@ test_reset_cleans_up
 test_help
 test_install_chmod
 test_apply_decimal_target_id
+test_cherry_pick_conflict_shows_details
+test_cherry_pick_conflict_resolve_leaves_active
+test_cherry_pick_conflict_batch_reporting
+test_rebase_conflict_shows_details
+test_rebase_conflict_resolve
+test_merge_conflict_shows_details
+test_merge_conflict_resolve
+test_status_shows_diverged
+test_diff_shows_diverged_files
+test_diff_no_difference
 test_full_lifecycle
 
 echo ""
