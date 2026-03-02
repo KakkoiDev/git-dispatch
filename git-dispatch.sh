@@ -752,8 +752,8 @@ cmd_apply() {
                 skipped=$((skipped + 1))
             fi
         else
-            # Create new target branch
-            git branch "$branch_name" "$parent_branch" 2>/dev/null || \
+            # Create new target branch (--no-track avoids inheriting upstream from base)
+            git branch --no-track "$branch_name" "$parent_branch" 2>/dev/null || \
                 die "Could not create branch $branch_name"
 
             local orig
