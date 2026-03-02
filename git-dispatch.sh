@@ -72,6 +72,63 @@ _require_init() {
     [[ -n "$base" ]] || die "Not initialized. Run: git dispatch init"
 }
 
+# Refresh the base ref to ensure targets branch from up-to-date base.
+# Handles both remote tracking refs (origin/master) and local branches (master).
+# Informs user when base was updated and warns on failure.
+_refresh_base() {
+    local base="$1"
+    local old_sha new_sha err_output
+
+    old_sha=$(git rev-parse "$base" 2>/dev/null) || {
+        warn "Base ref '$base' does not resolve - cannot refresh"
+        return 1
+    }
+
+    if [[ "$base" == */* ]]; then
+        # Remote tracking ref (e.g. origin/master) - fetch from remote
+        local remote="${base%%/*}"
+        local ref="${base#*/}"
+        if ! err_output=$(git fetch "$remote" "$ref" 2>&1); then
+            warn "Failed to fetch $base:"
+            warn "  $err_output"
+            warn "Targets will branch from local (possibly stale) ref"
+            return 1
+        fi
+    else
+        # Local branch (e.g. master) - pull --rebase to update if it has a remote
+        local current
+        current=$(current_branch)
+        # Only attempt pull if the branch has upstream tracking configured
+        local upstream
+        upstream=$(git config "branch.${base}.remote" 2>/dev/null || true)
+        if [[ -z "$upstream" ]]; then
+            # No remote tracking - local-only branch, nothing to refresh
+            return 0
+        fi
+        if ! git checkout "$base" --quiet 2>/dev/null; then
+            warn "Could not checkout $base to update - targets may branch from stale ref"
+            return 1
+        fi
+        if ! err_output=$(git pull --rebase 2>&1); then
+            warn "Failed to update $base:"
+            warn "  $err_output"
+            warn "Targets may branch from stale ref"
+            git rebase --abort 2>/dev/null || true
+            git checkout "$current" --quiet 2>/dev/null
+            return 1
+        fi
+        git checkout "$current" --quiet 2>/dev/null
+    fi
+
+    new_sha=$(git rev-parse "$base" 2>/dev/null) || return 0
+    if [[ "$old_sha" != "$new_sha" ]]; then
+        local count
+        count=$(git rev-list --count "$old_sha..$new_sha" 2>/dev/null || echo "?")
+        info "Base $base updated ($count new commits)"
+    fi
+    return 0
+}
+
 # Install hooks to the main repo .git/hooks and set core.hooksPath
 # so all worktrees share the same hooks.
 _install_hooks() {
@@ -608,6 +665,9 @@ cmd_apply() {
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch"
 
+    # Ensure base ref is up-to-date before creating/updating targets
+    _refresh_base "$base"
+
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file
     commit_file=$(mktemp)
@@ -971,6 +1031,9 @@ cmd_rebase() {
     base=$(_get_config base)
     source=$(resolve_source "")
 
+    # Ensure base ref is up-to-date before rebasing
+    _refresh_base "$base"
+
     # Check for open PRs on downstream targets
     if ! $force; then
         local pr_info
@@ -1057,6 +1120,9 @@ cmd_merge() {
     local base source
     base=$(_get_config base)
     source=$(resolve_source "")
+
+    # Ensure base ref is up-to-date before merging
+    _refresh_base "$base"
 
     # Build list of branches to merge into
     local -a branches=()

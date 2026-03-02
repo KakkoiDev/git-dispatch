@@ -1530,6 +1530,182 @@ test_full_lifecycle() {
     teardown
 }
 
+# ---------- refresh_base tests ----------
+
+# Helper: create a bare "remote" repo and configure origin
+setup_with_remote() {
+    TMPDIR=$(mktemp -d)
+    local bare_dir="$TMPDIR/bare.git"
+    git init --bare --initial-branch=master -q "$bare_dir"
+
+    cd "$TMPDIR"
+    git clone -q "$bare_dir" repo
+    cd repo
+    git commit --allow-empty -m "init" -q
+    git push -q origin master 2>/dev/null
+}
+
+teardown_with_remote() {
+    cd /
+    rm -rf "$TMPDIR"
+}
+
+test_refresh_base_fetches_remote() {
+    echo "=== test: apply fetches origin/master before creating targets ==="
+    setup_with_remote
+
+    # Create source and init with origin/master base
+    git checkout -b source/feature -q
+    bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+
+    # Simulate stale origin/master by pushing new commits from another clone
+    local other_clone="$TMPDIR/other"
+    git clone -q "$TMPDIR/bare.git" "$other_clone"
+    cd "$other_clone"
+    echo "upstream change" > upstream.txt; git add upstream.txt
+    git commit -m "upstream commit" -q
+    git push -q origin master 2>/dev/null
+    cd "$TMPDIR/repo"
+
+    # Record stale SHA
+    local stale_sha
+    stale_sha=$(git rev-parse origin/master)
+
+    # Apply should fetch and use updated origin/master
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    # Verify origin/master was updated
+    local fresh_sha
+    fresh_sha=$(git rev-parse origin/master)
+    assert_eq "false" "$([ "$stale_sha" = "$fresh_sha" ] && echo true || echo false)" "origin/master updated by apply"
+
+    # Verify the info message about base update
+    assert_contains "$output" "Base origin/master updated" "apply informs user about base update"
+
+    # Verify target branched from fresh base (contains upstream.txt)
+    local has_upstream_file
+    has_upstream_file=$(git ls-tree source/feature-1 --name-only | grep -c "upstream.txt" || true)
+    assert_eq "1" "$has_upstream_file" "target includes upstream commit from fresh base"
+
+    teardown_with_remote
+}
+
+test_refresh_base_noop_when_up_to_date() {
+    echo "=== test: apply does not report update when base is current ==="
+    setup_with_remote
+
+    git checkout -b source/feature -q
+    bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+
+    # No new upstream commits - base is already current
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_not_contains "$output" "Base origin/master updated" "no update message when base is current"
+
+    teardown_with_remote
+}
+
+test_refresh_base_local_branch_with_remote() {
+    echo "=== test: apply updates local base branch with remote tracking ==="
+    setup_with_remote
+
+    # Set up local master tracking origin/master (already done by clone)
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+
+    # Push upstream commit from another clone to advance origin/master
+    local other_clone="$TMPDIR/other"
+    git clone -q "$TMPDIR/bare.git" "$other_clone"
+    cd "$other_clone"
+    echo "upstream change" > upstream.txt; git add upstream.txt
+    git commit -m "upstream commit" -q
+    git push -q origin master 2>/dev/null
+    cd "$TMPDIR/repo"
+
+    # Apply should pull --rebase master and use updated base
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "Base master updated" "apply informs about local base update"
+
+    # Verify target branched from updated master (contains upstream.txt)
+    local has_upstream_file
+    has_upstream_file=$(git ls-tree source/feature-1 --name-only | grep -c "upstream.txt" || true)
+    assert_eq "1" "$has_upstream_file" "target includes upstream commit via local base pull"
+
+    teardown_with_remote
+}
+
+test_refresh_base_warns_on_fetch_failure() {
+    echo "=== test: apply warns when fetch fails ==="
+    setup
+
+    git checkout -b source/feature master -q
+    # Set base to a non-existent remote
+    git config dispatch.base "nonexistent/master"
+    git config dispatch.targetPattern "source/feature-{id}"
+    git config dispatch.mode "independent"
+
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+
+    # Apply should warn but not crash
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "does not resolve" "warns about unresolvable base ref"
+
+    teardown
+}
+
+test_rebase_refreshes_base() {
+    echo "=== test: rebase fetches origin/master before rebasing ==="
+    setup_with_remote
+
+    git checkout -b source/feature -q
+    bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+
+    # Push upstream commit from another clone
+    local other_clone="$TMPDIR/other"
+    git clone -q "$TMPDIR/bare.git" "$other_clone"
+    cd "$other_clone"
+    echo "upstream" > upstream.txt; git add upstream.txt
+    git commit -m "upstream commit" -q
+    git push -q origin master 2>/dev/null
+    cd "$TMPDIR/repo"
+
+    local stale_sha
+    stale_sha=$(git rev-parse origin/master)
+
+    # Rebase should fetch first
+    bash "$DISPATCH" rebase --from base --to source --force >/dev/null 2>&1
+
+    local fresh_sha
+    fresh_sha=$(git rev-parse origin/master)
+    assert_eq "false" "$([ "$stale_sha" = "$fresh_sha" ] && echo true || echo false)" "origin/master updated by rebase"
+
+    # Source should now contain the upstream commit
+    local has_upstream_file
+    has_upstream_file=$(git log --oneline source/feature | grep -c "upstream commit" || true)
+    assert_eq "1" "$has_upstream_file" "source includes upstream commit after rebase"
+
+    teardown_with_remote
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1592,6 +1768,11 @@ test_diff_no_difference
 test_status_semantic_source_to_target
 test_apply_reset_regenerates_target
 test_full_lifecycle
+test_refresh_base_fetches_remote
+test_refresh_base_noop_when_up_to_date
+test_refresh_base_local_branch_with_remote
+test_refresh_base_warns_on_fetch_failure
+test_rebase_refreshes_base
 
 echo ""
 echo "======================="
