@@ -70,6 +70,21 @@ _require_init() {
     local base
     base=$(_get_config base)
     [[ -n "$base" ]] || die "Not initialized. Run: git dispatch init"
+    _ensure_hooks
+}
+
+# Ensure hooks are present (auto-install in worktrees)
+_ensure_hooks() {
+    local hook_dir
+    hook_dir=$(git config core.hooksPath 2>/dev/null || echo "")
+    if [[ -z "$hook_dir" ]]; then
+        hook_dir="$(git rev-parse --git-dir)/hooks"
+    elif [[ "$hook_dir" != /* ]]; then
+        hook_dir="$(git rev-parse --show-toplevel)/$hook_dir"
+    fi
+    if [[ ! -f "$hook_dir/commit-msg" ]] || [[ ! -f "$hook_dir/prepare-commit-msg" ]]; then
+        _install_hooks
+    fi
 }
 
 # Install hooks (prepare-commit-msg + commit-msg only)

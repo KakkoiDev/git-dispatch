@@ -353,6 +353,44 @@ test_hook_auto_carry_no_override() {
     teardown
 }
 
+test_worktree_auto_installs_hooks() {
+    echo "=== test: dispatch auto-installs hooks in worktree ==="
+    setup
+    create_source
+
+    # Create a worktree on a new branch from the same commit
+    local wt_path="$TMPDIR/worktree-test"
+    git worktree add "$wt_path" -b wt-branch source/feature -q 2>/dev/null
+
+    # Remove hooks from worktree's git dir
+    local wt_git_dir
+    wt_git_dir=$(git -C "$wt_path" rev-parse --git-dir)
+    rm -f "$wt_git_dir/hooks/commit-msg" "$wt_git_dir/hooks/prepare-commit-msg"
+
+    # Verify hooks are missing
+    if [[ -f "$wt_git_dir/hooks/commit-msg" ]]; then
+        echo -e "  ${RED}FAIL${NC} hook should be absent before test"
+        FAIL=$((FAIL + 1))
+        git worktree remove --force "$wt_path" 2>/dev/null || true
+        teardown
+        return
+    fi
+
+    # Run any dispatch command from the worktree
+    (cd "$wt_path" && bash "$DISPATCH" status >/dev/null 2>&1)
+
+    if [[ -f "$wt_git_dir/hooks/commit-msg" ]] && [[ -f "$wt_git_dir/hooks/prepare-commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hooks auto-installed in worktree"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hooks not auto-installed in worktree"
+        FAIL=$((FAIL + 1))
+    fi
+
+    git worktree remove --force "$wt_path" 2>/dev/null || true
+    teardown
+}
+
 # ---------- apply tests ----------
 
 test_apply_creates_targets() {
@@ -1505,6 +1543,7 @@ test_hook_rejects_non_numeric_target_id
 test_hook_allows_decimal_target_id
 test_hook_auto_carry_target_id
 test_hook_auto_carry_no_override
+test_worktree_auto_installs_hooks
 test_apply_creates_targets
 test_apply_dry_run
 test_apply_incremental
