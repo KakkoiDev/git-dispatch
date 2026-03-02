@@ -1249,8 +1249,10 @@ cmd_status() {
         fi
 
         # Count pending source -> target
+        # Two-phase: cheap history check, then semantic filtering for candidates
         local source_to_target=0
         local cherry_out
+        local -a source_to_target_candidates=()
         cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
@@ -1258,8 +1260,28 @@ cmd_status() {
             hash=$(echo "$line" | awk '{print $2}')
             local ctid
             ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$ctid" == "$tid" ]] && source_to_target=$((source_to_target + 1))
+            [[ "$ctid" == "$tid" ]] && source_to_target_candidates+=("$hash")
         done <<< "$cherry_out"
+
+        if [[ ${#source_to_target_candidates[@]} -gt 0 ]]; then
+            # Fast path: check if file content matches for all files touched by candidate commits
+            local candidate_files=""
+            for hash in "${source_to_target_candidates[@]}"; do
+                candidate_files+=$'\n'"$(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)"
+            done
+            candidate_files=$(echo "$candidate_files" | sort -u | sed '/^$/d')
+
+            if [[ -n "$candidate_files" ]] && git diff --quiet "$source" "$branch_name" -- $candidate_files 2>/dev/null; then
+                source_to_target=0
+            else
+                for hash in "${source_to_target_candidates[@]}"; do
+                    if _commit_semantically_in_branch "$hash" "$branch_name"; then
+                        continue
+                    fi
+                    source_to_target=$((source_to_target + 1))
+                done
+            fi
+        fi
 
         # Count pending target -> source
         # Two-phase:
@@ -1282,12 +1304,24 @@ cmd_status() {
 
         # Only run semantic checks for branches that are history-ahead.
         if [[ ${#target_to_source_candidates[@]} -gt 0 ]]; then
+            # Fast path: check if file content matches for all candidate files
+            local t2s_files=""
             for hash in "${target_to_source_candidates[@]}"; do
-                if _commit_semantically_in_branch "$hash" "$source"; then
-                    continue
-                fi
-                target_to_source=$((target_to_source + 1))
+                t2s_files+=$'\n'"$(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)"
             done
+            t2s_files=$(echo "$t2s_files" | sort -u | sed '/^$/d')
+
+            # shellcheck disable=SC2086
+            if [[ -n "$t2s_files" ]] && git diff --quiet "$source" "$branch_name" -- $t2s_files 2>/dev/null; then
+                target_to_source=0
+            else
+                for hash in "${target_to_source_candidates[@]}"; do
+                    if _commit_semantically_in_branch "$hash" "$source"; then
+                        continue
+                    fi
+                    target_to_source=$((target_to_source + 1))
+                done
+            fi
         fi
 
         if [[ $source_to_target -eq 0 && $target_to_source -eq 0 ]]; then

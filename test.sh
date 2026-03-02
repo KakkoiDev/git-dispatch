@@ -581,10 +581,12 @@ test_apply_create_auto_resolves_with_theirs() {
     target_content=$(git show source/feature-1:generated.txt)
     assert_eq "source-v2" "$target_content" "target has source version of conflicted file"
 
-    # Status shows cosmetic (same content, different SHAs from --theirs resolution)
+    # Semantic check recognizes auto-resolved commits as equivalent - shows in sync
     local status_output
     status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-    assert_not_contains "$status_output" "DIVERGED" "no real divergence after auto-resolve"
+    assert_contains "$status_output" "in sync" "target in sync after auto-resolve (semantic match)"
+    assert_not_contains "$status_output" "behind" "not behind after auto-resolve"
+    assert_not_contains "$status_output" "DIVERGED" "no divergence after auto-resolve"
 
     teardown
 }
@@ -1362,6 +1364,31 @@ test_diff_no_difference() {
     teardown
 }
 
+test_status_semantic_source_to_target() {
+    echo "=== test: status uses semantic check for source->target ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Amend the target commit so it has a different SHA but same content
+    git checkout source/feature-1 -q
+    git commit --amend --no-edit -q --allow-empty
+    git checkout source/feature -q
+
+    # git cherry sees different patch-ids, but content is identical
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_contains "$status_output" "in sync" "semantic match detects equivalent content"
+    assert_not_contains "$status_output" "behind" "no false behind after amend"
+
+    teardown
+}
+
 # ---------- end-to-end lifecycle ----------
 
 test_apply_reset_regenerates_target() {
@@ -1512,6 +1539,7 @@ test_merge_conflict_resolve
 test_status_shows_diverged
 test_diff_shows_diverged_files
 test_diff_no_difference
+test_status_semantic_source_to_target
 test_apply_reset_regenerates_target
 test_full_lifecycle
 
