@@ -174,9 +174,60 @@ _get_open_prs() {
     done < <(find_dispatch_targets "$source")
 }
 
+# Show conflicted files and diff for any conflict (cherry-pick, merge, rebase)
+_show_conflict_diff() {
+    local wt_path="$1"
+    local -a gcmd=(git)
+    [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
+
+    local conflicted
+    conflicted=$("${gcmd[@]}" diff --name-only --diff-filter=U 2>/dev/null)
+    if [[ -n "$conflicted" ]]; then
+        warn "Conflicted files:"
+        echo "$conflicted" | while IFS= read -r f; do echo "  $f"; done
+        echo ""
+        "${gcmd[@]}" diff 2>/dev/null
+    fi
+}
+
+# Display conflict details for a failed cherry-pick
+_show_conflict_details() {
+    local wt_path="$1" failing_hash="$2" applied="$3" total="$4"
+
+    echo ""
+    warn "Conflict on commit $((applied + 1))/$total: $(git log -1 --oneline "$failing_hash")"
+    _show_conflict_diff "$wt_path"
+}
+
+# Handle cherry-pick conflict: show details, abort or leave for resolution
+_handle_cherry_pick_conflict() {
+    local wt_path="$1" failing_hash="$2" applied="$3" total="$4" resolve="$5" branch="$6"
+    shift 6
+    local remaining_hashes=("$@")
+    local -a gcmd=(git)
+    [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
+
+    _show_conflict_details "$wt_path" "$failing_hash" "$applied" "$total"
+
+    if [[ "$resolve" == "true" ]]; then
+        echo ""
+        warn "Resolve conflicts, then run: git cherry-pick --continue"
+        if [[ ${#remaining_hashes[@]} -gt 0 ]]; then
+            warn "Remaining commits to cherry-pick after resolution:"
+            for rh in "${remaining_hashes[@]}"; do
+                echo "  $(git log -1 --oneline "$rh")"
+            done
+        fi
+    else
+        "${gcmd[@]}" cherry-pick --abort 2>/dev/null || "${gcmd[@]}" reset --merge 2>/dev/null || true
+        echo ""
+        warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
+    fi
+}
+
 # Cherry-pick into a branch, adding Target-Id to commits that lack them
 _cherry_pick_with_trailers() {
-    local branch="$1" target_id="$2"; shift 2
+    local resolve="$1" branch="$2" target_id="$3"; shift 3
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
@@ -207,7 +258,8 @@ _cherry_pick_with_trailers() {
         fi
     fi
 
-    for hash in "${hashes[@]}"; do
+    for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
+        local hash="${hashes[$_idx]}"
         local tid
         tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
         if [[ "$tid" == "$target_id" ]]; then
@@ -220,10 +272,12 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
-                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-                die "Cherry-pick into $branch failed on $hash. Resolve manually."
+                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                if [[ "$resolve" != "true" ]]; then
+                    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                fi
+                exit 1
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         else
@@ -235,10 +289,12 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
-                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-                die "Cherry-pick into $branch failed on $hash. Resolve manually."
+                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                if [[ "$resolve" != "true" ]]; then
+                    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                fi
+                exit 1
             fi
             # Some no-op picks can succeed with --no-commit but stage nothing.
             # Treat them as empty cherry-picks instead of failing on commit.
@@ -276,7 +332,7 @@ _cherry_pick_with_trailers() {
 
 # Cherry-pick into a branch, worktree-aware
 cherry_pick_into() {
-    local branch="$1"; shift
+    local resolve="$1" branch="$2"; shift 2
     local hashes=("$@")
     local wt
     wt=$(worktree_for_branch "$branch")
@@ -295,7 +351,8 @@ cherry_pick_into() {
         stashed=true
     fi
 
-    for hash in "${hashes[@]}"; do
+    for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
+        local hash="${hashes[$_idx]}"
         if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
             if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
                 if "${git_cmd[@]}" diff --cached --quiet; then
@@ -304,10 +361,12 @@ cherry_pick_into() {
                     continue
                 fi
             fi
-            "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-            if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
-            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-            die "Cherry-pick into $branch failed. Resolve manually."
+            _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+            if [[ "$resolve" != "true" ]]; then
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+            fi
+            exit 1
         fi
     done
 
@@ -628,7 +687,7 @@ cmd_apply() {
             done <<< "$cherry_out"
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
-                cherry_pick_into "$branch_name" "${new_hashes[@]}"
+                cherry_pick_into "$resolve" "$branch_name" "${new_hashes[@]}"
                 info "  Updated $branch_name (${#new_hashes[@]} new commits)"
                 updated=$((updated + 1))
             else
@@ -758,7 +817,7 @@ cmd_cherry_pick() {
             return
         fi
 
-        cherry_pick_into "$target_branch" "${new_hashes[@]}"
+        cherry_pick_into "$resolve" "$target_branch" "${new_hashes[@]}"
         info "Cherry-picked ${#new_hashes[@]} commit(s) to $target_branch"
 
     else
@@ -803,7 +862,7 @@ cmd_cherry_pick() {
         fi
 
         # Cherry-pick with trailer addition
-        _cherry_pick_with_trailers "$source" "$from" "${new_hashes[@]}"
+        _cherry_pick_with_trailers "$resolve" "$source" "$from" "${new_hashes[@]}"
         if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
             info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
         else
@@ -865,9 +924,19 @@ cmd_rebase() {
     git checkout "$source" --quiet
 
     if ! git rebase "$base"; then
+        echo ""
+        warn "Rebase conflict on $source onto $base"
+        _show_conflict_diff ""
+        if $resolve; then
+            echo ""
+            warn "Resolve conflicts, then run: git rebase --continue"
+            exit 1
+        fi
         git rebase --abort 2>/dev/null || true
         [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-        die "Rebase conflict. Use --resolve or: git dispatch merge --from base --to source"
+        echo ""
+        warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
+        exit 1
     fi
 
     [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
@@ -949,8 +1018,12 @@ cmd_merge() {
         git checkout "$branch" --quiet
 
         if ! git merge "$base" --no-edit; then
+            echo ""
+            warn "Merge conflict on $branch from $base"
+            _show_conflict_diff ""
             if $resolve; then
-                warn "Merge conflict on $branch. Resolve, then: git commit"
+                echo ""
+                warn "Resolve conflicts, then run: git commit"
                 exit 1
             fi
             git merge --abort 2>/dev/null || true
