@@ -1139,8 +1139,8 @@ cmd_status() {
 
     echo -e "${CYAN}mode:${NC}   $mode"
     echo -e "${CYAN}base:${NC}   $base"
-    echo -e "${CYAN}target-pattern:${NC} ${target_pattern:-\"\"}"
     echo -e "${CYAN}source:${NC} $source"
+    echo -e "${CYAN}target-pattern:${NC} ${target_pattern:-\"\"}"
     echo ""
 
     local -a ordered=()
