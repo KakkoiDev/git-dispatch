@@ -688,6 +688,26 @@ cmd_init() {
     echo -e "  ${CYAN}target-pattern:${NC} $target_pattern"
 }
 
+# Run dispatch.postApply command on current branch, auto-commit changes
+_run_post_apply() {
+    local branch_name="$1" tid="$2"
+    local post_apply
+    post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+    [[ -n "$post_apply" ]] || return 0
+
+    info "  Running post-apply on $branch_name..."
+    if ! (eval "$post_apply") >/dev/null 2>&1; then
+        warn "  Post-apply command failed on $branch_name"
+        return 0
+    fi
+
+    if ! git diff --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        git add -A
+        git commit --quiet -m "chore: regenerate after apply (target $tid)"
+        info "  Committed regenerated files on $branch_name"
+    fi
+}
+
 # ---------- apply ----------
 
 cmd_apply() {
@@ -925,6 +945,14 @@ cmd_apply() {
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
                 cherry_pick_into "$resolve" "$branch_name" "${new_hashes[@]}"
+                # Post-apply regen
+                local post_apply
+                post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+                if [[ -n "$post_apply" ]]; then
+                    git checkout "$branch_name" --quiet
+                    _run_post_apply "$branch_name" "$tid"
+                    git checkout "$source" --quiet
+                fi
                 info "  Updated $branch_name (${#new_hashes[@]} new commits)"
                 updated=$((updated + 1))
             else
@@ -974,6 +1002,11 @@ cmd_apply() {
                 fi
             done
 
+            # Post-apply regen (while still on target branch)
+            if ! $cherry_pick_failed; then
+                _run_post_apply "$branch_name" "$tid"
+            fi
+
             local checkout_err
             if ! checkout_err=$(git checkout "$orig" --quiet 2>&1); then
                 warn "Could not return to $orig: $checkout_err"
@@ -1001,6 +1034,12 @@ cmd_apply() {
 
     echo ""
     if $dry_run; then
+        local post_apply
+        post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+        if [[ -n "$post_apply" ]]; then
+            echo -e "  ${CYAN}post-apply${NC}: $post_apply (runs on each updated target)"
+            echo ""
+        fi
         echo -e "${CYAN}Summary (dry-run):${NC} ${#target_ids[@]} targets"
     else
         local summary="$created created, $updated updated, $skipped in sync"
@@ -1786,6 +1825,13 @@ cmd_verify() {
         echo "  1. Move commits so dependent files share a Target-Id"
         echo "  2. Switch to stacked mode: git dispatch init --mode stacked ..."
         echo "  3. Accept and resolve conflicts during apply"
+        local pa
+        pa=$(git config dispatch.postApply 2>/dev/null || true)
+        if [[ -n "$pa" ]]; then
+            echo -e "  4. Auto-regen active: dispatch.postApply = ${GREEN}$pa${NC}"
+        else
+            echo "  4. Set auto-regen: git config dispatch.postApply '<your-regen-command>'"
+        fi
     else
         info "All ${#target_ids[@]} targets are file-independent."
     fi
@@ -1920,6 +1966,11 @@ TRAILERS
     git commit -m "message" --trailer "Target-Id=1"
 
   Hook auto-carries Target-Id from previous commit when absent.
+
+POST-APPLY
+  git config dispatch.postApply '<command>'
+  Run a command after each target update (e.g. regenerate OpenAPI specs).
+  Changes are auto-committed. Failures warn but don't abort apply.
 HELP
 }
 

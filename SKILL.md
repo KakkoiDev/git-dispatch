@@ -86,6 +86,7 @@ git dispatch reset --force
 - `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
+- `dispatch.postApply` - Command to run after each target update (e.g. `pnpm openapi`). Auto-commits changes. Failures warn only.
 - `branch.<name>.dispatchtargets` - Target branches
 - `branch.<name>.dispatchsource` - Source branch
 
@@ -132,6 +133,7 @@ git dispatch apply                           # sync everything
 | Stale target after tid reassignment | `git dispatch apply --force` to rebuild |
 | Cross-target file dependency | `git dispatch verify` to detect, then restructure or use stacked mode |
 | Generated file conflict on create | Auto-resolved with `--theirs` (takes source version) |
+| Generated files wrong after apply | `git config dispatch.postApply '<regen-command>'` to auto-regenerate per target |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
 | Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |

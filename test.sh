@@ -2001,6 +2001,114 @@ test_verify_before_apply() {
     teardown
 }
 
+test_apply_post_apply_creates_commit() {
+    echo "=== test: post-apply creates commit with generated files ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'echo "generated content" > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Check target has gen.txt committed
+    local gen_exists
+    gen_exists=$(git show target-3:gen.txt 2>/dev/null || echo "")
+    assert_eq "generated content" "$gen_exists" "gen.txt on target"
+
+    # Check commit message
+    local last_msg
+    last_msg=$(git log -1 --format="%s" target-3)
+    assert_eq "chore: regenerate after apply (target 3)" "$last_msg" "regen commit message"
+
+    teardown
+}
+
+test_apply_post_apply_no_changes_no_commit() {
+    echo "=== test: post-apply with no changes creates no commit ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'true'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Should only have the cherry-picked commit, no regen commit
+    local count
+    count=$(git log --oneline target-3 --not master | wc -l | tr -d ' ')
+    assert_eq "1" "$count" "no extra commit"
+
+    teardown
+}
+
+test_apply_post_apply_on_update() {
+    echo "=== test: post-apply runs on target update ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'date +%s%N > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local gen_v1
+    gen_v1=$(git show target-3:gen.txt 2>/dev/null || echo "")
+
+    # Add another commit and re-apply
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
+
+    sleep 0.1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local gen_v2
+    gen_v2=$(git show target-3:gen.txt 2>/dev/null || echo "")
+
+    # gen.txt should have changed (different timestamp)
+    assert_eq "1" "$([ "$gen_v1" != "$gen_v2" ] && echo 1 || echo 0)" "gen.txt updated on apply"
+
+    # Should have regen commits from both create and update
+    local regen_count
+    regen_count=$(git log --oneline target-3 --not master --grep="regenerate" | wc -l | tr -d ' ')
+    assert_eq "2" "$regen_count" "regen commits on create and update"
+
+    teardown
+}
+
+test_apply_post_apply_failure_continues() {
+    echo "=== test: post-apply failure does not abort apply ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'exit 1'
+
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    # Both targets should be created despite post-apply failure
+    assert_contains "$output" "Created target-3" "target-3 created"
+    assert_contains "$output" "Created target-4" "target-4 created"
+    assert_contains "$output" "Post-apply command failed" "failure warning shown"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2079,6 +2187,10 @@ test_verify_new_file_dep
 test_verify_shared_file_dep
 test_verify_stacked_mode_skips
 test_verify_before_apply
+test_apply_post_apply_creates_commit
+test_apply_post_apply_no_changes_no_commit
+test_apply_post_apply_on_update
+test_apply_post_apply_failure_continues
 
 echo ""
 echo "======================="

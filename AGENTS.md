@@ -102,6 +102,7 @@ Stored in git config:
 - `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
+- `dispatch.postApply` - Command to run after each target update (e.g. `pnpm openapi`). Changes auto-committed. Failures warn but don't abort.
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference
 
@@ -331,6 +332,15 @@ Target branches modify files created or edited by other targets. Cherry-pick wil
 ```bash
 git dispatch verify                    # detect dependencies before apply
 # Options: restructure commits, switch to stacked mode, or accept conflicts
+```
+
+### Scenario: Auto-generated files (OpenAPI, clients) conflict across targets
+
+Each target has different API surface, so cherry-picked generated files have wrong content.
+
+```bash
+git config dispatch.postApply 'pnpm openapi'   # regenerate after each target update
+git dispatch apply                               # regen runs automatically per target
 ```
 
 ### Scenario: Insert a new task between existing ones
