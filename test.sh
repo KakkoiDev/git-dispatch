@@ -2143,6 +2143,208 @@ test_cherry_pick_to_source_runs_post_apply() {
     teardown
 }
 
+test_cherry_pick_into_auto_resolves_with_theirs() {
+    echo "=== test: cherry_pick_into auto-resolves with --theirs when postApply configured ==="
+    setup
+
+    # Create a file on master that will conflict
+    echo "base-generated-content" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Base generated file" -q
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'echo "regen" > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Now modify generated.txt on source (will conflict with target's version from base)
+    echo "source-new-version" > generated.txt; git add generated.txt
+    git commit -m "Update generated$(printf '\n\nTarget-Id: 3')" -q
+
+    # Also advance target's generated.txt so it conflicts
+    git checkout target-3 -q
+    echo "target-diverged" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Target diverges generated" -q
+    git checkout source -q
+
+    # Apply should use cherry_pick_into for update and auto-resolve
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "Auto-resolved conflict" "cherry_pick_into reports auto-resolution"
+
+    # Target should have source version of generated.txt
+    local target_content
+    target_content=$(git show target-3:generated.txt)
+    assert_eq "source-new-version" "$target_content" "target has source version after auto-resolve"
+
+    teardown
+}
+
+test_cherry_pick_with_trailers_auto_resolves_matching_tid() {
+    echo "=== test: _cherry_pick_with_trailers auto-resolves matching tid with --theirs ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'echo "regen" > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Commit directly on target with conflicting generated file
+    git checkout target-3 -q
+    echo "target-gen" > generated.txt; git add generated.txt
+    git commit -m "Target generated$(printf '\n\nTarget-Id: 3')" -q
+    git checkout source -q
+
+    # Also create conflicting generated file on source
+    echo "source-gen" > generated.txt; git add generated.txt
+    git commit -m "Source generated$(printf '\n\nTarget-Id: 3')" -q
+
+    # Cherry-pick from target to source - uses _cherry_pick_with_trailers with matching tid
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from 3 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    # The target commit has a conflicting generated.txt, should auto-resolve
+    # Check that source has the cherry-picked file (target version via --theirs)
+    local source_gen
+    source_gen=$(git show source:generated.txt 2>/dev/null || echo "")
+    # After --theirs, the cherry-picked commit's version wins
+    assert_eq "target-gen" "$source_gen" "source has cherry-picked version after auto-resolve"
+
+    teardown
+}
+
+test_cherry_pick_with_trailers_auto_resolves_non_matching_tid() {
+    echo "=== test: _cherry_pick_with_trailers auto-resolves non-matching tid with --theirs ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'echo "regen" > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Commit on target-4 with a different tid that has conflicting content
+    git checkout target-4 -q
+    echo "target-gen" > generated.txt; git add generated.txt
+    git commit -m "Target generated$(printf '\n\nTarget-Id: 4')" -q
+    git checkout source -q
+
+    # Create conflicting file on source with DIFFERENT tid (will go through non-matching path)
+    echo "source-gen" > generated.txt; git add generated.txt
+    git commit -m "Source generated$(printf '\n\nTarget-Id: 3')" -q
+
+    # Cherry-pick from target-4 to source
+    # The target commit has tid=4, but on source it gets rewritten - non-matching tid path
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from 4 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    # Source should have the cherry-picked content
+    local source_gen
+    source_gen=$(git show source:generated.txt 2>/dev/null || echo "")
+    assert_eq "target-gen" "$source_gen" "source has cherry-picked version via non-matching tid auto-resolve"
+
+    teardown
+}
+
+test_apply_from_target_branch() {
+    echo "=== test: apply works from target branch via resolve_source ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    assert_branch_exists "target-3" "target-3 created on first apply"
+
+    # Add new commit on source
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
+
+    # Switch to target branch and run apply from there
+    git checkout target-3 -q
+
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    # Target should have the new commit
+    local target_has_b
+    target_has_b=$(git show target-3:b.txt 2>/dev/null || echo "")
+    assert_eq "b" "$target_has_b" "target updated when apply run from target branch"
+
+    teardown
+}
+
+test_apply_skips_base_ancestor_commits() {
+    echo "=== test: apply skips commits that are ancestors of base ==="
+    setup
+
+    # Create a commit on master that will also be reachable from source
+    echo "shared" > shared.txt; git add shared.txt
+    git commit --no-verify -m "Shared commit on master" -q
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Apply should succeed (base ancestor commits are skipped)
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_branch_exists "target-3" "target created despite base-ancestor commits in range"
+    assert_not_contains "$output" "Error" "no error from base-ancestor commits"
+
+    teardown
+}
+
+test_cherry_pick_no_auto_resolve_without_post_apply() {
+    echo "=== test: cherry-pick does not auto-resolve without postApply configured ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    # NOTE: no dispatch.postApply configured
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Create conflicting content
+    git checkout target-3 -q
+    echo "target-version" > conflict.txt; git add conflict.txt
+    git commit --no-verify -m "Target conflict" -q
+    git checkout source -q
+
+    echo "source-version" > conflict.txt; git add conflict.txt
+    git commit -m "Source conflict$(printf '\n\nTarget-Id: 3')" -q
+
+    # Apply should fail with conflict (no auto-resolve without postApply)
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_not_contains "$output" "Auto-resolved" "no auto-resolve without postApply"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2226,6 +2428,12 @@ test_apply_post_apply_no_changes_no_commit
 test_apply_post_apply_on_update
 test_apply_post_apply_failure_continues
 test_cherry_pick_to_source_runs_post_apply
+test_cherry_pick_into_auto_resolves_with_theirs
+test_cherry_pick_with_trailers_auto_resolves_matching_tid
+test_cherry_pick_with_trailers_auto_resolves_non_matching_tid
+test_apply_from_target_branch
+test_apply_skips_base_ancestor_commits
+test_cherry_pick_no_auto_resolve_without_post_apply
 
 echo ""
 echo "======================="

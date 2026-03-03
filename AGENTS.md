@@ -163,15 +163,23 @@ git dispatch merge --from base --to source --resolve
 # Verify with git dispatch status
 ```
 
-### Apply auto-resolves conflicts on fresh targets
+### Auto-resolve generated file conflicts
 
-When creating new target branches (not updating), `apply` retries conflicting cherry-picks with `--strategy-option theirs`. This auto-resolves conflicts by taking the source commit's version, which is correct since the target is a fresh branch from base with no manual work to preserve.
+When `dispatch.postApply` is configured, all cherry-pick operations auto-resolve conflicts with `--strategy-option theirs` before falling through to manual conflict handling. This covers:
 
-This commonly happens with generated files (OpenAPI specs, swagger.json) in independent mode where base and source have diverged.
+- **`apply`** - both fresh target creation and updates to existing targets
+- **`cherry-pick`** - propagation between source and targets (`cherry_pick_into`)
+- **`_cherry_pick_with_trailers`** - trailer-rewriting cherry-picks (both matching and non-matching tid paths)
 
-After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless - file content is identical.
+This commonly happens with generated files (OpenAPI specs, swagger.json) in independent mode where base and source have diverged. The postApply command regenerates them after apply, so the --theirs version is temporary.
 
-**Note:** Auto-resolve only applies during initial target creation. Updates to existing targets use normal cherry-pick and will show conflicts for manual resolution.
+After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless - file content is identical after postApply regeneration.
+
+**Without `dispatch.postApply`**: normal conflict behavior (abort or --resolve for manual resolution).
+
+### Apply works from target branches
+
+`apply` resolves the source branch via `dispatchsource` config, so it can be run from any target branch without switching to source first. It also skips commits that are ancestors of the base branch (already integrated).
 
 ### Apply interrupted by local changes
 
