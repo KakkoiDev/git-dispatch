@@ -2109,6 +2109,40 @@ test_apply_post_apply_failure_continues() {
     teardown
 }
 
+test_cherry_pick_to_source_runs_post_apply() {
+    echo "=== test: cherry-pick --to source runs post-apply ==="
+    setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    git config dispatch.postApply 'echo "generated" > gen.txt'
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Commit directly on target
+    git checkout target-3 -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "Hotfix on target$(printf '\n\nTarget-Id: 3')" -q
+    git checkout source -q
+
+    bash "$DISPATCH" cherry-pick --from 3 --to source >/dev/null 2>&1
+
+    # Source should have gen.txt from post-apply
+    local gen_exists
+    gen_exists=$(git show source:gen.txt 2>/dev/null || echo "")
+    assert_eq "generated" "$gen_exists" "post-apply ran on source"
+
+    # Regen commit should exist on source
+    local regen_count
+    regen_count=$(git log --oneline source --not master --grep="regenerate" | wc -l | tr -d ' ')
+    assert_eq "1" "$regen_count" "regen commit on source"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2191,6 +2225,7 @@ test_apply_post_apply_creates_commit
 test_apply_post_apply_no_changes_no_commit
 test_apply_post_apply_on_update
 test_apply_post_apply_failure_continues
+test_cherry_pick_to_source_runs_post_apply
 
 echo ""
 echo "======================="

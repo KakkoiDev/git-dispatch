@@ -1159,6 +1159,7 @@ cmd_cherry_pick() {
         if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
             info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
         else
+            _run_post_apply "$source" "source"
             info "Cherry-picked ${DISPATCH_LAST_PICKED} commit(s) from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} skipped)"
         fi
     fi
