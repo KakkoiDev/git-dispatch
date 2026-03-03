@@ -392,6 +392,17 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
+                # Auto-resolve with --theirs when postApply is configured (generated files)
+                local _post_apply
+                _post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+                if [[ -n "$_post_apply" ]]; then
+                    "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
+                        continue
+                    fi
+                fi
                 _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
                 if [[ "$resolve" != "true" ]]; then
                     if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
@@ -409,12 +420,30 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
-                if [[ "$resolve" != "true" ]]; then
-                    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
-                    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                # Auto-resolve with --theirs when postApply is configured (generated files)
+                local _post_apply2
+                _post_apply2=$(git config dispatch.postApply 2>/dev/null || true)
+                if [[ -n "$_post_apply2" ]]; then
+                    "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if "${git_cmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        # Fall through to commit with trailer rewrite below
+                    else
+                        _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        if [[ "$resolve" != "true" ]]; then
+                            if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                        fi
+                        exit 1
+                    fi
+                else
+                    _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                    if [[ "$resolve" != "true" ]]; then
+                        if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                        if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+                    fi
+                    exit 1
                 fi
-                exit 1
             fi
             # Some no-op picks can succeed with --no-commit but stage nothing.
             # Treat them as empty cherry-picks instead of failing on commit.
@@ -481,6 +510,16 @@ cherry_pick_into() {
                 if "${git_cmd[@]}" diff --cached --quiet; then
                     warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
                     "${git_cmd[@]}" cherry-pick --skip
+                    continue
+                fi
+            fi
+            # Auto-resolve with --theirs when postApply is configured (generated files)
+            local post_apply
+            post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+            if [[ -n "$post_apply" ]]; then
+                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
+                if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
+                    warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
                     continue
                 fi
             fi
@@ -689,21 +728,25 @@ cmd_init() {
 }
 
 # Run dispatch.postApply command on current branch, auto-commit changes
+# $1=branch_name $2=tid $3=optional worktree path
 _run_post_apply() {
-    local branch_name="$1" tid="$2"
+    local branch_name="$1" tid="$2" wt_path="${3:-}"
+    local -a gcmd=(git)
+    [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
     local post_apply
     post_apply=$(git config dispatch.postApply 2>/dev/null || true)
     [[ -n "$post_apply" ]] || return 0
 
+    local run_dir="${wt_path:-.}"
     info "  Running post-apply on $branch_name..."
-    if ! (eval "$post_apply") >/dev/null 2>&1; then
+    if ! (cd "$run_dir" && eval "$post_apply") >/dev/null 2>&1; then
         warn "  Post-apply command failed on $branch_name"
         return 0
     fi
 
-    if ! git diff --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-        git add -A
-        git commit --quiet -m "chore: regenerate after apply (target $tid)"
+    if ! "${gcmd[@]}" diff --quiet 2>/dev/null || [[ -n "$("${gcmd[@]}" ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+        "${gcmd[@]}" add -A
+        "${gcmd[@]}" commit --quiet -m "chore: regenerate after apply (target $tid)"
         info "  Committed regenerated files on $branch_name"
     fi
 }
@@ -729,8 +772,8 @@ cmd_apply() {
     local base mode source
     base=$(_get_config base)
     mode=$(_get_config mode)
-    source=$(current_branch)
-    [[ -n "$source" ]] || die "Not on a branch"
+    source=$(resolve_source "")
+    [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
 
     # Ensure base ref is up-to-date before creating/updating targets
     _refresh_base "$base"
@@ -746,6 +789,8 @@ cmd_apply() {
         local _pc
         _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
         (( _pc > 2 )) && continue
+        # Skip commits from base (already integrated)
+        git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
         local _t
         _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"
