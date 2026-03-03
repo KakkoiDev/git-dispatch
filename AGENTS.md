@@ -33,7 +33,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
-| `git dispatch diff --target <id>` | Show file-level diff between source and a target |
+| `git dispatch diff --to <id>` | Show file-level diff between source and a target |
 | `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset [--force]` | Delete target branches and dispatch config |
 | `git dispatch help` | Show usage guide |
@@ -190,7 +190,7 @@ After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a
 
 **When you see DIVERGED, always run:**
 ```bash
-git dispatch diff --target <id>
+git dispatch diff --to <id>
 ```
 
 This shows:
@@ -238,7 +238,7 @@ git dispatch push --from <id>
 
 ```bash
 # 1. Inspect what diverged
-git dispatch diff --target <id>
+git dispatch diff --to <id>
 
 # 2. Decide direction:
 #    Target has the correct version -> bring to source:

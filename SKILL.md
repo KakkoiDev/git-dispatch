@@ -20,7 +20,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
-| `git dispatch diff --target <id>` | Show file-level diff between source and a target |
+| `git dispatch diff --to <id>` | Show file-level diff between source and a target |
 | `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset [--force]` | Delete target branches and config |
 | `git dispatch help` | Show usage guide |
@@ -114,7 +114,7 @@ Only files from that target's own commits are checked (avoids false positives fr
 
 **When DIVERGED appears:**
 ```bash
-git dispatch diff --target <id>              # see what files diverged + resolution commands
+git dispatch diff --to <id>              # see what files diverged + resolution commands
 git dispatch cherry-pick --from <id> --to source --resolve   # bring target version to source
 # or
 git dispatch cherry-pick --from source --to <id>              # push source version to target
@@ -127,7 +127,7 @@ git dispatch apply                           # sync everything
 |---------|-----|
 | Target behind source | `git dispatch apply` or `cherry-pick --from source --to <id>` |
 | Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
-| DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
+| DIVERGED after conflict | `diff --to <id>` then cherry-pick in the right direction |
 | Cosmetic divergence | Safe to ignore, or `git dispatch apply --reset <id>` |
 | Stale target after tid reassignment | `git dispatch apply --force` to rebuild |
 | Cross-target file dependency | `git dispatch verify` to detect, then restructure or use stacked mode |

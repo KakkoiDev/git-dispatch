@@ -1413,7 +1413,7 @@ test_diff_shows_diverged_files() {
     git commit -m "Source modification$(printf '\n\nTarget-Id: 1')" -q
 
     local output
-    output=$(bash "$DISPATCH" diff --target 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    output=$(bash "$DISPATCH" diff --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     assert_contains "$output" "Files diverged" "diff shows diverged header"
     assert_contains "$output" "file.txt" "diff shows diverged filename"
@@ -1436,7 +1436,7 @@ test_diff_no_difference() {
     bash "$DISPATCH" apply >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" diff --target 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    output=$(bash "$DISPATCH" diff --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     assert_contains "$output" "No content difference" "diff reports no difference"
 

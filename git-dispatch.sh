@@ -1593,7 +1593,7 @@ cmd_status() {
     if [[ "${has_diverged:-}" == "true" ]]; then
         echo ""
         warn "Diverged targets have different file content than source."
-        warn "Run: git dispatch diff --target <id>  to inspect."
+        warn "Run: git dispatch diff --to <id>  to inspect."
     fi
     if [[ "${has_cosmetic:-}" == "true" ]]; then
         echo ""
@@ -1616,13 +1616,13 @@ cmd_diff() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --target) target="$2"; shift 2 ;;
-            -*)       die "Unknown flag: $1" ;;
-            *)        die "Unexpected argument: $1" ;;
+            --to) target="$2"; shift 2 ;;
+            -*)   die "Unknown flag: $1" ;;
+            *)    die "Unexpected argument: $1" ;;
         esac
     done
 
-    [[ -n "$target" ]] || die "Missing --target <id>"
+    [[ -n "$target" ]] || die "Missing --to <id>"
 
     local base source target_branch
     base=$(_get_config base)
