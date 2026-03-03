@@ -577,10 +577,11 @@ _target_branch_name() {
 # ---------- init ----------
 
 cmd_init() {
-    local base="" target_pattern="" mode="independent"
+    local base="" target_pattern="" mode="independent" hooks_only=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --hooks)  hooks_only=true; shift ;;
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   mode="$2"; shift 2 ;;
@@ -589,6 +590,11 @@ cmd_init() {
             *)        die "Unexpected argument: $1" ;;
         esac
     done
+
+    if $hooks_only; then
+        _install_hooks
+        return
+    fi
 
     [[ "$mode" == "independent" || "$mode" == "stacked" ]] || \
         die "Invalid mode '$mode'. Use: independent or stacked"
@@ -1570,11 +1576,14 @@ git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
   git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
+  git dispatch init --hooks
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
   Defaults: --mode independent.
   Required: --base (recommended: "origin/master").
   Required: --target-pattern (must include "{id}"), e.g. "user/feat/task-{id}".
+
+  --hooks installs only the commit hooks (useful in worktrees).
 
 WORKFLOW
   1. Tag every commit with a Target-Id trailer:

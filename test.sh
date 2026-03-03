@@ -239,6 +239,36 @@ test_init_installs_hooks() {
     teardown
 }
 
+test_init_hooks_only() {
+    echo "=== test: init --hooks installs hooks without config ==="
+    setup
+
+    bash "$DISPATCH" init --hooks >/dev/null 2>&1
+
+    local hooks_path
+    hooks_path=$(git config core.hooksPath 2>/dev/null || echo "")
+    if [[ -n "$hooks_path" ]] && [[ -f "$hooks_path/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hooks installed via --hooks"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hooks not installed"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # No dispatch config should exist
+    local base
+    base=$(git config dispatch.base 2>/dev/null || echo "")
+    if [[ -z "$base" ]]; then
+        echo -e "  ${GREEN}PASS${NC} no dispatch config created"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} dispatch config should not exist"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
 # ---------- hook tests ----------
 
 test_hook_rejects_missing_trailer() {
@@ -1719,6 +1749,7 @@ test_init_stacked_mode
 test_init_custom_pattern
 test_init_reinit_warns
 test_init_installs_hooks
+test_init_hooks_only
 test_hook_rejects_missing_trailer
 test_hook_allows_valid_trailer
 test_hook_rejects_non_numeric_target_id
