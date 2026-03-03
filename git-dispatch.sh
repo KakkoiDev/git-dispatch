@@ -236,6 +236,47 @@ _target_content_diverged() {
     return 0
 }
 
+# Extract Target-Id from a branch name by reversing the target-pattern.
+_extract_tid_from_branch() {
+    local branch="$1"
+    local pattern
+    pattern=$(_get_config targetPattern)
+    local prefix="${pattern%%\{id\}*}"
+    local suffix="${pattern#*\{id\}}"
+    local tid="${branch#$prefix}"
+    [[ -n "$suffix" ]] && tid="${tid%$suffix}"
+    echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$' && echo "$tid"
+}
+
+# Build a patch-id map from source commits.
+# Input: commit_file with "hash tid" per line.
+# Output: map_file with "patch-id hash tid" per line.
+_build_source_patch_id_map() {
+    local map_file="$1" commit_file="$2"
+    > "$map_file"
+    while read -r hash tid; do
+        [[ -n "$hash" ]] || continue
+        local pid
+        pid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+        [[ -n "$pid" ]] && echo "$pid $hash $tid" >> "$map_file"
+    done < "$commit_file"
+}
+
+# Find stale commits on a target branch (content matches source with different Target-Id).
+# Outputs "target_hash source_tid" for each stale commit.
+_find_stale_commits() {
+    local branch="$1" tid="$2" base="$3" map_file="$4"
+    while read -r hash; do
+        [[ -n "$hash" ]] || continue
+        local pid
+        pid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+        [[ -n "$pid" ]] || continue
+        local match_tid
+        match_tid=$(awk -v p="$pid" '$1 == p {print $3; exit}' "$map_file")
+        [[ -n "$match_tid" && "$match_tid" != "$tid" ]] && echo "$hash $match_tid"
+    done < <(git log --format="%H" "$base..$branch" 2>/dev/null)
+}
+
 # Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
 _get_open_prs() {
     local source="$1"
@@ -675,9 +716,10 @@ cmd_apply() {
     _refresh_base "$base"
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
-    local commit_file
+    local commit_file patch_map_file
     commit_file=$(mktemp)
-    trap "rm -f '$commit_file'" RETURN
+    patch_map_file=$(mktemp)
+    trap "rm -f '$commit_file' '$patch_map_file'" RETURN
 
     while IFS= read -r _h; do
         # Skip merge commits (they have no Target-Id and that's expected)
@@ -704,6 +746,80 @@ cmd_apply() {
     while IFS= read -r tid; do
         target_ids+=("$tid")
     done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
+
+    # --- Stale target detection ---
+    _build_source_patch_id_map "$patch_map_file" "$commit_file"
+
+    local -a stale_branches=() stale_tids=() stale_counts=() stale_target_only=()
+    while IFS= read -r existing; do
+        [[ -n "$existing" ]] || continue
+        local etid
+        etid=$(_extract_tid_from_branch "$existing")
+        [[ -n "$etid" ]] || continue
+
+        # Skip targets whose tid is still in source
+        local still_active=false
+        for t in "${target_ids[@]}"; do
+            [[ "$t" == "$etid" ]] && { still_active=true; break; }
+        done
+        $still_active && continue
+
+        # tid no longer in source - check for reassignment via patch-id
+        local stale_out
+        stale_out=$(_find_stale_commits "$existing" "$etid" "$base" "$patch_map_file") || true
+        local sc=0
+        [[ -n "$stale_out" ]] && sc=$(echo "$stale_out" | wc -l | tr -d ' ')
+        local total
+        total=$(git rev-list --count "$base..$existing" 2>/dev/null || echo 0)
+        local to=$((total - sc))
+        [[ $to -lt 0 ]] && to=0
+
+        stale_branches+=("$existing")
+        stale_tids+=("$etid")
+        stale_counts+=("$sc")
+        stale_target_only+=("$to")
+    done < <(find_dispatch_targets "$source")
+
+    if [[ ${#stale_branches[@]} -gt 0 ]]; then
+        echo ""
+        warn "Stale targets detected (Target-Id reassigned on source):"
+        echo ""
+        for i in "${!stale_branches[@]}"; do
+            local sb="${stale_branches[$i]}"
+            local st="${stale_tids[$i]}"
+            local sc="${stale_counts[$i]}"
+            local to="${stale_target_only[$i]}"
+            echo -e "  ${RED}${sb}${NC} (tid ${st})"
+            [[ $sc -gt 0 ]] && echo "    ${sc} commit(s) reassigned to different Target-Id"
+            [[ $to -gt 0 ]] && echo -e "    ${RED}${to} target-only commit(s) will be lost${NC}"
+        done
+        echo ""
+        if $dry_run; then
+            for sb in "${stale_branches[@]}"; do
+                echo -e "  ${YELLOW}would rebuild${NC} ${sb}"
+            done
+            echo ""
+        elif $force; then
+            for sb in "${stale_branches[@]}"; do
+                local wt_path
+                wt_path=$(worktree_for_branch "$sb")
+                if [[ -n "$wt_path" ]]; then
+                    git worktree remove --force "$wt_path" 2>/dev/null || true
+                    git worktree prune 2>/dev/null || true
+                fi
+                local parent
+                parent=$(find_stack_parent "$sb" 2>/dev/null || true)
+                [[ -n "$parent" ]] && stack_remove "$sb" "$parent"
+                git config --remove-section "branch.${sb}" 2>/dev/null || true
+                git branch -D "$sb" 2>/dev/null || true
+                info "  Deleted stale ${sb}"
+            done
+            echo ""
+        else
+            warn "Run: git dispatch apply --force  to rebuild stale targets."
+            exit 1
+        fi
+    fi
 
     if $dry_run; then
         echo -e "${CYAN}mode:${NC} $mode (targets branch from ${mode/independent/base}${mode/stacked/previous target})"
@@ -1291,11 +1407,19 @@ cmd_status() {
 
     # Also find Target-Ids in source that don't have branches yet
     local -a source_tids=()
+    local status_commit_file status_map_file
+    status_commit_file=$(mktemp)
+    status_map_file=$(mktemp)
+    trap "rm -f '$status_commit_file' '$status_map_file'" RETURN
     while IFS= read -r _h; do
         local _t
         _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
-        [[ -n "$_t" ]] && source_tids+=("$_t")
+        if [[ -n "$_t" ]]; then
+            source_tids+=("$_t")
+            echo "$_h $_t" >> "$status_commit_file"
+        fi
     done < <(git log --format="%H" "$base..$source")
+    _build_source_patch_id_map "$status_map_file" "$status_commit_file"
     # Unique sorted
     local -a unique_tids=()
     while IFS= read -r t; do
@@ -1328,6 +1452,17 @@ cmd_status() {
 
         if ! git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
             printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created\n" "$tid" "$branch_name"
+            continue
+        fi
+
+        # Check for stale commits (reassigned to different tid)
+        local stale_out
+        stale_out=$(_find_stale_commits "$branch_name" "$tid" "$base" "$status_map_file") || true
+        local stale_count=0
+        [[ -n "$stale_out" ]] && stale_count=$(echo "$stale_out" | wc -l | tr -d ' ')
+        if [[ $stale_count -gt 0 ]]; then
+            printf "  ${RED}%-${max_tid}s${NC}  %-${max_branch}s  ${RED}stale (%d commit(s) reassigned)${NC}${pr_suffix}\n" "$tid" "$branch_name" "$stale_count"
+            has_stale=true
             continue
         fi
 
@@ -1429,6 +1564,32 @@ cmd_status() {
         fi
     done
 
+    # Detect orphaned targets (tid no longer in source)
+    local -a orphaned_branches=() orphaned_tids=()
+    while IFS= read -r existing; do
+        [[ -n "$existing" ]] || continue
+        local etid
+        etid=$(_extract_tid_from_branch "$existing")
+        [[ -n "$etid" ]] || continue
+        local found=false
+        for t in "${unique_tids[@]}"; do
+            [[ "$t" == "$etid" ]] && { found=true; break; }
+        done
+        $found && continue
+        orphaned_branches+=("$existing")
+        orphaned_tids+=("$etid")
+    done < <(find_dispatch_targets "$source")
+
+    if [[ ${#orphaned_branches[@]} -gt 0 ]]; then
+        echo ""
+        warn "Stale targets (Target-Id no longer in source):"
+        for i in "${!orphaned_branches[@]}"; do
+            printf "  ${RED}%-${max_tid}s${NC}  %-${max_branch}s  ${RED}stale (all commits reassigned)${NC}\n" \
+                "${orphaned_tids[$i]}" "${orphaned_branches[$i]}"
+        done
+        has_stale=true
+    fi
+
     if [[ "${has_diverged:-}" == "true" ]]; then
         echo ""
         warn "Diverged targets have different file content than source."
@@ -1439,6 +1600,10 @@ cmd_status() {
         echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
         echo "  conflict resolution). Safe to ignore, or fix by regenerating the target:"
         echo "  git dispatch apply --reset <id>"
+    fi
+    if [[ "${has_stale:-}" == "true" ]]; then
+        echo ""
+        warn "Run: git dispatch apply --force  to rebuild stale targets."
     fi
 }
 
@@ -1605,7 +1770,8 @@ WORKFLOW
 
 COMMANDS
   init      Configure dispatch on current source branch
-  apply     Make all targets match source (create/update). --reset <id> to regenerate.
+  apply     Make all targets match source (create/update). Detects stale targets
+            after Target-Id reassignment. --reset <id> to regenerate.
   cherry-pick  Move commits between source and target (--from/--to)
   rebase    Rebase source onto base (--from base --to source)
   merge     Merge base into branches (--from base --to <source|id|all>)
@@ -1616,7 +1782,7 @@ COMMANDS
 FLAGS (on propagation commands)
   --dry-run   Show plan, make no changes
   --resolve   Enter conflict resolution mode
-  --force     Override safety checks
+  --force     Override safety checks (apply: rebuild stale targets)
 
 TRAILERS
   Target-Id (required): numeric integer or decimal (1, 2, 1.5)

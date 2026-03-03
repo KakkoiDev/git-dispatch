@@ -1736,6 +1736,162 @@ test_rebase_refreshes_base() {
     teardown_with_remote
 }
 
+test_apply_detects_stale_after_reassignment() {
+    echo "=== test: apply detects stale target after tid reassignment ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nTarget-Id: 8')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    assert_eq "true" "$(git rev-parse --verify refs/heads/target-8 &>/dev/null && echo true || echo false)" "target-8 exists after apply"
+
+    # Rewrite source with different tid (simulates rebase + trailer change)
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nTarget-Id: 15')" -q
+
+    # Apply should detect stale and fail without --force
+    local output exit_code=0
+    output=$(bash "$DISPATCH" apply 2>&1) || exit_code=$?
+
+    assert_contains "$output" "Stale targets detected" "shows stale warning"
+    assert_contains "$output" "target-8" "mentions stale branch"
+    assert_eq "1" "$exit_code" "exits with code 1 without --force"
+    assert_eq "true" "$(git rev-parse --verify refs/heads/target-8 &>/dev/null && echo true || echo false)" "target-8 not deleted without --force"
+
+    teardown
+}
+
+test_apply_force_rebuilds_stale() {
+    echo "=== test: apply --force rebuilds stale targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nTarget-Id: 8')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Rewrite source with different tid
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nTarget-Id: 15')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --force 2>&1)
+
+    # target-8 should be deleted
+    assert_eq "false" "$(git rev-parse --verify refs/heads/target-8 &>/dev/null && echo true || echo false)" "target-8 deleted"
+    # target-15 should be created
+    assert_eq "true" "$(git rev-parse --verify refs/heads/target-15 &>/dev/null && echo true || echo false)" "target-15 created"
+    # target-15 should have the commits
+    local count
+    count=$(git log --oneline master..target-15 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "target-15 has 2 commits"
+
+    teardown
+}
+
+test_status_shows_stale() {
+    echo "=== test: status shows stale indicator ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Rewrite source with different tid
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1)
+
+    assert_contains "$output" "stale" "shows stale indicator"
+    assert_contains "$output" "target-8" "mentions stale branch"
+    assert_contains "$output" "apply --force" "suggests --force"
+
+    teardown
+}
+
+test_apply_stale_warns_target_only_commits() {
+    echo "=== test: apply warns about target-only commits on stale targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Add a target-only commit on target-8
+    git checkout target-8 -q
+    echo "target only" > t.txt; git add t.txt
+    git commit -m "Target-only commit" -q
+    git checkout source -q
+
+    # Rewrite source with different tid
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" apply 2>&1) || exit_code=$?
+
+    assert_contains "$output" "target-only" "warns about target-only commits"
+    assert_eq "1" "$exit_code" "exits with code 1"
+
+    teardown
+}
+
+test_apply_stale_dry_run() {
+    echo "=== test: apply --dry-run shows stale without changes ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Rewrite source with different tid
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1)
+
+    assert_contains "$output" "Stale targets detected" "shows stale warning"
+    assert_contains "$output" "would rebuild" "shows would rebuild"
+    assert_eq "true" "$(git rev-parse --verify refs/heads/target-8 &>/dev/null && echo true || echo false)" "target-8 not deleted in dry-run"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1804,6 +1960,11 @@ test_refresh_base_noop_when_up_to_date
 test_refresh_base_local_branch_with_remote
 test_refresh_base_warns_on_fetch_failure
 test_rebase_refreshes_base
+test_apply_detects_stale_after_reassignment
+test_apply_force_rebuilds_stale
+test_status_shows_stale
+test_apply_stale_warns_target_only_commits
+test_apply_stale_dry_run
 
 echo ""
 echo "======================="
