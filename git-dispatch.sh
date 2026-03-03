@@ -1645,6 +1645,15 @@ cmd_status() {
         echo ""
         warn "Run: git dispatch apply --force  to rebuild stale targets."
     fi
+
+    local post_apply
+    post_apply=$(git config dispatch.postApply 2>/dev/null || true)
+    if [[ -n "$post_apply" ]]; then
+        echo ""
+        echo -e "${CYAN}post-apply:${NC} $post_apply"
+        echo "  Runs automatically on apply and cherry-pick --to source."
+        echo "  After manual cherry-picks, run: $post_apply && git add -A && git commit -m 'chore: regenerate'"
+    fi
 }
 
 # ---------- diff ----------
