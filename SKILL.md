@@ -21,6 +21,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
 | `git dispatch diff --target <id>` | Show file-level diff between source and a target |
+| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset [--force]` | Delete target branches and config |
 | `git dispatch help` | Show usage guide |
 
@@ -129,6 +130,7 @@ git dispatch apply                           # sync everything
 | DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
 | Cosmetic divergence | Safe to ignore, or `git dispatch apply --reset <id>` |
 | Stale target after tid reassignment | `git dispatch apply --force` to rebuild |
+| Cross-target file dependency | `git dispatch verify` to detect, then restructure or use stacked mode |
 | Generated file conflict on create | Auto-resolved with `--theirs` (takes source version) |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |

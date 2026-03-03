@@ -1892,6 +1892,115 @@ test_apply_stale_dry_run() {
     teardown
 }
 
+# ---------- verify ----------
+
+test_verify_no_deps() {
+    echo "=== test: verify reports no deps when targets touch different files ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "schema" > schema.ts; git add schema.ts
+    git commit -m "Add schema$(printf '\n\nTarget-Id: 3')" -q
+    echo "endpoint" > endpoint.ts; git add endpoint.ts
+    git commit -m "Add endpoint$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "file-independent" "reports all targets independent"
+
+    teardown
+}
+
+test_verify_new_file_dep() {
+    echo "=== test: verify detects new file dependency ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "export const auth = true" > auth.ts; git add auth.ts
+    git commit -m "Add auth$(printf '\n\nTarget-Id: 3')" -q
+    echo "import auth" > api.ts; git add api.ts
+    echo "// updated" >> auth.ts; git add auth.ts
+    git commit -m "Add API using auth$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "new file" "detects new file dependency"
+    assert_contains "$output" "auth.ts" "names the dependent file"
+    assert_contains "$output" "target 3" "names the introducing target"
+
+    teardown
+}
+
+test_verify_shared_file_dep() {
+    echo "=== test: verify detects shared file dependency ==="
+    setup
+
+    # Create a file on base
+    echo "base content" > shared.ts; git add shared.ts
+    git commit -m "Add shared file" -q
+
+    git checkout -b source/feature master -q
+    echo "change A" >> shared.ts; git add shared.ts
+    git commit -m "Modify shared A$(printf '\n\nTarget-Id: 3')" -q
+    echo "change B" >> shared.ts; git add shared.ts
+    git commit -m "Modify shared B$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "shared file" "detects shared file dependency"
+    assert_contains "$output" "shared.ts" "names the shared file"
+
+    teardown
+}
+
+test_verify_stacked_mode_skips() {
+    echo "=== test: verify skips in stacked mode ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "inherit parent changes" "skips with stacked mode message"
+
+    teardown
+}
+
+test_verify_before_apply() {
+    echo "=== test: verify works before apply (no target branches needed) ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Do NOT run apply - verify should still work
+    local output
+    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "file-independent" "works without apply"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -1965,6 +2074,11 @@ test_apply_force_rebuilds_stale
 test_status_shows_stale
 test_apply_stale_warns_target_only_commits
 test_apply_stale_dry_run
+test_verify_no_deps
+test_verify_new_file_dep
+test_verify_shared_file_dep
+test_verify_stacked_mode_skips
+test_verify_before_apply
 
 echo ""
 echo "======================="

@@ -66,6 +66,7 @@ Independent mode eliminates the industry-wide force-push problem. Each target br
 | `git dispatch merge --from base --to source` | Merge base into source (safe, no rewrite) |
 | `git dispatch push --from <id\|all\|source>` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state |
+| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset` | Delete target branches and dispatch config |
 | `git dispatch help` | Show usage guide |
 
@@ -391,7 +392,7 @@ git dispatch init --base origin/master --target-pattern "$(git branch --show-cur
 ## Testing
 
 ```bash
-bash test.sh    # 167 tests
+bash test.sh    # 175 tests
 ```
 
 ## Requirements

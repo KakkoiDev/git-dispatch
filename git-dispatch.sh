@@ -1661,6 +1661,136 @@ cmd_diff() {
     fi
 }
 
+# ---------- verify ----------
+
+cmd_verify() {
+    _require_init
+
+    local base mode source
+    base=$(_get_config base)
+    mode=$(_get_config mode)
+    source=$(resolve_source "")
+
+    if [[ "$mode" == "stacked" ]]; then
+        info "Stacked mode: targets inherit parent changes. No cross-dependencies to check."
+        return
+    fi
+
+    # Parse source commits (same pattern as cmd_apply)
+    local commit_file
+    commit_file=$(mktemp)
+    local files_dir
+    files_dir=$(mktemp -d)
+    local base_files
+    base_files=$(mktemp)
+    local introducer_file
+    introducer_file=$(mktemp)
+    trap "rm -rf '$commit_file' '$files_dir' '$base_files' '$introducer_file'" RETURN
+
+    while IFS= read -r _h; do
+        local _pc
+        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
+        (( _pc > 2 )) && continue
+        local _t
+        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        echo "$_h $_t"
+    done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
+
+    [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
+
+    # Ordered unique target ids
+    local -a target_ids=()
+    while IFS= read -r tid; do
+        target_ids+=("$tid")
+    done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
+
+    # Phase 1: Build per-target file sets + track introducers
+    git ls-tree -r --name-only "$base" > "$base_files" 2>/dev/null || true
+
+    while read -r hash tid; do
+        [[ -n "$hash" ]] || continue
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            echo "$file" >> "$files_dir/$tid"
+            # Track first introducer for new files
+            if ! grep -Fxq "$file" "$base_files" 2>/dev/null; then
+                if ! grep -q "^${file} " "$introducer_file" 2>/dev/null; then
+                    echo "$file $tid" >> "$introducer_file"
+                fi
+            fi
+        done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
+    done < "$commit_file"
+
+    # Deduplicate per-target file lists
+    for tid in "${target_ids[@]}"; do
+        [[ -f "$files_dir/$tid" ]] && sort -u "$files_dir/$tid" -o "$files_dir/$tid"
+    done
+
+    # Phase 2: Detect cross-dependencies
+    local has_deps=false
+    local clean_count=0
+
+    echo -e "${CYAN}Cross-dependency analysis (independent mode):${NC}"
+    echo ""
+
+    for tid_a in "${target_ids[@]}"; do
+        [[ -f "$files_dir/$tid_a" ]] || { clean_count=$((clean_count + 1)); continue; }
+        local -a deps=()
+
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            if ! grep -Fxq "$file" "$base_files" 2>/dev/null; then
+                # New file - check introducer
+                local intro_tid
+                intro_tid=$(awk -v f="$file" '$0 ~ "^"f" " {print $NF; exit}' "$introducer_file")
+                [[ -n "$intro_tid" && "$intro_tid" != "$tid_a" ]] && \
+                    deps+=("${intro_tid}|new|${file}")
+            else
+                # Shared file - check other targets
+                for tid_b in "${target_ids[@]}"; do
+                    [[ "$tid_b" == "$tid_a" ]] && continue
+                    if [[ -f "$files_dir/$tid_b" ]] && grep -Fxq "$file" "$files_dir/$tid_b" 2>/dev/null; then
+                        deps+=("${tid_b}|shared|${file}")
+                    fi
+                done
+            fi
+        done < "$files_dir/$tid_a"
+
+        if [[ ${#deps[@]} -gt 0 ]]; then
+            has_deps=true
+            local branch_name
+            branch_name=$(_target_branch_name "$tid_a")
+            printf "  ${YELLOW}%-6s${NC}  %s  depends on:\n" "$tid_a" "$branch_name"
+            for dep in "${deps[@]}"; do
+                IFS='|' read -r dtid dtype dfile <<< "$dep"
+                if [[ "$dtype" == "new" ]]; then
+                    printf "    target %-4s  ${RED}new file${NC}: %s\n" "$dtid" "$dfile"
+                else
+                    printf "    target %-4s  ${CYAN}shared file${NC}: %s\n" "$dtid" "$dfile"
+                fi
+            done
+        else
+            clean_count=$((clean_count + 1))
+        fi
+    done
+
+    echo ""
+    if $has_deps; then
+        local dep_count=$(( ${#target_ids[@]} - clean_count ))
+        echo -e "${CYAN}Summary:${NC} $dep_count target(s) with cross-dependencies, $clean_count clean"
+        echo ""
+        echo "New file dependencies will cause cherry-pick failures on apply."
+        echo "Shared file modifications may cause CI failures on targets."
+        echo ""
+        echo -e "${CYAN}Options:${NC}"
+        echo "  1. Move commits so dependent files share a Target-Id"
+        echo "  2. Switch to stacked mode: git dispatch init --mode stacked ..."
+        echo "  3. Accept and resolve conflicts during apply"
+    else
+        info "All ${#target_ids[@]} targets are file-independent."
+    fi
+}
+
 # ---------- reset ----------
 
 cmd_reset() {
@@ -1777,6 +1907,7 @@ COMMANDS
   merge     Merge base into branches (--from base --to <source|id|all>)
   push      Push branches (--from <id|all|source>)
   status    Show mode, base, source, and all targets with sync state
+  verify    Detect cross-target file dependencies (independent mode)
   reset     Delete all dispatch metadata and target branches
 
 FLAGS (on propagation commands)
@@ -1807,6 +1938,7 @@ main() {
         push)         cmd_push "$@" ;;
         status)       cmd_status "$@" ;;
         diff)         cmd_diff "$@" ;;
+        verify)       cmd_verify "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;

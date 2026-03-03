@@ -34,6 +34,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
 | `git dispatch diff --target <id>` | Show file-level diff between source and a target |
+| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset [--force]` | Delete target branches and dispatch config |
 | `git dispatch help` | Show usage guide |
 
@@ -322,6 +323,15 @@ git dispatch push --from all
 ```
 
 If stale targets have target-only commits (added directly on target), apply warns they will be lost.
+
+### Scenario: Cross-target file dependencies in independent mode
+
+Target branches modify files created or edited by other targets. Cherry-pick will fail on apply.
+
+```bash
+git dispatch verify                    # detect dependencies before apply
+# Options: restructure commits, switch to stacked mode, or accept conflicts
+```
 
 ### Scenario: Insert a new task between existing ones
 
