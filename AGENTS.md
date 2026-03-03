@@ -27,7 +27,7 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--reset <id>]` | Create/update target branches from source commits |
+| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto updated base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
@@ -303,6 +303,25 @@ git branch -d <target-branch>
 # Or reset everything
 git dispatch reset --force
 ```
+
+### Scenario: Target-Id reassigned on source (stale target)
+
+After rebase or amend that changes a commit's Target-Id (e.g., from 8 to 15), the old target becomes stale.
+
+```bash
+git dispatch status
+#  8  target-8  stale (all commits reassigned)
+
+git dispatch apply
+# Stale targets detected (Target-Id reassigned on source):
+#   target-8 (tid 8)
+# Run: git dispatch apply --force  to rebuild stale targets.
+
+git dispatch apply --force    # deletes target-8, creates target-15
+git dispatch push --from all
+```
+
+If stale targets have target-only commits (added directly on target), apply warns they will be lost.
 
 ### Scenario: Insert a new task between existing ones
 

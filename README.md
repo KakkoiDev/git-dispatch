@@ -197,10 +197,12 @@ Recommended base: `origin/master` (or your remote default branch).
 ### apply
 
 ```bash
-git dispatch apply [--dry-run]
+git dispatch apply [--dry-run] [--force] [--reset <id>]
 ```
 
 Create or update target branches from source commits grouped by Target-Id. First run creates all branches. Subsequent runs cherry-pick only new commits. Idempotent and safe.
+
+Detects stale targets after Target-Id reassignment (e.g., rebase to move commits from tid 8 to 15). Uses `git patch-id` to match target commits against source by content. Without `--force`, reports stale targets and exits. With `--force`, deletes stale targets and recreates them.
 
 If `apply` is interrupted by local uncommitted changes during branch switch, one or more targets may remain behind source (for example `1 behind source`). Fix by cleaning/stashing local changes and re-running `git dispatch apply`.
 
@@ -267,6 +269,25 @@ git dispatch reset [--force]
 ```
 
 Delete all target branches, dispatch config, and hooks. Asks for confirmation unless `--force`.
+
+### Stale Target Detection
+
+When a commit's Target-Id trailer is changed on source (e.g., during interactive rebase), `apply` detects that the old target branch is stale:
+
+```bash
+git dispatch status
+#  8  target-8  stale (all commits reassigned)
+
+git dispatch apply
+# Stale targets detected (Target-Id reassigned on source):
+#   target-8 (tid 8)
+#     2 commit(s) reassigned to different Target-Id
+# Run: git dispatch apply --force  to rebuild stale targets.
+
+git dispatch apply --force    # deletes target-8, creates target-15
+```
+
+If stale targets have target-only commits (added directly on the target), apply warns they will be lost.
 
 ## Adding a Target Mid-Stack
 
@@ -370,7 +391,7 @@ git dispatch init --base origin/master --target-pattern "$(git branch --show-cur
 ## Testing
 
 ```bash
-bash test.sh    # 93 tests
+bash test.sh    # 167 tests
 ```
 
 ## Requirements

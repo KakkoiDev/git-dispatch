@@ -14,7 +14,7 @@ Code on source -> apply into target branches -> push PRs -> sync both ways.
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--reset <id>]` | Create/update target branches from source commits |
+| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update target branches from source commits |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
@@ -128,6 +128,7 @@ git dispatch apply                           # sync everything
 | Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
 | DIVERGED after conflict | `diff --target <id>` then cherry-pick in the right direction |
 | Cosmetic divergence | Safe to ignore, or `git dispatch apply --reset <id>` |
+| Stale target after tid reassignment | `git dispatch apply --force` to rebuild |
 | Generated file conflict on create | Auto-resolved with `--theirs` (takes source version) |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
