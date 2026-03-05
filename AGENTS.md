@@ -27,8 +27,8 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update target branches from source commits |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and targets |
+| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL target branches from source commits |
+| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and a single target (or all) |
 | `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto updated base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
 | `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
@@ -37,6 +37,17 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
 | `git dispatch reset [--force]` | Delete target branches and dispatch config |
 | `git dispatch help` | Show usage guide |
+
+## Apply vs Cherry-pick
+
+| Want | Command |
+|------|---------|
+| Create new targets + update all | `git dispatch apply` |
+| Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
+| Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
+| Regenerate one target from scratch | `git dispatch apply --reset <id>` |
+
+`apply` is the only command that creates new target branches. For updating a single existing target, use `cherry-pick --from source --to <id>`.
 
 ## Workflow
 
