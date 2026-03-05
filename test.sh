@@ -2222,6 +2222,189 @@ test_apply_skips_base_ancestor_commits() {
 }
 
 
+test_resolve_warns_about_dangling_stash() {
+    echo "=== test: --resolve warns about dangling auto-stash ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict
+    git checkout source/feature-1 -q
+    echo "target-change" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modifies file" -q
+
+    git checkout source/feature -q
+    # Create dirty working tree so stash is needed
+    echo "dirty" > untracked.txt
+    echo "source-change" > file.txt; git add file.txt
+    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
+
+    assert_contains "$output" "auto-stashed" "warns about dangling stash on --resolve"
+
+    # Clean up conflict state
+    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+    git checkout source/feature -q 2>/dev/null || true
+    git stash drop 2>/dev/null || true
+
+    teardown
+}
+
+test_cherry_pick_stash_before_checkout() {
+    echo "=== test: cherry-pick stashes with --include-untracked before checkout ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add new source commit to cherry-pick
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+
+    # Create untracked file that would block checkout
+    echo "untracked" > untracked.txt
+
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
+
+    # Should succeed (stash handled untracked file)
+    assert_not_contains "$output" "error" "cherry-pick succeeds with untracked files"
+
+    # Untracked file should still be present after stash pop
+    if [[ -f "untracked.txt" ]]; then
+        echo -e "  ${GREEN}PASS${NC} untracked file restored after cherry-pick"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} untracked file not restored after cherry-pick"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_merge_worktree_aware() {
+    echo "=== test: merge handles worktree branches ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add a commit to master (base) to have something to merge
+    git checkout master -q
+    echo "base-update" > base.txt; git add base.txt
+    git commit --no-verify -m "Update base" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" merge --from base --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "Merged" "merge into target succeeds"
+    assert_not_contains "$output" "error" "no errors"
+
+    teardown
+}
+
+test_apply_warns_base_drift() {
+    echo "=== test: apply warns when source is behind base ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add commits to base (master) so source falls behind
+    git checkout master -q
+    echo "new" > new.txt; git add new.txt
+    git commit --no-verify -m "New base commit" -q
+    git checkout source/feature -q
+
+    # Add a new source commit to trigger the update path
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "behind" "warns source is behind base"
+    assert_contains "$output" "merge --from base" "suggests merge command"
+
+    teardown
+}
+
+test_status_shows_untracked_commits() {
+    echo "=== test: status shows untracked commits on target ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add commit on target without proper Target-Id trailer
+    # Must unset prepare-commit-msg to avoid auto-carry of Target-Id
+    git checkout source/feature-1 -q
+    echo "extra" > extra.txt; git add extra.txt
+    GIT_AUTHOR_DATE="2020-01-01T00:00:00" git -c core.hooksPath=/dev/null commit -m "Extra commit without trailer" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "untracked" "shows untracked commits in status"
+
+    teardown
+}
+
+test_stash_pop_conflict_warns() {
+    echo "=== test: stash pop conflict warns user ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Modify file on source (staged but not committed)
+    echo "staged-change" > file.txt; git add file.txt
+
+    # Add new source commit that modifies the same file
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+
+    # The stash will contain staged file.txt changes
+    # Cherry-pick should handle stash pop gracefully
+    local output
+    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
+
+    # Should not crash - either succeeds or warns about pop conflict
+    assert_not_contains "$output" "fatal" "no fatal error from stash handling"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2308,6 +2491,12 @@ test_target_id_none_dry_run_display
 test_source_keep_force_accepts_conflict
 test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails
+test_resolve_warns_about_dangling_stash
+test_cherry_pick_stash_before_checkout
+test_merge_worktree_aware
+test_apply_warns_base_drift
+test_status_shows_untracked_commits
+test_stash_pop_conflict_warns
 
 echo ""
 echo "======================="

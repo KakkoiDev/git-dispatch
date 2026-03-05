@@ -320,9 +320,10 @@ _show_conflict_details() {
 }
 
 # Handle cherry-pick conflict: show details, abort or leave for resolution
+# $7=has_stash ("true"/"false") - whether auto-stash is pending
 _handle_cherry_pick_conflict() {
-    local wt_path="$1" failing_hash="$2" applied="$3" total="$4" resolve="$5" branch="$6"
-    shift 6
+    local wt_path="$1" failing_hash="$2" applied="$3" total="$4" resolve="$5" branch="$6" has_stash="${7:-false}"
+    shift 7 2>/dev/null || shift 6
     local remaining_hashes=("$@")
     local -a gcmd=(git)
     [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
@@ -337,6 +338,11 @@ _handle_cherry_pick_conflict() {
             for rh in "${remaining_hashes[@]}"; do
                 echo "  $(git log -1 --oneline "$rh")"
             done
+        fi
+        if [[ "$has_stash" == "true" ]]; then
+            echo ""
+            warn "Note: your uncommitted changes were auto-stashed."
+            warn "After resolving, run: git stash pop"
         fi
     else
         "${gcmd[@]}" cherry-pick --abort 2>/dev/null || "${gcmd[@]}" reset --merge 2>/dev/null || true
@@ -368,7 +374,7 @@ _cherry_pick_with_trailers() {
             stashed=true
         fi
         if ! git checkout "$branch" --quiet 2>/dev/null; then
-            if $stashed; then git stash pop --quiet; fi
+            if $stashed; then git stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
             die "Cannot checkout $branch. Check for stale worktrees or conflicting files."
         fi
     else
@@ -403,9 +409,9 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                 if [[ "$resolve" != "true" ]]; then
-                    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                    if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
                     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 fi
                 exit 1
@@ -429,17 +435,17 @@ _cherry_pick_with_trailers() {
                         warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
                         # Fall through to commit with trailer rewrite below
                     else
-                        _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                         if [[ "$resolve" != "true" ]]; then
-                            if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                            if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
                             if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                         fi
                         exit 1
                     fi
                 else
-                    _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                    _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                     if [[ "$resolve" != "true" ]]; then
-                        if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                        if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
                         if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                     fi
                     exit 1
@@ -467,7 +473,7 @@ _cherry_pick_with_trailers() {
                     continue
                 fi
                 "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
             fi
@@ -475,7 +481,11 @@ _cherry_pick_with_trailers() {
         fi
     done
 
-    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+    if $stashed; then
+        if ! "${git_cmd[@]}" stash pop --quiet 2>/dev/null; then
+            warn "Auto-stash pop had conflicts. Run: git stash pop"
+        fi
+    fi
     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
 }
 
@@ -488,19 +498,27 @@ cherry_pick_into() {
     local -a git_cmd=(git)
     [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
 
+    local stashed=false
+
     if [[ -z "$wt" ]]; then
         local orig
         orig=$(current_branch)
+        # Stash before checkout (including untracked) to avoid checkout failures
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
+            stashed=true
+        fi
         local checkout_err
         if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
+            if $stashed; then git stash pop --quiet 2>/dev/null || true; fi
             die "Cannot checkout $branch: $checkout_err"
         fi
-    fi
-
-    local stashed=false
-    if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
-        "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
-        stashed=true
+    else
+        # Worktree: stash in the worktree context
+        if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null || [[ -n "$("${git_cmd[@]}" ls-files --others --exclude-standard 2>/dev/null)" ]]; then
+            "${git_cmd[@]}" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
+            stashed=true
+        fi
     fi
 
     for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
@@ -523,16 +541,20 @@ cherry_pick_into() {
                     continue
                 fi
             fi
-            _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+            _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
             if [[ "$resolve" != "true" ]]; then
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+                if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
             fi
             exit 1
         fi
     done
 
-    if $stashed; then "${git_cmd[@]}" stash pop --quiet; fi
+    if $stashed; then
+        if ! "${git_cmd[@]}" stash pop --quiet 2>/dev/null; then
+            warn "Auto-stash pop had conflicts. Run: git stash pop"
+        fi
+    fi
     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
 }
 
@@ -1065,6 +1087,17 @@ cmd_apply() {
         local summary="$created created, $updated updated, $skipped in sync"
         [[ $failed -gt 0 ]] && summary="$summary, ${RED}$failed failed${NC}"
         echo -e "${CYAN}Summary:${NC} $summary"
+
+        # Warn if targets may be missing base commits
+        if [[ $skipped -gt 0 || $updated -gt 0 ]]; then
+            local _base_ahead
+            _base_ahead=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
+            if [[ "$_base_ahead" -gt 0 ]]; then
+                echo ""
+                warn "Note: source is $_base_ahead commit(s) behind $base."
+                warn "Targets may need base update. Run: git dispatch merge --from base --to all"
+            fi
+        fi
     fi
 }
 
@@ -1341,6 +1374,13 @@ cmd_merge() {
     orig=$(current_branch)
     local merged=0 uptodate=0 failed=0
 
+    # Stash once before the loop (including untracked) to avoid checkout failures
+    local merge_stashed=false
+    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+        git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before merge"
+        merge_stashed=true
+    fi
+
     for branch in "${branches[@]}"; do
         local count
         count=$(git rev-list --count "$branch..$base" 2>/dev/null || echo 0)
@@ -1350,33 +1390,59 @@ cmd_merge() {
             continue
         fi
 
-        local checkout_err
-        if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
-            warn "  Cannot checkout $branch: $checkout_err"
-            failed=$((failed + 1))
-            continue
+        # Worktree-aware: merge in worktree if branch is checked out there
+        local wt
+        wt=$(worktree_for_branch "$branch")
+        local -a gcmd=(git)
+        [[ -n "$wt" ]] && gcmd=(git -C "$wt")
+
+        if [[ -z "$wt" ]]; then
+            local checkout_err
+            if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
+                warn "  Cannot checkout $branch: $checkout_err"
+                failed=$((failed + 1))
+                continue
+            fi
         fi
 
-        if ! git merge "$base" --no-edit; then
+        if ! "${gcmd[@]}" merge "$base" --no-edit; then
             echo ""
             warn "Merge conflict on $branch from $base"
-            _show_conflict_diff ""
+            _show_conflict_diff "${wt:-}"
             if $resolve; then
                 echo ""
                 warn "Resolve conflicts, then run: git commit"
+                if $merge_stashed; then
+                    warn "Note: your uncommitted changes were auto-stashed."
+                    warn "After resolving, run: git stash pop"
+                fi
                 exit 1
             fi
-            git merge --abort 2>/dev/null || true
+            "${gcmd[@]}" merge --abort 2>/dev/null || true
             warn "  $branch: merge conflict (skipped)"
             failed=$((failed + 1))
+            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet 2>/dev/null || true; fi
             continue
         fi
 
         info "  Merged $base into $branch"
         merged=$((merged + 1))
+        if [[ -z "$wt" ]]; then git checkout "$orig" --quiet 2>/dev/null || true; fi
     done
 
-    git checkout "$orig" --quiet 2>/dev/null || true
+    # Return to original branch if not already there
+    local cur
+    cur=$(current_branch)
+    if [[ "$cur" != "$orig" ]]; then
+        git checkout "$orig" --quiet 2>/dev/null || true
+    fi
+
+    if $merge_stashed; then
+        if ! git stash pop --quiet 2>/dev/null; then
+            warn "Auto-stash pop had conflicts. Run: git stash pop"
+        fi
+    fi
+
     echo ""
     info "Summary: $merged merged, $uptodate up to date${failed:+, $failed failed}"
 }
@@ -1601,12 +1667,26 @@ cmd_status() {
             fi
         fi
 
-        if [[ $source_to_target -eq 0 && $target_to_source -eq 0 ]]; then
+        # Count untracked commits: target commits with no Target-Id or mismatched Target-Id
+        local untracked=0
+        while IFS= read -r thash; do
+            [[ -n "$thash" ]] || continue
+            # Skip merge commits
+            local _pcount
+            _pcount=$(git rev-list --parents -n1 "$thash" | wc -w)
+            (( _pcount > 2 )) && continue
+            local _ctid
+            _ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$thash" | tr -d '[:space:]')
+            [[ -z "$_ctid" || ( "$_ctid" != "$tid" && "$_ctid" != "none" ) ]] && untracked=$((untracked + 1))
+        done < <(git log --format="%H" "${parent:-$base}..$branch_name" 2>/dev/null)
+
+        if [[ $source_to_target -eq 0 && $target_to_source -eq 0 && $untracked -eq 0 ]]; then
             printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
         else
             local status_parts=""
             [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
             [[ $target_to_source -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${target_to_source} ahead"
+            [[ $untracked -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${CYAN}${untracked} untracked${NC}"
 
             local diverge_tag=""
             if [[ $source_to_target -gt 0 && $target_to_source -gt 0 ]]; then
