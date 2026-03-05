@@ -77,13 +77,17 @@ git dispatch reset --force
 
 ## Target-Id Trailer
 
-Commits must use numeric Target-Id trailers:
+Commits must use Target-Id trailers:
 ```bash
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
+git commit -m "Source-only tooling change" --trailer "Target-Id=none"
+git commit -m "Regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
 ```
 
 Rules:
 - Numeric: integer or decimal (1, 2, 1.5, 3.1)
+- `none`: source-only commits skipped during apply
+- `Dispatch-Source-Keep: true`: auto-resolve conflicts with source version (--theirs)
 - Decimals enable mid-stack insertion
 - Hook auto-carries from previous commit
 - Hook rejects commits without Target-Id
@@ -102,7 +106,6 @@ Stored in git config:
 - `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
-- `dispatch.postApply` - Command to run after each target update (e.g. `pnpm openapi`). Changes auto-committed. Failures warn but don't abort.
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference
 
@@ -163,19 +166,22 @@ git dispatch merge --from base --to source --resolve
 # Verify with git dispatch status
 ```
 
-### Auto-resolve generated file conflicts
+### Auto-resolve with Dispatch-Source-Keep
 
-When `dispatch.postApply` is configured, all cherry-pick operations auto-resolve conflicts with `--strategy-option theirs` before falling through to manual conflict handling. This covers:
+Commits with `Dispatch-Source-Keep: true` trailer auto-resolve conflicts with `--strategy-option theirs` (source version wins). This covers all cherry-pick paths:
 
-- **`apply`** - both fresh target creation and updates to existing targets
-- **`cherry-pick`** - propagation between source and targets (`cherry_pick_into`)
-- **`_cherry_pick_with_trailers`** - trailer-rewriting cherry-picks (both matching and non-matching tid paths)
+- **`cherry_pick_into`** - used by `apply` for existing target updates
+- **`_cherry_pick_with_trailers`** - used by `cherry-pick --to source` (both matching and non-matching tid paths)
 
-This commonly happens with generated files (OpenAPI specs, swagger.json) in independent mode where base and source have diverged. The postApply command regenerates them after apply, so the --theirs version is temporary.
+Use for generated files (OpenAPI specs, swagger.json) where the source version should always win on conflict.
 
-After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless - file content is identical after postApply regeneration.
+```bash
+git commit -m "Regen API specs" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+```
 
-**Without `dispatch.postApply`**: normal conflict behavior (abort or --resolve for manual resolution).
+After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless.
+
+**Without `Dispatch-Source-Keep`**: normal conflict behavior (abort or --resolve for manual resolution).
 
 ### Apply works from target branches
 
@@ -347,8 +353,9 @@ git dispatch verify                    # detect dependencies before apply
 Each target has different API surface, so cherry-picked generated files have wrong content.
 
 ```bash
-git config dispatch.postApply 'pnpm openapi'   # regenerate after each target update
-git dispatch apply                               # regen runs automatically per target
+# Tag generated file commits with Source-Keep so source version wins on conflict
+git commit -m "Regen API specs" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch apply                               # auto-resolves generated file conflicts
 ```
 
 ### Scenario: Insert a new task between existing ones

@@ -392,13 +392,13 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                # Auto-resolve with --theirs when postApply is configured (generated files)
-                local _post_apply
-                _post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-                if [[ -n "$_post_apply" ]]; then
+                # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
+                local _source_keep
+                _source_keep=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
+                if [[ -n "$_source_keep" ]]; then
                     "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
-                        warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
                         DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
                         continue
                     fi
@@ -420,13 +420,13 @@ _cherry_pick_with_trailers() {
                         continue
                     fi
                 fi
-                # Auto-resolve with --theirs when postApply is configured (generated files)
-                local _post_apply2
-                _post_apply2=$(git config dispatch.postApply 2>/dev/null || true)
-                if [[ -n "$_post_apply2" ]]; then
+                # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
+                local _source_keep2
+                _source_keep2=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
+                if [[ -n "$_source_keep2" ]]; then
                     "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${git_cmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
-                        warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                        warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
                         # Fall through to commit with trailer rewrite below
                     else
                         _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
@@ -513,13 +513,13 @@ cherry_pick_into() {
                     continue
                 fi
             fi
-            # Auto-resolve with --theirs when postApply is configured (generated files)
-            local post_apply
-            post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-            if [[ -n "$post_apply" ]]; then
+            # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
+            local _source_keep
+            _source_keep=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
+            if [[ -n "$_source_keep" ]]; then
                 "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
                 if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
-                    warn "  Auto-resolved conflict (--theirs): $("${git_cmd[@]}" log -1 --oneline "$hash")"
+                    warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
                     continue
                 fi
             fi
@@ -727,30 +727,6 @@ cmd_init() {
     echo -e "  ${CYAN}target-pattern:${NC} $target_pattern"
 }
 
-# Run dispatch.postApply command on current branch, auto-commit changes
-# $1=branch_name $2=tid $3=optional worktree path
-_run_post_apply() {
-    local branch_name="$1" tid="$2" wt_path="${3:-}"
-    local -a gcmd=(git)
-    [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
-    local post_apply
-    post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-    [[ -n "$post_apply" ]] || return 0
-
-    local run_dir="${wt_path:-.}"
-    info "  Running post-apply on $branch_name..."
-    if ! (cd "$run_dir" && eval "$post_apply") >/dev/null 2>&1; then
-        warn "  Post-apply command failed on $branch_name"
-        return 0
-    fi
-
-    if ! "${gcmd[@]}" diff --quiet 2>/dev/null || [[ -n "$("${gcmd[@]}" ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-        "${gcmd[@]}" add -A
-        "${gcmd[@]}" commit --quiet -m "chore: regenerate after apply (target $tid)"
-        info "  Committed regenerated files on $branch_name"
-    fi
-}
-
 # ---------- apply ----------
 
 cmd_apply() {
@@ -798,19 +774,28 @@ cmd_apply() {
 
     [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
 
-    # Validate all commits have numeric Target-Id
+    # Check if all commits are source-only (Target-Id: none)
+    local _has_targets
+    _has_targets=$(awk '$2 != "none" {found=1; exit} END {print found+0}' "$commit_file")
+    if [[ "$_has_targets" -eq 0 ]]; then
+        info "All commits are source-only (Target-Id: none). Nothing to apply."
+        return
+    fi
+
+    # Validate all commits have numeric Target-Id or "none"
     while read -r hash tid; do
         [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Target-Id trailer"
+        [[ "$tid" == "none" ]] && continue
         if ! echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
             die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'"
         fi
     done < "$commit_file"
 
-    # Ordered unique target ids (numeric sort)
+    # Ordered unique target ids (numeric sort), excluding "none"
     local -a target_ids=()
     while IFS= read -r tid; do
         target_ids+=("$tid")
-    done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
+    done < <(awk '$2 != "none" && !seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
 
     # --- Stale target detection ---
     _build_source_patch_id_map "$patch_map_file" "$commit_file"
@@ -932,6 +917,15 @@ cmd_apply() {
         fi
     fi
 
+    # Display source-only (none) commits in dry-run
+    if $dry_run; then
+        local none_count
+        none_count=$(awk '$2 == "none"' "$commit_file" | wc -l | tr -d ' ')
+        if [[ "$none_count" -gt 0 ]]; then
+            echo -e "  ${GREEN}skip${NC} $none_count source-only commit(s) (Target-Id: none)"
+        fi
+    fi
+
     for tid in "${target_ids[@]}"; do
         local branch_name
         branch_name=$(_target_branch_name "$tid")
@@ -990,14 +984,6 @@ cmd_apply() {
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
                 cherry_pick_into "$resolve" "$branch_name" "${new_hashes[@]}"
-                # Post-apply regen
-                local post_apply
-                post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-                if [[ -n "$post_apply" ]]; then
-                    git checkout "$branch_name" --quiet
-                    _run_post_apply "$branch_name" "$tid"
-                    git checkout "$source" --quiet
-                fi
                 info "  Updated $branch_name (${#new_hashes[@]} new commits)"
                 updated=$((updated + 1))
             else
@@ -1047,11 +1033,6 @@ cmd_apply() {
                 fi
             done
 
-            # Post-apply regen (while still on target branch)
-            if ! $cherry_pick_failed; then
-                _run_post_apply "$branch_name" "$tid"
-            fi
-
             local checkout_err
             if ! checkout_err=$(git checkout "$orig" --quiet 2>&1); then
                 warn "Could not return to $orig: $checkout_err"
@@ -1079,12 +1060,6 @@ cmd_apply() {
 
     echo ""
     if $dry_run; then
-        local post_apply
-        post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-        if [[ -n "$post_apply" ]]; then
-            echo -e "  ${CYAN}post-apply${NC}: $post_apply (runs on each updated target)"
-            echo ""
-        fi
         echo -e "${CYAN}Summary (dry-run):${NC} ${#target_ids[@]} targets"
     else
         local summary="$created created, $updated updated, $skipped in sync"
@@ -1204,7 +1179,6 @@ cmd_cherry_pick() {
         if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
             info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
         else
-            _run_post_apply "$source" "source"
             info "Cherry-picked ${DISPATCH_LAST_PICKED} commit(s) from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} skipped)"
         fi
     fi
@@ -1691,14 +1665,6 @@ cmd_status() {
         warn "Run: git dispatch apply --force  to rebuild stale targets."
     fi
 
-    local post_apply
-    post_apply=$(git config dispatch.postApply 2>/dev/null || true)
-    if [[ -n "$post_apply" ]]; then
-        echo ""
-        echo -e "${CYAN}post-apply:${NC} $post_apply"
-        echo "  Runs automatically on apply and cherry-pick --to source."
-        echo "  After manual cherry-picks, run: $post_apply && git add -A && git commit -m 'chore: regenerate'"
-    fi
 }
 
 # ---------- diff ----------
@@ -1880,13 +1846,7 @@ cmd_verify() {
         echo "  1. Move commits so dependent files share a Target-Id"
         echo "  2. Switch to stacked mode: git dispatch init --mode stacked ..."
         echo "  3. Accept and resolve conflicts during apply"
-        local pa
-        pa=$(git config dispatch.postApply 2>/dev/null || true)
-        if [[ -n "$pa" ]]; then
-            echo -e "  4. Auto-regen active: dispatch.postApply = ${GREEN}$pa${NC}"
-        else
-            echo "  4. Set auto-regen: git config dispatch.postApply '<your-regen-command>'"
-        fi
+        echo "  4. Tag source-only commits with Target-Id: none and use Dispatch-Source-Keep for auto-resolve"
     else
         info "All ${#target_ids[@]} targets are file-independent."
     fi
@@ -2017,15 +1977,19 @@ FLAGS (on propagation commands)
   --force     Override safety checks (apply: rebuild stale targets)
 
 TRAILERS
-  Target-Id (required): numeric integer or decimal (1, 2, 1.5)
+  Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "none"
     git commit -m "message" --trailer "Target-Id=1"
+    git commit -m "source-only change" --trailer "Target-Id=none"
 
+  "none" marks source-only commits that are skipped during apply.
   Hook auto-carries Target-Id from previous commit when absent.
 
-POST-APPLY
-  git config dispatch.postApply '<command>'
-  Run a command after each target update (e.g. regenerate OpenAPI specs).
-  Changes are auto-committed. Failures warn but don't abort apply.
+  Dispatch-Source-Keep (optional): force-accept source version on conflict
+    git commit -m "regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+
+  When a cherry-pick conflicts on a commit with this trailer, the source
+  version is auto-accepted with --strategy-option theirs.
+
 HELP
 }
 

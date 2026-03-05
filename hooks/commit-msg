@@ -15,9 +15,12 @@ if ! grep -q "^Target-Id:" "$msg_file"; then
     exit 1
 fi
 
-# Validate Target-Id is numeric (integer or decimal)
+# Validate Target-Id is numeric (integer or decimal) or "none"
 target_id=$(grep "^Target-Id:" "$msg_file" | head -1 | sed 's/^Target-Id:[[:space:]]*//')
+if [[ "$target_id" == "none" ]]; then
+    exit 0
+fi
 if ! echo "$target_id" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-    echo "Error: Target-Id '$target_id' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5)."
+    echo "Error: Target-Id '$target_id' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5) or 'none'."
     exit 1
 fi

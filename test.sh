@@ -2001,154 +2001,87 @@ test_verify_before_apply() {
     teardown
 }
 
-test_apply_post_apply_creates_commit() {
-    echo "=== test: post-apply creates commit with generated files ==="
+
+
+
+
+
+
+
+
+# ---------- Target-Id: none ----------
+
+test_target_id_none_hook_accepts() {
+    echo "=== test: hook accepts Target-Id: none ==="
     setup
 
     git checkout -b source master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'echo "generated content" > gen.txt'
 
-    bash "$DISPATCH" apply >/dev/null 2>&1
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Source-only change$(printf '\n\nTarget-Id: none')" -q
 
-    # Check target has gen.txt committed
-    local gen_exists
-    gen_exists=$(git show target-3:gen.txt 2>/dev/null || echo "")
-    assert_eq "generated content" "$gen_exists" "gen.txt on target"
-
-    # Check commit message
-    local last_msg
-    last_msg=$(git log -1 --format="%s" target-3)
-    assert_eq "chore: regenerate after apply (target 3)" "$last_msg" "regen commit message"
+    # If we get here, the hook accepted it
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "none" "$tid" "hook accepted Target-Id: none"
 
     teardown
 }
 
-test_apply_post_apply_no_changes_no_commit() {
-    echo "=== test: post-apply with no changes creates no commit ==="
+test_target_id_none_skipped_during_apply() {
+    echo "=== test: none commits are skipped during apply ==="
     setup
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'true'
-
-    bash "$DISPATCH" apply >/dev/null 2>&1
-
-    # Should only have the cherry-picked commit, no regen commit
-    local count
-    count=$(git log --oneline target-3 --not master | wc -l | tr -d ' ')
-    assert_eq "1" "$count" "no extra commit"
-
-    teardown
-}
-
-test_apply_post_apply_on_update() {
-    echo "=== test: post-apply runs on target update ==="
-    setup
-
-    git checkout -b source master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'date +%s%N > gen.txt'
-
-    bash "$DISPATCH" apply >/dev/null 2>&1
-
-    local gen_v1
-    gen_v1=$(git show target-3:gen.txt 2>/dev/null || echo "")
-
-    # Add another commit and re-apply
+    git commit -m "Source-only$(printf '\n\nTarget-Id: none')" -q
     echo "b" > b.txt; git add b.txt
     git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
 
-    sleep 0.1
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
     bash "$DISPATCH" apply >/dev/null 2>&1
 
-    local gen_v2
-    gen_v2=$(git show target-3:gen.txt 2>/dev/null || echo "")
+    assert_branch_exists "target-3" "target-3 created"
 
-    # gen.txt should have changed (different timestamp)
-    assert_eq "1" "$([ "$gen_v1" != "$gen_v2" ] && echo 1 || echo 0)" "gen.txt updated on apply"
-
-    # Should have regen commits from both create and update
-    local regen_count
-    regen_count=$(git log --oneline target-3 --not master --grep="regenerate" | wc -l | tr -d ' ')
-    assert_eq "2" "$regen_count" "regen commits on create and update"
+    # target-3 should have b.txt but NOT a.txt (source-only)
+    local has_b has_a
+    has_b=$(git show target-3:b.txt 2>/dev/null || echo "")
+    has_a=$(git show target-3:a.txt 2>/dev/null || echo "MISSING")
+    assert_eq "b" "$has_b" "target has b.txt"
+    assert_eq "MISSING" "$has_a" "target does not have a.txt (source-only)"
 
     teardown
 }
 
-test_apply_post_apply_failure_continues() {
-    echo "=== test: post-apply failure does not abort apply ==="
+test_target_id_none_dry_run_display() {
+    echo "=== test: dry-run shows source-only for none commits ==="
     setup
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Source-only$(printf '\n\nTarget-Id: none')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'exit 1'
 
     local output
-    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
-    # Both targets should be created despite post-apply failure
-    assert_contains "$output" "Created target-3" "target-3 created"
-    assert_contains "$output" "Created target-4" "target-4 created"
-    assert_contains "$output" "Post-apply command failed" "failure warning shown"
+    assert_contains "$output" "source-only" "shows source-only in dry-run"
 
     teardown
 }
 
-test_cherry_pick_to_source_runs_post_apply() {
-    echo "=== test: cherry-pick --to source runs post-apply ==="
+# ---------- Dispatch-Source-Keep ----------
+
+test_source_keep_force_accepts_conflict() {
+    echo "=== test: Source-Keep auto-resolves conflict with --theirs ==="
     setup
 
-    git checkout -b source master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'echo "generated" > gen.txt'
-
-    bash "$DISPATCH" apply >/dev/null 2>&1
-
-    # Commit directly on target
-    git checkout target-3 -q
-    echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Hotfix on target$(printf '\n\nTarget-Id: 3')" -q
-    git checkout source -q
-
-    bash "$DISPATCH" cherry-pick --from 3 --to source >/dev/null 2>&1
-
-    # Source should have gen.txt from post-apply
-    local gen_exists
-    gen_exists=$(git show source:gen.txt 2>/dev/null || echo "")
-    assert_eq "generated" "$gen_exists" "post-apply ran on source"
-
-    # Regen commit should exist on source
-    local regen_count
-    regen_count=$(git log --oneline source --not master --grep="regenerate" | wc -l | tr -d ' ')
-    assert_eq "1" "$regen_count" "regen commit on source"
-
-    teardown
-}
-
-test_cherry_pick_into_auto_resolves_with_theirs() {
-    echo "=== test: cherry_pick_into auto-resolves with --theirs when postApply configured ==="
-    setup
-
-    # Create a file on master that will conflict
-    echo "base-generated-content" > generated.txt; git add generated.txt
+    echo "base-content" > generated.txt; git add generated.txt
     git commit --no-verify -m "Base generated file" -q
 
     git checkout -b source master -q
@@ -2156,105 +2089,79 @@ test_cherry_pick_into_auto_resolves_with_theirs() {
     git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'echo "regen" > gen.txt'
-
     bash "$DISPATCH" apply >/dev/null 2>&1
 
-    # Now modify generated.txt on source (will conflict with target's version from base)
-    echo "source-new-version" > generated.txt; git add generated.txt
-    git commit -m "Update generated$(printf '\n\nTarget-Id: 3')" -q
+    # Create conflict: source modifies generated.txt with Source-Keep
+    echo "source-version" > generated.txt; git add generated.txt
+    git commit -m "Regen files$(printf '\n\nTarget-Id: 3\nDispatch-Source-Keep: true')" -q
 
-    # Also advance target's generated.txt so it conflicts
+    # Advance target's generated.txt so it conflicts
     git checkout target-3 -q
     echo "target-diverged" > generated.txt; git add generated.txt
-    git commit --no-verify -m "Target diverges generated" -q
+    git commit --no-verify -m "Target diverges" -q
     git checkout source -q
 
-    # Apply should use cherry_pick_into for update and auto-resolve
     local output
     output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    assert_contains "$output" "Auto-resolved conflict" "cherry_pick_into reports auto-resolution"
+    assert_contains "$output" "Force-accepted (Source-Keep)" "reports Source-Keep resolution"
 
-    # Target should have source version of generated.txt
+    # Target should have source version
     local target_content
     target_content=$(git show target-3:generated.txt)
-    assert_eq "source-new-version" "$target_content" "target has source version after auto-resolve"
+    assert_eq "source-version" "$target_content" "target has source version"
 
     teardown
 }
 
-test_cherry_pick_with_trailers_auto_resolves_matching_tid() {
-    echo "=== test: _cherry_pick_with_trailers auto-resolves matching tid with --theirs ==="
+test_source_keep_no_conflict_normal_pick() {
+    echo "=== test: Source-Keep without conflict picks normally ==="
     setup
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 3\nDispatch-Source-Keep: true')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    assert_branch_exists "target-3" "target-3 created"
+
+    local has_a
+    has_a=$(git show target-3:a.txt 2>/dev/null || echo "")
+    assert_eq "a" "$has_a" "target has a.txt via normal cherry-pick"
+
+    teardown
+}
+
+test_no_source_keep_conflict_still_fails() {
+    echo "=== test: without Source-Keep, conflict still fails ==="
+    setup
+
+    echo "base-content" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Base generated file" -q
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
     git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'echo "regen" > gen.txt'
-
     bash "$DISPATCH" apply >/dev/null 2>&1
 
-    # Commit directly on target with conflicting generated file
+    # Create conflict WITHOUT Source-Keep trailer
+    echo "source-version" > generated.txt; git add generated.txt
+    git commit -m "Update generated$(printf '\n\nTarget-Id: 3')" -q
+
+    # Advance target's generated.txt so it conflicts
     git checkout target-3 -q
-    echo "target-gen" > generated.txt; git add generated.txt
-    git commit -m "Target generated$(printf '\n\nTarget-Id: 3')" -q
+    echo "target-diverged" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Target diverges" -q
     git checkout source -q
 
-    # Also create conflicting generated file on source
-    echo "source-gen" > generated.txt; git add generated.txt
-    git commit -m "Source generated$(printf '\n\nTarget-Id: 3')" -q
-
-    # Cherry-pick from target to source - uses _cherry_pick_with_trailers with matching tid
     local output
-    output=$(bash "$DISPATCH" cherry-pick --from 3 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    # The target commit has a conflicting generated.txt, should auto-resolve
-    # Check that source has the cherry-picked file (target version via --theirs)
-    local source_gen
-    source_gen=$(git show source:generated.txt 2>/dev/null || echo "")
-    # After --theirs, the cherry-picked commit's version wins
-    assert_eq "target-gen" "$source_gen" "source has cherry-picked version after auto-resolve"
-
-    teardown
-}
-
-test_cherry_pick_with_trailers_auto_resolves_non_matching_tid() {
-    echo "=== test: _cherry_pick_with_trailers auto-resolves non-matching tid with --theirs ==="
-    setup
-
-    git checkout -b source master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    git config dispatch.postApply 'echo "regen" > gen.txt'
-
-    bash "$DISPATCH" apply >/dev/null 2>&1
-
-    # Commit on target-4 with a different tid that has conflicting content
-    git checkout target-4 -q
-    echo "target-gen" > generated.txt; git add generated.txt
-    git commit -m "Target generated$(printf '\n\nTarget-Id: 4')" -q
-    git checkout source -q
-
-    # Create conflicting file on source with DIFFERENT tid (will go through non-matching path)
-    echo "source-gen" > generated.txt; git add generated.txt
-    git commit -m "Source generated$(printf '\n\nTarget-Id: 3')" -q
-
-    # Cherry-pick from target-4 to source
-    # The target commit has tid=4, but on source it gets rewritten - non-matching tid path
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from 4 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
-
-    # Source should have the cherry-picked content
-    local source_gen
-    source_gen=$(git show source:generated.txt 2>/dev/null || echo "")
-    assert_eq "target-gen" "$source_gen" "source has cherry-picked version via non-matching tid auto-resolve"
+    assert_not_contains "$output" "Force-accepted" "no auto-resolve without Source-Keep"
 
     teardown
 }
@@ -2314,36 +2221,6 @@ test_apply_skips_base_ancestor_commits() {
     teardown
 }
 
-test_cherry_pick_no_auto_resolve_without_post_apply() {
-    echo "=== test: cherry-pick does not auto-resolve without postApply configured ==="
-    setup
-
-    git checkout -b source master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
-    # NOTE: no dispatch.postApply configured
-
-    bash "$DISPATCH" apply >/dev/null 2>&1
-
-    # Create conflicting content
-    git checkout target-3 -q
-    echo "target-version" > conflict.txt; git add conflict.txt
-    git commit --no-verify -m "Target conflict" -q
-    git checkout source -q
-
-    echo "source-version" > conflict.txt; git add conflict.txt
-    git commit -m "Source conflict$(printf '\n\nTarget-Id: 3')" -q
-
-    # Apply should fail with conflict (no auto-resolve without postApply)
-    local output
-    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
-
-    assert_not_contains "$output" "Auto-resolved" "no auto-resolve without postApply"
-
-    teardown
-}
 
 # ---------- run ----------
 
@@ -2423,17 +2300,14 @@ test_verify_new_file_dep
 test_verify_shared_file_dep
 test_verify_stacked_mode_skips
 test_verify_before_apply
-test_apply_post_apply_creates_commit
-test_apply_post_apply_no_changes_no_commit
-test_apply_post_apply_on_update
-test_apply_post_apply_failure_continues
-test_cherry_pick_to_source_runs_post_apply
-test_cherry_pick_into_auto_resolves_with_theirs
-test_cherry_pick_with_trailers_auto_resolves_matching_tid
-test_cherry_pick_with_trailers_auto_resolves_non_matching_tid
 test_apply_from_target_branch
 test_apply_skips_base_ancestor_commits
-test_cherry_pick_no_auto_resolve_without_post_apply
+test_target_id_none_hook_accepts
+test_target_id_none_skipped_during_apply
+test_target_id_none_dry_run_display
+test_source_keep_force_accepts_conflict
+test_source_keep_no_conflict_normal_pick
+test_no_source_keep_conflict_still_fails
 
 echo ""
 echo "======================="
