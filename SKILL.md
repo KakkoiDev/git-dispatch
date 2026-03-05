@@ -31,11 +31,13 @@ Every commit needs a `Target-Id` trailer:
 ```bash
 git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
 git commit -m "Source-only tooling change" --trailer "Target-Id=none"
+git commit -m "Regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
 ```
 
 - Numeric: integer or decimal (1, 2, 1.5). Decimals enable mid-stack insertion.
 - `none`: source-only commits skipped during apply.
-- Hook auto-carries from previous commit.
+- `Dispatch-Source-Keep: true`: auto-resolve conflicts with source version (--theirs). Use for generated files.
+- Hook auto-carries Target-Id from previous commit.
 
 ## Full Workflow
 
