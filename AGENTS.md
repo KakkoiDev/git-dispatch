@@ -77,10 +77,9 @@ git dispatch cherry-pick --from 4 --to source
 git dispatch apply
 git dispatch push --from all
 
-# 7. Update from base
-git dispatch rebase --from base --to source  # or merge
-git dispatch apply
-git dispatch push --from all --force
+# 7. Update from base (source + all targets)
+git dispatch merge --from base --to all      # preferred: updates everything
+git dispatch push --from all
 
 # 8. Cleanup
 git dispatch reset --force
@@ -308,18 +307,25 @@ git dispatch apply       # retry
 
 ### Scenario: Need to update from upstream base
 
-Choose rebase (linear history, rewrites SHAs) or merge (preserves history):
+**IMPORTANT**: `apply` only cherry-picks Target-Id commits. It does NOT propagate base merges to targets. After merging base into source only, targets still have the old base and CI may fail.
 
 ```bash
+# Merge - preferred: updates source + all targets in one command
+git dispatch merge --from base --to all
+git dispatch push --from all
+
+# Merge - source only (targets will NOT get base changes!)
+git dispatch merge --from base --to source
+# Then you MUST also update targets:
+git dispatch merge --from base --to all   # or --to <id> for one target
+
+# Merge - one target only
+git dispatch merge --from base --to 9
+
 # Rebase - cleaner history, requires force-push of targets
 git dispatch rebase --from base --to source
 git dispatch apply
 git dispatch push --from all --force
-
-# Merge - safer, no force-push needed
-git dispatch merge --from base --to source
-git dispatch apply
-git dispatch push --from all
 ```
 
 ### Scenario: Target PR was merged, need to clean up

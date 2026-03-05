@@ -69,9 +69,9 @@ git dispatch cherry-pick --from 4 --to source
 git dispatch apply
 git dispatch push --from all
 
-# 7. Update from base
-git dispatch rebase --from base --to source   # linear history
-git dispatch merge --from base --to source    # preserve history
+# 7. Update from base (source + all targets)
+git dispatch merge --from base --to all       # preferred: updates everything
+git dispatch rebase --from base --to source   # linear history (source only, then apply)
 
 # 8. Cleanup
 git dispatch reset --force
@@ -152,7 +152,8 @@ git dispatch apply                           # sync everything
 | Apply from target branch | Works - resolves source via `dispatchsource` config |
 | Cherry-pick mid-batch fail | Re-run same cherry-pick command (picks up remaining) |
 | Local changes block checkout | `git stash -u` then retry |
-| Need upstream changes | `rebase --from base --to source` or `merge --from base --to source` |
+| Need upstream changes | `merge --from base --to all` (source + all targets) |
+| Target CI fails after base merge | `merge --from base --to <id>` (apply does NOT propagate base merges) |
 
 ## Installation
 
