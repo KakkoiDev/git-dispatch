@@ -61,26 +61,63 @@ worktree_for_branch() {
 
 _DISPATCH_WT_PATH=""
 _DISPATCH_WT_CREATED=false
+_DISPATCH_WT_STASHED=false
 
 _enter_branch() {
     local branch="$1"
     _DISPATCH_WT_PATH=$(worktree_for_branch "$branch")
     _DISPATCH_WT_CREATED=false
+    _DISPATCH_WT_STASHED=false
     if [[ -z "$_DISPATCH_WT_PATH" ]]; then
         _DISPATCH_WT_PATH=$(mktemp -d "${TMPDIR:-/tmp}/git-dispatch-wt.XXXXXX")
         git worktree add -q "$_DISPATCH_WT_PATH" "$branch" 2>/dev/null || {
             rm -rf "$_DISPATCH_WT_PATH"; _DISPATCH_WT_PATH=""; return 1
         }
         _DISPATCH_WT_CREATED=true
+    else
+        # Existing worktree: stash dirty state so operations run cleanly
+        if ! git -C "$_DISPATCH_WT_PATH" diff --quiet 2>/dev/null || \
+           ! git -C "$_DISPATCH_WT_PATH" diff --cached --quiet 2>/dev/null; then
+            git -C "$_DISPATCH_WT_PATH" stash push --quiet -m "git-dispatch: auto-stash in worktree" 2>/dev/null || true
+            _DISPATCH_WT_STASHED=true
+        fi
     fi
 }
 
 _leave_branch() {
+    if $_DISPATCH_WT_STASHED && [[ -n "$_DISPATCH_WT_PATH" ]]; then
+        git -C "$_DISPATCH_WT_PATH" stash pop --quiet 2>/dev/null || true
+    fi
     if $_DISPATCH_WT_CREATED && [[ -n "$_DISPATCH_WT_PATH" ]]; then
         git worktree remove --force "$_DISPATCH_WT_PATH" 2>/dev/null || rm -rf "$_DISPATCH_WT_PATH"
     fi
     _DISPATCH_WT_PATH=""
     _DISPATCH_WT_CREATED=false
+    _DISPATCH_WT_STASHED=false
+}
+
+# Handle conflict exit: leave worktree alive for --resolve or clean up
+_conflict_leave() {
+    local resolve="$1"
+    if [[ "$resolve" == "true" ]]; then
+        echo ""
+        warn "Worktree left at: $_DISPATCH_WT_PATH"
+        _DISPATCH_WT_CREATED=false
+        _DISPATCH_WT_STASHED=false
+    else
+        _leave_branch
+    fi
+}
+
+# Skip an empty cherry-pick and increment the skipped counter
+_skip_empty_pick() {
+    local hash="$1"; shift
+    local -a gcmd=("$@")
+    warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+    if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
+    fi
+    DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
 }
 
 # Read dispatch config shorthand
@@ -118,7 +155,7 @@ _acquire_lock() {
         rm -f "$DISPATCH_LOCKFILE"
     fi
     echo $$ > "$DISPATCH_LOCKFILE"
-    trap '_release_lock' EXIT
+    trap '_leave_branch; _release_lock' EXIT
 }
 
 _release_lock() {
@@ -390,10 +427,9 @@ _show_conflict_details() {
 }
 
 # Handle cherry-pick conflict: show details, abort or leave for resolution
-# $7=has_stash ("true"/"false") - whether auto-stash is pending
 _handle_cherry_pick_conflict() {
-    local wt_path="$1" failing_hash="$2" applied="$3" total="$4" resolve="$5" branch="$6" has_stash="${7:-false}"
-    shift 7 2>/dev/null || shift 6
+    local wt_path="$1" failing_hash="$2" applied="$3" total="$4" resolve="$5" branch="$6"
+    shift 6
     local remaining_hashes=("$@")
     local -a gcmd=(git)
     [[ -n "$wt_path" ]] && gcmd=(git -C "$wt_path")
@@ -402,17 +438,12 @@ _handle_cherry_pick_conflict() {
 
     if [[ "$resolve" == "true" ]]; then
         echo ""
-        warn "Resolve conflicts, then run: git cherry-pick --continue"
+        warn "Resolve conflicts, then run: ${gcmd[*]} cherry-pick --continue"
         if [[ ${#remaining_hashes[@]} -gt 0 ]]; then
             warn "Remaining commits to cherry-pick after resolution:"
             for rh in "${remaining_hashes[@]}"; do
                 echo "  $(git log -1 --oneline "$rh")"
             done
-        fi
-        if [[ "$has_stash" == "true" ]]; then
-            echo ""
-            warn "Note: your uncommitted changes were auto-stashed."
-            warn "After resolving, run: git stash pop"
         fi
     else
         "${gcmd[@]}" cherry-pick --abort 2>/dev/null || "${gcmd[@]}" reset --merge 2>/dev/null || true
@@ -457,13 +488,8 @@ _cherry_pick_commits() {
         if $needs_trailer; then
             # cherry-pick --no-commit, then commit with trailer rewrite
             if ! "${gcmd[@]}" cherry-pick --no-commit "$hash" 2>/dev/null; then
-                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    if "${gcmd[@]}" diff --cached --quiet; then
-                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
-                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
-                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                        continue
-                    fi
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && "${gcmd[@]}" diff --cached --quiet; then
+                    _skip_empty_pick "$hash" "${gcmd[@]}"; continue
                 fi
                 # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
                 local _source_keep
@@ -474,47 +500,23 @@ _cherry_pick_commits() {
                         warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
                         # Fall through to commit with trailer rewrite below
                     else
-                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
-                        if [[ "$resolve" == "true" ]]; then
-                            echo ""
-                            warn "Worktree left at: $_DISPATCH_WT_PATH"
-                            _DISPATCH_WT_CREATED=false  # prevent cleanup
-                        else
-                            _leave_branch
-                        fi
-                        return 1
+                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        _conflict_leave "$resolve"; return 1
                     fi
                 else
-                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
-                    if [[ "$resolve" == "true" ]]; then
-                        echo ""
-                        warn "Worktree left at: $_DISPATCH_WT_PATH"
-                        _DISPATCH_WT_CREATED=false  # prevent cleanup
-                    else
-                        _leave_branch
-                    fi
-                    return 1
+                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                    _conflict_leave "$resolve"; return 1
                 fi
             fi
             # Empty no-commit pick: skip
             if "${gcmd[@]}" diff --cached --quiet; then
-                warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
-                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
-                fi
-                DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                continue
+                _skip_empty_pick "$hash" "${gcmd[@]}"; continue
             fi
             local msg
             msg=$(git log -1 --format="%B" "$hash")
             if ! "${gcmd[@]}" commit -m "$msg" --trailer "Target-Id=$add_trailer" --quiet; then
                 if "${gcmd[@]}" diff --cached --quiet; then
-                    warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
-                    if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
-                    fi
-                    DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                    continue
+                    _skip_empty_pick "$hash" "${gcmd[@]}"; continue
                 fi
                 "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                 _leave_branch
@@ -524,13 +526,8 @@ _cherry_pick_commits() {
         else
             # Standard cherry-pick -x
             if ! "${gcmd[@]}" cherry-pick -x "$hash" 2>/dev/null; then
-                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    if "${gcmd[@]}" diff --cached --quiet; then
-                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
-                        "${gcmd[@]}" cherry-pick --skip
-                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                        continue
-                    fi
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && "${gcmd[@]}" diff --cached --quiet; then
+                    _skip_empty_pick "$hash" "${gcmd[@]}"; continue
                 fi
                 # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
                 local _source_keep2
@@ -552,15 +549,8 @@ _cherry_pick_commits() {
                         continue
                     fi
                 fi
-                _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
-                if [[ "$resolve" == "true" ]]; then
-                    echo ""
-                    warn "Worktree left at: $_DISPATCH_WT_PATH"
-                    _DISPATCH_WT_CREATED=false  # prevent cleanup
-                else
-                    _leave_branch
-                fi
-                return 1
+                _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                _conflict_leave "$resolve"; return 1
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         fi
