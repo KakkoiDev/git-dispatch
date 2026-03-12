@@ -76,6 +76,12 @@ _require_init() {
 DISPATCH_LOCKFILE=""
 
 _acquire_lock() {
+    # Reentrant: skip if we already hold the lock (e.g. cherry-pick delegates to apply)
+    if [[ -n "${DISPATCH_LOCKFILE:-}" && -f "$DISPATCH_LOCKFILE" ]]; then
+        local existing_pid
+        existing_pid=$(cat "$DISPATCH_LOCKFILE" 2>/dev/null || true)
+        [[ "$existing_pid" == "$$" ]] && return 0
+    fi
     local git_dir
     git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 0
     DISPATCH_LOCKFILE="$git_dir/dispatch.lock"
@@ -288,8 +294,14 @@ _extract_tid_from_branch() {
     pattern=$(_get_config targetPattern)
     local prefix="${pattern%%\{id\}*}"
     local suffix="${pattern#*\{id\}}"
-    local tid="${branch#$prefix}"
-    [[ -n "$suffix" ]] && tid="${tid%$suffix}"
+    # Use literal string removal to avoid glob interpretation of [ ] * ? in pattern
+    local tid
+    if [[ "$branch" == "${prefix}"*"${suffix}" ]]; then
+        tid="${branch#"$prefix"}"
+        [[ -n "$suffix" ]] && tid="${tid%"$suffix"}"
+    else
+        return 1
+    fi
     echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' && echo "$tid"
 }
 
@@ -777,6 +789,8 @@ cmd_init() {
         if [[ -t 0 ]]; then
             read -p "Proceed? [y/N] " confirm
             [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        else
+            die "Dispatch already configured. Use --force to overwrite in non-interactive mode."
         fi
     fi
 
@@ -818,8 +832,8 @@ cmd_apply() {
     source=$(resolve_source "")
     [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
 
-    # Ensure base ref is up-to-date before creating/updating targets
-    _refresh_base "$base"
+    # Ensure base ref is up-to-date before creating/updating targets (best-effort)
+    _refresh_base "$base" || true
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file patch_map_file
@@ -839,7 +853,14 @@ cmd_apply() {
         echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
-    [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
+    if [[ ! -s "$commit_file" ]]; then
+        local _total_count
+        _total_count=$(git rev-list --count "$base..$source" 2>/dev/null || echo 0)
+        if [[ "$_total_count" -gt 0 ]]; then
+            die "No non-merge commits found between $base and $source ($_total_count merge commits skipped)"
+        fi
+        die "No commits found between $base and $source"
+    fi
 
     # Check if all commits are source-only (Target-Id: none)
     local _has_targets
@@ -1080,6 +1101,17 @@ cmd_apply() {
         fi
 
         if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
+            # Guard: verify this branch is actually a dispatch target (not a pre-existing foreign branch)
+            local _branch_source
+            _branch_source=$(git config "branch.${branch_name}.dispatchsource" 2>/dev/null || true)
+            if [[ -z "$_branch_source" ]]; then
+                warn "  $branch_name exists but is not a dispatch target (missing dispatchsource)."
+                warn "  Skipping to avoid corrupting a foreign branch. Delete it or run: git dispatch apply --reset $tid"
+                failed=$((failed + 1))
+                prev_branch="$branch_name"
+                continue
+            fi
+
             # Target exists locally - cherry-pick new commits
             local -a new_hashes=()
             local cherry_out
@@ -1334,8 +1366,8 @@ cmd_rebase() {
     base=$(_get_config base)
     source=$(resolve_source "")
 
-    # Ensure base ref is up-to-date before rebasing
-    _refresh_base "$base"
+    # Ensure base ref is up-to-date before rebasing (best-effort)
+    _refresh_base "$base" || true
 
     # Check for open PRs on downstream targets
     if ! $force; then
@@ -1425,8 +1457,8 @@ cmd_merge() {
     base=$(_get_config base)
     source=$(resolve_source "")
 
-    # Ensure base ref is up-to-date before merging
-    _refresh_base "$base"
+    # Ensure base ref is up-to-date before merging (best-effort)
+    _refresh_base "$base" || true
 
     # Build list of branches to merge into
     local -a branches=()
