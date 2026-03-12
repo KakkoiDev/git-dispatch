@@ -355,33 +355,47 @@ _extract_tid_from_branch() {
     echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' && echo "$tid"
 }
 
-# Build a patch-id map from source commits.
+# Build a patch-id map from source commits (batched - single pipe instead of N+1 processes).
 # Input: commit_file with "hash tid" per line.
 # Output: map_file with "patch-id hash tid" per line.
 _build_source_patch_id_map() {
     local map_file="$1" commit_file="$2"
     > "$map_file"
-    while read -r hash tid; do
-        [[ -n "$hash" ]] || continue
-        local pid
-        pid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
-        [[ -n "$pid" ]] && echo "$pid $hash $tid" >> "$map_file"
-    done < "$commit_file"
+    # Batch: stream all commits through one git patch-id invocation
+    local pid_output
+    pid_output=$(while read -r hash tid; do
+        [[ -n "$hash" ]] && git show "$hash" 2>/dev/null
+    done < "$commit_file" | git patch-id --stable 2>/dev/null)
+    [[ -z "$pid_output" ]] && return 0
+    while read -r pid hash; do
+        [[ -n "$pid" ]] || continue
+        local tid
+        tid=$(awk -v h="$hash" '$1 == h {print $2; exit}' "$commit_file")
+        [[ -n "$tid" ]] && echo "$pid $hash $tid"
+    done <<< "$pid_output" > "$map_file"
 }
 
-# Find stale commits on a target branch (content matches source with different Target-Id).
+# Find stale commits on a target branch (batched patch-id computation).
 # Outputs "target_hash source_tid" for each stale commit.
 _find_stale_commits() {
     local branch="$1" tid="$2" base="$3" map_file="$4"
+    local -a target_hashes=()
     while read -r hash; do
-        [[ -n "$hash" ]] || continue
-        local pid
-        pid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+        [[ -n "$hash" ]] && target_hashes+=("$hash")
+    done < <(git log --format="%H" "$base..$branch" 2>/dev/null)
+    [[ ${#target_hashes[@]} -eq 0 ]] && return 0
+    # Batch: compute all patch-ids in one pass
+    local pid_output
+    pid_output=$(for hash in "${target_hashes[@]}"; do
+        git show "$hash" 2>/dev/null
+    done | git patch-id --stable 2>/dev/null)
+    [[ -z "$pid_output" ]] && return 0
+    while read -r pid hash; do
         [[ -n "$pid" ]] || continue
         local match_tid
         match_tid=$(awk -v p="$pid" '$1 == p {print $3; exit}' "$map_file")
         [[ -n "$match_tid" && "$match_tid" != "$tid" ]] && echo "$hash $match_tid"
-    done < <(git log --format="%H" "$base..$branch" 2>/dev/null)
+    done <<< "$pid_output"
 }
 
 # Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
