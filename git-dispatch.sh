@@ -72,6 +72,45 @@ _require_init() {
     [[ -n "$base" ]] || die "Not initialized. Run: git dispatch init"
 }
 
+# Lockfile for preventing concurrent dispatch operations
+DISPATCH_LOCKFILE=""
+
+_acquire_lock() {
+    local git_dir
+    git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 0
+    DISPATCH_LOCKFILE="$git_dir/dispatch.lock"
+    if [[ -f "$DISPATCH_LOCKFILE" ]]; then
+        local lock_pid
+        lock_pid=$(cat "$DISPATCH_LOCKFILE" 2>/dev/null || true)
+        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            die "Another dispatch operation is running (PID $lock_pid). Remove if stale: $DISPATCH_LOCKFILE"
+        fi
+        rm -f "$DISPATCH_LOCKFILE"
+    fi
+    echo $$ > "$DISPATCH_LOCKFILE"
+    trap '_release_lock' EXIT
+}
+
+_release_lock() {
+    [[ -n "${DISPATCH_LOCKFILE:-}" ]] && rm -f "$DISPATCH_LOCKFILE"
+}
+
+# Pop a dispatch auto-stash entry by message, avoiding index-based races.
+# Pass git command prefix as arguments (e.g., _stash_pop_dispatch git -C /path).
+_stash_pop_dispatch() {
+    local -a gcmd=("$@")
+    [[ ${#gcmd[@]} -eq 0 ]] && gcmd=(git)
+    local entry
+    entry=$("${gcmd[@]}" stash list 2>/dev/null | grep -F "git-dispatch:" | head -1 | cut -d: -f1)
+    if [[ -n "$entry" ]]; then
+        if ! "${gcmd[@]}" stash pop "$entry" --quiet 2>/dev/null; then
+            warn "Auto-stash pop had conflicts. Recover with: ${gcmd[*]} stash pop"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Refresh the base ref to ensure targets branch from up-to-date base.
 # Handles both remote tracking refs (origin/master) and local branches (master).
 # Informs user when base was updated and warns on failure.
@@ -149,10 +188,12 @@ _is_content_merged() {
     local branch_tip="$1" base_ref="$2"
     local mb
     mb=$(git merge-base "$base_ref" "$branch_tip" 2>/dev/null) || return 1
-    local changed_files
-    changed_files=$(git diff --name-only "$mb" "$branch_tip" 2>/dev/null)
-    [[ -z "$changed_files" ]] && return 0
-    git diff --quiet "$base_ref" "$branch_tip" -- $changed_files 2>/dev/null
+    local -a changed_files_arr=()
+    while IFS= read -r -d '' f; do
+        changed_files_arr+=("$f")
+    done < <(git diff --name-only -z "$mb" "$branch_tip" 2>/dev/null)
+    [[ ${#changed_files_arr[@]} -eq 0 ]] && return 0
+    git diff --quiet "$base_ref" "$branch_tip" -- "${changed_files_arr[@]}" 2>/dev/null
 }
 
 # Return 0 if a commit's resulting file content is already present on a branch.
@@ -180,6 +221,10 @@ _would_cherry_pick_be_empty_on_branch() {
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/git-dispatch-empty-check.XXXXXX")
 
+    # Trap ensures cleanup on normal return and on ERR (set -e)
+    # Value of tmpdir is captured at definition time (double-quoted string)
+    trap "git worktree remove --force '$tmpdir' >/dev/null 2>&1 || rm -rf '$tmpdir'" RETURN
+
     if ! git worktree add --detach -q "$tmpdir" "$branch" >/dev/null 2>&1; then
         rm -rf "$tmpdir"
         return 1
@@ -200,7 +245,6 @@ _would_cherry_pick_be_empty_on_branch() {
         "${g[@]}" cherry-pick --abort >/dev/null 2>&1 || "${g[@]}" reset --hard --quiet >/dev/null 2>&1 || true
     fi
 
-    git worktree remove --force "$tmpdir" >/dev/null 2>&1 || rm -rf "$tmpdir"
     return $is_empty
 }
 
@@ -228,11 +272,12 @@ _target_id_files() {
 # Returns 0 if content actually differs, 1 if same content (different commits only).
 _target_content_diverged() {
     local source="$1" target_branch="$2" base="$3" tid="$4"
-    local target_files
-    target_files=$(_target_id_files "$base" "$target_branch" "$tid" | sort -u)
-    [[ -n "$target_files" ]] || return 1
-    # shellcheck disable=SC2086
-    git diff --quiet "$source" "$target_branch" -- $target_files 2>/dev/null && return 1
+    local -a target_files_arr=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && target_files_arr+=("$f")
+    done < <(_target_id_files "$base" "$target_branch" "$tid" | sort -u)
+    [[ ${#target_files_arr[@]} -eq 0 ]] && return 1
+    git diff --quiet "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null && return 1
     return 0
 }
 
@@ -245,7 +290,7 @@ _extract_tid_from_branch() {
     local suffix="${pattern#*\{id\}}"
     local tid="${branch#$prefix}"
     [[ -n "$suffix" ]] && tid="${tid%$suffix}"
-    echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$' && echo "$tid"
+    echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' && echo "$tid"
 }
 
 # Build a patch-id map from source commits.
@@ -374,7 +419,7 @@ _cherry_pick_with_trailers() {
             stashed=true
         fi
         if ! git checkout "$branch" --quiet 2>/dev/null; then
-            if $stashed; then git stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
             die "Cannot checkout $branch. Check for stale worktrees or conflicting files."
         fi
     else
@@ -411,10 +456,10 @@ _cherry_pick_with_trailers() {
                 fi
                 _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                 if [[ "$resolve" != "true" ]]; then
-                    if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+                    if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
                     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 fi
-                exit 1
+                return 1
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         else
@@ -437,18 +482,18 @@ _cherry_pick_with_trailers() {
                     else
                         _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                         if [[ "$resolve" != "true" ]]; then
-                            if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+                            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
                             if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                         fi
-                        exit 1
+                        return 1
                     fi
                 else
                     _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
                     if [[ "$resolve" != "true" ]]; then
-                        if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+                        if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
                         if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                     fi
-                    exit 1
+                    return 1
                 fi
             fi
             # Some no-op picks can succeed with --no-commit but stage nothing.
@@ -473,7 +518,7 @@ _cherry_pick_with_trailers() {
                     continue
                 fi
                 "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+                if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
                 die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
             fi
@@ -482,9 +527,7 @@ _cherry_pick_with_trailers() {
     done
 
     if $stashed; then
-        if ! "${git_cmd[@]}" stash pop --quiet 2>/dev/null; then
-            warn "Auto-stash pop had conflicts. Run: git stash pop"
-        fi
+        _stash_pop_dispatch "${git_cmd[@]}" || true
     fi
     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
 }
@@ -510,7 +553,7 @@ cherry_pick_into() {
         fi
         local checkout_err
         if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
-            if $stashed; then git stash pop --quiet 2>/dev/null || true; fi
+            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
             die "Cannot checkout $branch: $checkout_err"
         fi
     else
@@ -543,17 +586,15 @@ cherry_pick_into() {
             fi
             _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
             if [[ "$resolve" != "true" ]]; then
-                if $stashed; then "${git_cmd[@]}" stash pop --quiet 2>/dev/null || warn "Auto-stash pop had conflicts. Run: git stash pop"; fi
+                if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
                 if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
             fi
-            exit 1
+            return 1
         fi
     done
 
     if $stashed; then
-        if ! "${git_cmd[@]}" stash pop --quiet 2>/dev/null; then
-            warn "Auto-stash pop had conflicts. Run: git stash pop"
-        fi
+        _stash_pop_dispatch "${git_cmd[@]}" || true
     fi
     if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
 }
@@ -591,6 +632,9 @@ resolve_source() {
     if [[ -n "$dispatch_base" && "$cur" != "$dispatch_base" ]]; then
         echo "$cur"
         return
+    fi
+    if [[ -z "$cur" ]]; then
+        die "Detached HEAD. Checkout a branch first: git checkout <branch>"
     fi
     die "Cannot detect source branch. Run from a source or target branch."
 }
@@ -753,6 +797,7 @@ cmd_init() {
 
 cmd_apply() {
     _require_init
+    _acquire_lock
 
     local dry_run=false resolve=false force=false reset_target=""
 
@@ -808,7 +853,12 @@ cmd_apply() {
     while read -r hash tid; do
         [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Target-Id trailer"
         [[ "$tid" == "none" ]] && continue
-        if ! echo "$tid" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+        if ! echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+            if echo "$tid" | grep -Eq '^0[0-9]'; then
+                die "Commit $(echo "$hash" | cut -c1-8) has Target-Id '$tid' with leading zero. Use '${tid#0}' instead."
+            elif [[ "$tid" == "0" ]]; then
+                die "Commit $(echo "$hash" | cut -c1-8) has Target-Id '0'. Use a positive integer."
+            fi
             die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'"
         fi
     done < "$commit_file"
@@ -876,6 +926,11 @@ cmd_apply() {
                 local wt_path
                 wt_path=$(worktree_for_branch "$sb")
                 if [[ -n "$wt_path" ]]; then
+                    # Warn if worktree has uncommitted changes
+                    if ! git -C "$wt_path" diff --quiet 2>/dev/null || ! git -C "$wt_path" diff --cached --quiet 2>/dev/null; then
+                        warn "  Worktree $wt_path has uncommitted changes. Stashing before removal."
+                        git -C "$wt_path" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before worktree removal" 2>/dev/null || true
+                    fi
                     git worktree remove --force "$wt_path" 2>/dev/null || true
                     git worktree prune 2>/dev/null || true
                 fi
@@ -915,6 +970,35 @@ cmd_apply() {
         local reset_branch
         reset_branch=$(_target_branch_name "$reset_target")
         if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
+            # Check for target-only commits that would be lost
+            if ! $force; then
+                local reset_parent
+                reset_parent=$(find_stack_parent "$reset_branch" 2>/dev/null || true)
+                local _target_only=0
+                while IFS= read -r _rh; do
+                    [[ -n "$_rh" ]] || continue
+                    local _rpc
+                    _rpc=$(git rev-list --parents -n1 "$_rh" | wc -w)
+                    (( _rpc > 2 )) && continue
+                    local _rtid
+                    _rtid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
+                    [[ -z "$_rtid" || "$_rtid" != "$reset_target" ]] && _target_only=$((_target_only + 1))
+                done < <(git log --format="%H" "${reset_parent:-$base}..$reset_branch" 2>/dev/null)
+                if [[ $_target_only -gt 0 ]]; then
+                    warn "$reset_branch has $_target_only target-only commit(s) that will be lost."
+                    if [[ -t 0 ]]; then
+                        read -p "Proceed? [y/N] " confirm
+                        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                            if $apply_stashed; then _stash_pop_dispatch || true; fi
+                            echo "Aborted."
+                            return 0
+                        fi
+                    else
+                        if $apply_stashed; then _stash_pop_dispatch || true; fi
+                        die "Use --force to confirm --reset with target-only commits."
+                    fi
+                fi
+            fi
             # Remove worktree if branch is checked out in one
             local wt_path
             wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$reset_branch" '
@@ -922,6 +1006,11 @@ cmd_apply() {
                 /^branch refs\/heads\// { if ($2 == "refs/heads/" b) print path }
             ')
             if [[ -n "$wt_path" ]]; then
+                # Stash uncommitted changes before removing worktree
+                if ! git -C "$wt_path" diff --quiet 2>/dev/null || ! git -C "$wt_path" diff --cached --quiet 2>/dev/null; then
+                    warn "Worktree $wt_path has uncommitted changes. Stashing."
+                    git -C "$wt_path" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before worktree removal" 2>/dev/null || true
+                fi
                 git worktree remove --force "$wt_path" 2>/dev/null || true
                 git worktree prune 2>/dev/null || true
                 info "Removed worktree $wt_path"
@@ -930,11 +1019,11 @@ cmd_apply() {
             if delete_err=$(git branch -D "$reset_branch" 2>&1); then
                 info "Deleted $reset_branch (will regenerate)"
             else
-                if $apply_stashed; then git stash pop --quiet 2>/dev/null || true; fi
+                if $apply_stashed; then _stash_pop_dispatch || true; fi
                 die "Could not delete $reset_branch: $delete_err"
             fi
         else
-            if $apply_stashed; then git stash pop --quiet 2>/dev/null || true; fi
+            if $apply_stashed; then _stash_pop_dispatch || true; fi
             die "Branch $reset_branch does not exist"
         fi
     fi
@@ -1075,9 +1164,7 @@ cmd_apply() {
     done
 
     if $apply_stashed; then
-        if ! git stash pop --quiet 2>/dev/null; then
-            warn "Auto-stash pop had conflicts. Run: git stash pop"
-        fi
+        _stash_pop_dispatch || true
     fi
 
     echo ""
@@ -1105,6 +1192,7 @@ cmd_apply() {
 
 cmd_cherry_pick() {
     _require_init
+    _acquire_lock
 
     local from="" to="" dry_run=false resolve=false force=false
 
@@ -1129,7 +1217,7 @@ cmd_cherry_pick() {
 
     # --from source --to all -> delegate to apply
     if [[ "$from" == "source" && "$to" == "all" ]]; then
-        cmd_apply ${dry_run:+--dry-run} ${resolve:+--resolve} ${force:+--force}
+        cmd_apply "${dry_run:+--dry-run}" "${resolve:+--resolve}" "${force:+--force}"
         return
     fi
 
@@ -1221,6 +1309,7 @@ cmd_cherry_pick() {
 
 cmd_rebase() {
     _require_init
+    _acquire_lock
 
     local from="" to="" dry_run=false resolve=false force=false
 
@@ -1281,7 +1370,7 @@ cmd_rebase() {
 
     local checkout_err
     if ! checkout_err=$(git checkout "$source" --quiet 2>&1); then
-        $did_stash && git stash pop --quiet 2>/dev/null || true
+        $did_stash && { _stash_pop_dispatch || true; }
         die "Cannot checkout $source: $checkout_err"
     fi
 
@@ -1297,14 +1386,14 @@ cmd_rebase() {
         fi
         git rebase --abort 2>/dev/null || true
         [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-        $did_stash && git stash pop --quiet 2>/dev/null || true
+        $did_stash && { _stash_pop_dispatch || true; }
         echo ""
         warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
         exit 1
     fi
 
     [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-    $did_stash && git stash pop --quiet 2>/dev/null || true
+    $did_stash && { _stash_pop_dispatch || true; }
     info "Rebased $source onto $base"
 }
 
@@ -1312,6 +1401,7 @@ cmd_rebase() {
 
 cmd_merge() {
     _require_init
+    _acquire_lock
 
     local from="" to="" dry_run=false resolve=false force=false
 
@@ -1438,9 +1528,7 @@ cmd_merge() {
     fi
 
     if $merge_stashed; then
-        if ! git stash pop --quiet 2>/dev/null; then
-            warn "Auto-stash pop had conflicts. Run: git stash pop"
-        fi
+        _stash_pop_dispatch || true
     fi
 
     echo ""
@@ -1513,7 +1601,7 @@ cmd_push() {
 cmd_status() {
     _require_init
 
-    local base target_pattern mode source
+    local base target_pattern mode source has_stale=false has_diverged=false has_cosmetic=false
     base=$(_get_config base)
     target_pattern=$(_get_config targetPattern)
     mode=$(_get_config mode)
@@ -1608,13 +1696,19 @@ cmd_status() {
 
         if [[ ${#source_to_target_candidates[@]} -gt 0 ]]; then
             # Fast path: check if file content matches for all files touched by candidate commits
-            local candidate_files=""
+            local -a candidate_files_arr=()
             for hash in "${source_to_target_candidates[@]}"; do
-                candidate_files+=$'\n'"$(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)"
+                while IFS= read -r _cf; do
+                    [[ -n "$_cf" ]] && candidate_files_arr+=("$_cf")
+                done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
             done
-            candidate_files=$(echo "$candidate_files" | sort -u | sed '/^$/d')
+            # Deduplicate
+            local -a candidate_files_uniq=()
+            while IFS= read -r _cf; do
+                [[ -n "$_cf" ]] && candidate_files_uniq+=("$_cf")
+            done < <(printf '%s\n' "${candidate_files_arr[@]}" | sort -u)
 
-            if [[ -n "$candidate_files" ]] && git diff --quiet "$source" "$branch_name" -- $candidate_files 2>/dev/null; then
+            if [[ ${#candidate_files_uniq[@]} -gt 0 ]] && git diff --quiet "$source" "$branch_name" -- "${candidate_files_uniq[@]}" 2>/dev/null; then
                 source_to_target=0
             else
                 for hash in "${source_to_target_candidates[@]}"; do
@@ -1648,14 +1742,19 @@ cmd_status() {
         # Only run semantic checks for branches that are history-ahead.
         if [[ ${#target_to_source_candidates[@]} -gt 0 ]]; then
             # Fast path: check if file content matches for all candidate files
-            local t2s_files=""
+            local -a t2s_files_arr=()
             for hash in "${target_to_source_candidates[@]}"; do
-                t2s_files+=$'\n'"$(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)"
+                while IFS= read -r _tf; do
+                    [[ -n "$_tf" ]] && t2s_files_arr+=("$_tf")
+                done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
             done
-            t2s_files=$(echo "$t2s_files" | sort -u | sed '/^$/d')
+            # Deduplicate
+            local -a t2s_files_uniq=()
+            while IFS= read -r _tf; do
+                [[ -n "$_tf" ]] && t2s_files_uniq+=("$_tf")
+            done < <(printf '%s\n' "${t2s_files_arr[@]}" | sort -u)
 
-            # shellcheck disable=SC2086
-            if [[ -n "$t2s_files" ]] && git diff --quiet "$source" "$branch_name" -- $t2s_files 2>/dev/null; then
+            if [[ ${#t2s_files_uniq[@]} -gt 0 ]] && git diff --quiet "$source" "$branch_name" -- "${t2s_files_uniq[@]}" 2>/dev/null; then
                 target_to_source=0
             else
                 for hash in "${target_to_source_candidates[@]}"; do
@@ -1772,17 +1871,18 @@ cmd_diff() {
     git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
         die "Target branch '$target_branch' does not exist locally."
 
-    local target_files
-    target_files=$(_target_id_files "$base" "$target_branch" "$target" | sort -u)
+    local -a target_files_arr=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && target_files_arr+=("$f")
+    done < <(_target_id_files "$base" "$target_branch" "$target" | sort -u)
 
-    if [[ -z "$target_files" ]]; then
+    if [[ ${#target_files_arr[@]} -eq 0 ]]; then
         info "No files changed by target $target on $target_branch"
         return
     fi
 
-    # shellcheck disable=SC2086
     local diff_files
-    diff_files=$(git diff --name-only "$source" "$target_branch" -- $target_files 2>/dev/null)
+    diff_files=$(git diff --name-only "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null)
 
     if [[ -z "$diff_files" ]]; then
         info "No content difference between $source and $target_branch"
@@ -1790,8 +1890,7 @@ cmd_diff() {
         warn "Files diverged between $source and $target_branch:"
         echo "$diff_files" | while IFS= read -r f; do echo "  $f"; done
         echo ""
-        # shellcheck disable=SC2086
-        git diff "$source" "$target_branch" -- $target_files 2>/dev/null
+        git diff "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null
         echo ""
         echo -e "${CYAN}To resolve:${NC}"
         echo "  git dispatch cherry-pick --from $target --to source --resolve   # bring target changes to source"
@@ -1991,7 +2090,6 @@ cmd_reset() {
     # Delete dispatch config
     git config --unset dispatch.base 2>/dev/null || true
     git config --unset dispatch.targetPattern 2>/dev/null || true
-    git config --unset dispatch.prefix 2>/dev/null || true
     git config --unset dispatch.mode 2>/dev/null || true
 
     # Remove hooks and core.hooksPath
