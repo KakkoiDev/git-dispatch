@@ -1982,6 +1982,90 @@ cmd_reset() {
     info "Reset complete."
 }
 
+# ---------- continue ----------
+
+# Find dispatch temp worktrees by naming convention
+_find_dispatch_worktrees() {
+    git worktree list --porcelain | awk '/^worktree / {path=substr($0, 10)} /^branch / {if (path ~ /git-dispatch-wt\./) print path}'
+}
+
+cmd_continue() {
+    local -a wt_paths=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && wt_paths+=("$line")
+    done < <(_find_dispatch_worktrees)
+
+    if [[ ${#wt_paths[@]} -eq 0 ]]; then
+        info "No pending dispatch operations."
+        return
+    fi
+
+    for wt in "${wt_paths[@]}"; do
+        local branch
+        branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+        local git_dir
+        git_dir=$(git -C "$wt" rev-parse --git-dir 2>/dev/null)
+
+        if git -C "$wt" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+            warn "Cherry-pick conflict pending on $branch"
+            warn "  Resolve in: $wt"
+            warn "  Then run:   git -C $wt cherry-pick --continue"
+        elif git -C "$wt" rev-parse --verify MERGE_HEAD &>/dev/null; then
+            warn "Merge conflict pending on $branch"
+            warn "  Resolve in: $wt"
+            warn "  Then run:   git -C $wt commit"
+        elif [[ -d "$git_dir/rebase-merge" || -d "$git_dir/rebase-apply" ]]; then
+            warn "Rebase conflict pending on $branch"
+            warn "  Resolve in: $wt"
+            warn "  Then run:   git -C $wt rebase --continue"
+        else
+            info "Operation complete on $branch. Cleaning up $wt"
+            git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+        fi
+    done
+    git worktree prune 2>/dev/null || true
+}
+
+# ---------- clean ----------
+
+cmd_clean() {
+    local force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=true; shift ;;
+            -*)      die "Unknown flag: $1" ;;
+            *)       die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    local -a wt_paths=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && wt_paths+=("$line")
+    done < <(_find_dispatch_worktrees)
+
+    if [[ ${#wt_paths[@]} -eq 0 ]]; then
+        info "No dispatch worktrees to clean."
+        return
+    fi
+
+    for wt in "${wt_paths[@]}"; do
+        local branch
+        branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+        if $force; then
+            git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+            info "  Removed $wt ($branch)"
+        else
+            echo "  $wt ($branch)"
+        fi
+    done
+
+    if ! $force; then
+        echo ""
+        warn "Run: git dispatch clean --force  to remove all."
+    fi
+    git worktree prune 2>/dev/null || true
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -2027,11 +2111,15 @@ COMMANDS
   push      Push branches (--from <id|all|source>)
   status    Show mode, base, source, and all targets with sync state
   verify    Detect cross-target file dependencies (independent mode)
+  continue  Check pending conflict resolutions, clean up completed worktrees
+  clean     List (or --force remove) leftover dispatch worktrees
   reset     Delete all dispatch metadata and target branches
 
 FLAGS (on propagation commands)
   --dry-run   Show plan, make no changes
-  --resolve   Enter conflict resolution mode
+  --resolve   Leave conflict active in a temp worktree for manual resolution.
+              The worktree path is printed. After resolving, run the shown
+              git command, then: git dispatch continue
   --force     Override safety checks (apply: rebuild stale targets)
 
 TRAILERS
@@ -2067,6 +2155,8 @@ main() {
         status)       cmd_status "$@" ;;
         diff)         cmd_diff "$@" ;;
         verify)       cmd_verify "$@" ;;
+        continue)     cmd_continue "$@" ;;
+        clean)        cmd_clean "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;

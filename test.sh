@@ -2415,6 +2415,106 @@ test_stash_pop_conflict_warns() {
     teardown
 }
 
+test_continue_cleans_completed_worktree() {
+    echo "=== test: continue cleans up completed worktree ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add a new commit and cherry-pick (non-conflicting)
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" cherry-pick --from source --to 1 >/dev/null 2>&1
+
+    # No leftover worktrees should exist
+    local output
+    output=$(bash "$DISPATCH" continue 2>&1)
+    assert_contains "$output" "No pending" "continue reports no pending operations"
+
+    teardown
+}
+
+test_clean_lists_and_removes_worktrees() {
+    echo "=== test: clean lists and force-removes worktrees ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict to leave worktree alive
+    git checkout source/feature-1 -q
+    echo "target-change" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modifies file" -q
+
+    git checkout source/feature -q
+    echo "source-change" > file.txt; git add file.txt
+    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+
+    # --resolve leaves worktree alive
+    bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
+
+    # clean without --force lists them
+    local list_output
+    list_output=$(bash "$DISPATCH" clean 2>&1)
+    assert_contains "$list_output" "git-dispatch-wt" "clean lists worktree"
+    assert_contains "$list_output" "--force" "clean suggests --force"
+
+    # clean --force removes them
+    local clean_output
+    clean_output=$(bash "$DISPATCH" clean --force 2>&1)
+    assert_contains "$clean_output" "Removed" "clean --force removes worktree"
+
+    # Verify it's gone
+    local verify_output
+    verify_output=$(bash "$DISPATCH" clean 2>&1)
+    assert_contains "$verify_output" "No dispatch worktrees" "no worktrees after clean"
+
+    teardown
+}
+
+test_continue_detects_pending_conflict() {
+    echo "=== test: continue detects pending cherry-pick conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > file.txt; git add file.txt
+    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Create conflict
+    git checkout source/feature-1 -q
+    echo "target-change" > file.txt; git add file.txt
+    git commit --no-verify -m "Target modifies file" -q
+
+    git checkout source/feature -q
+    echo "source-change" > file.txt; git add file.txt
+    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+
+    bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
+
+    local output
+    output=$(bash "$DISPATCH" continue 2>&1)
+    assert_contains "$output" "Cherry-pick conflict pending" "continue detects pending cherry-pick"
+    assert_contains "$output" "source/feature-1" "continue shows branch name"
+
+    # Clean up
+    bash "$DISPATCH" clean --force >/dev/null 2>&1
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2507,6 +2607,9 @@ test_merge_worktree_aware
 test_apply_warns_base_drift
 test_status_shows_untracked_commits
 test_stash_pop_conflict_warns
+test_continue_cleans_completed_worktree
+test_clean_lists_and_removes_worktrees
+test_continue_detects_pending_conflict
 
 echo ""
 echo "======================="
