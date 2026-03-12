@@ -1197,18 +1197,17 @@ test_cherry_pick_conflict_resolve_leaves_active() {
     assert_contains "$output" "cherry-pick --continue" "shows continue command"
     assert_contains "$output" "Remaining commits" "shows remaining commits"
 
-    # Verify conflict state is active (we should be on target branch)
-    if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-        echo -e "  ${GREEN}PASS${NC} CHERRY_PICK_HEAD exists (conflict active)"
+    # Verify worktree path is printed for conflict resolution
+    if echo "$output" | grep -q "Worktree left at:"; then
+        echo -e "  ${GREEN}PASS${NC} worktree path printed for resolution"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} CHERRY_PICK_HEAD missing (conflict not active)"
+        echo -e "  ${RED}FAIL${NC} worktree path not printed"
         FAIL=$((FAIL + 1))
     fi
 
-    # Clean up conflict state
-    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
-    git checkout source/feature -q 2>/dev/null || true
+    # Clean up any leftover worktrees
+    git worktree prune 2>/dev/null || true
 
     teardown
 }
@@ -1300,9 +1299,10 @@ test_rebase_conflict_resolve() {
 
     assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
     assert_contains "$output" "rebase --continue" "shows rebase continue command"
+    assert_contains "$output" "Worktree left at:" "shows worktree path"
 
-    # Clean up rebase state
-    git rebase --abort 2>/dev/null || true
+    # Clean up any leftover worktrees
+    git worktree prune 2>/dev/null || true
 
     teardown
 }
@@ -1353,10 +1353,11 @@ test_merge_conflict_resolve() {
     output=$(bash "$DISPATCH" merge --from base --to source --resolve 2>&1) || true
 
     assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
-    assert_contains "$output" "git commit" "shows commit command"
+    assert_contains "$output" "commit" "shows commit command"
+    assert_contains "$output" "Worktree left at:" "shows worktree path"
 
-    # Clean up merge state
-    git merge --abort 2>/dev/null || true
+    # Clean up any leftover worktrees
+    git worktree prune 2>/dev/null || true
 
     teardown
 }
@@ -2223,7 +2224,7 @@ test_apply_skips_base_ancestor_commits() {
 
 
 test_resolve_warns_about_dangling_stash() {
-    echo "=== test: --resolve warns about dangling auto-stash ==="
+    echo "=== test: worktree cherry-pick does not disturb dirty working tree ==="
     setup
 
     git checkout -b source/feature master -q
@@ -2239,7 +2240,7 @@ test_resolve_warns_about_dangling_stash() {
     git commit --no-verify -m "Target modifies file" -q
 
     git checkout source/feature -q
-    # Create dirty working tree so stash is needed
+    # Create dirty working tree - should NOT be disturbed
     echo "dirty" > untracked.txt
     echo "source-change" > file.txt; git add file.txt
     git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
@@ -2247,12 +2248,17 @@ test_resolve_warns_about_dangling_stash() {
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
 
-    assert_contains "$output" "auto-stashed" "warns about dangling stash on --resolve"
+    # Untracked file should still exist (no stashing happened)
+    if [[ -f "untracked.txt" ]]; then
+        echo -e "  ${GREEN}PASS${NC} untracked file not disturbed by worktree cherry-pick"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} untracked file was removed"
+        FAIL=$((FAIL + 1))
+    fi
 
-    # Clean up conflict state
-    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
-    git checkout source/feature -q 2>/dev/null || true
-    git stash drop 2>/dev/null || true
+    # Clean up any leftover worktrees
+    git worktree prune 2>/dev/null || true
 
     teardown
 }
@@ -2377,7 +2383,7 @@ test_status_shows_untracked_commits() {
 }
 
 test_stash_pop_conflict_warns() {
-    echo "=== test: stash pop conflict warns user ==="
+    echo "=== test: staged changes survive worktree cherry-pick ==="
     setup
 
     git checkout -b source/feature master -q
@@ -2390,17 +2396,21 @@ test_stash_pop_conflict_warns() {
     # Modify file on source (staged but not committed)
     echo "staged-change" > file.txt; git add file.txt
 
-    # Add new source commit that modifies the same file
+    # Add new source commit
     echo "b" > b.txt; git add b.txt
     git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
 
-    # The stash will contain staged file.txt changes
-    # Cherry-pick should handle stash pop gracefully
+    # Cherry-pick via worktree should not touch staged changes
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
 
-    # Should not crash - either succeeds or warns about pop conflict
-    assert_not_contains "$output" "fatal" "no fatal error from stash handling"
+    # Should not crash
+    assert_not_contains "$output" "fatal" "no fatal error from worktree cherry-pick"
+
+    # Staged file.txt changes should still be present
+    local staged_content
+    staged_content=$(git show :file.txt 2>/dev/null || true)
+    assert_eq "staged-change" "$staged_content" "staged changes survive cherry-pick operation"
 
     teardown
 }

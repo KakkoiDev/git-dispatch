@@ -59,6 +59,30 @@ worktree_for_branch() {
     '
 }
 
+_DISPATCH_WT_PATH=""
+_DISPATCH_WT_CREATED=false
+
+_enter_branch() {
+    local branch="$1"
+    _DISPATCH_WT_PATH=$(worktree_for_branch "$branch")
+    _DISPATCH_WT_CREATED=false
+    if [[ -z "$_DISPATCH_WT_PATH" ]]; then
+        _DISPATCH_WT_PATH=$(mktemp -d "${TMPDIR:-/tmp}/git-dispatch-wt.XXXXXX")
+        git worktree add -q "$_DISPATCH_WT_PATH" "$branch" 2>/dev/null || {
+            rm -rf "$_DISPATCH_WT_PATH"; _DISPATCH_WT_PATH=""; return 1
+        }
+        _DISPATCH_WT_CREATED=true
+    fi
+}
+
+_leave_branch() {
+    if $_DISPATCH_WT_CREATED && [[ -n "$_DISPATCH_WT_PATH" ]]; then
+        git worktree remove --force "$_DISPATCH_WT_PATH" 2>/dev/null || rm -rf "$_DISPATCH_WT_PATH"
+    fi
+    _DISPATCH_WT_PATH=""
+    _DISPATCH_WT_CREATED=false
+}
+
 # Read dispatch config shorthand
 _get_config() {
     local key="$1"
@@ -101,21 +125,6 @@ _release_lock() {
     [[ -n "${DISPATCH_LOCKFILE:-}" ]] && rm -f "$DISPATCH_LOCKFILE"
 }
 
-# Pop a dispatch auto-stash entry by message, avoiding index-based races.
-# Pass git command prefix as arguments (e.g., _stash_pop_dispatch git -C /path).
-_stash_pop_dispatch() {
-    local -a gcmd=("$@")
-    [[ ${#gcmd[@]} -eq 0 ]] && gcmd=(git)
-    local entry
-    entry=$("${gcmd[@]}" stash list 2>/dev/null | grep -F "git-dispatch:" | head -1 | cut -d: -f1)
-    if [[ -n "$entry" ]]; then
-        if ! "${gcmd[@]}" stash pop "$entry" --quiet 2>/dev/null; then
-            warn "Auto-stash pop had conflicts. Recover with: ${gcmd[*]} stash pop"
-            return 1
-        fi
-    fi
-    return 0
-}
 
 # Refresh the base ref to ensure targets branch from up-to-date base.
 # Handles both remote tracking refs (origin/master) and local branches (master).
@@ -140,29 +149,33 @@ _refresh_base() {
             return 1
         fi
     else
-        # Local branch (e.g. master) - pull --rebase to update if it has a remote
-        local current
-        current=$(current_branch)
-        # Only attempt pull if the branch has upstream tracking configured
-        local upstream
-        upstream=$(git config "branch.${base}.remote" 2>/dev/null || true)
-        if [[ -z "$upstream" ]]; then
+        # Local branch (e.g. master) - fast-forward via fetch, no checkout needed
+        local upstream_remote upstream_ref
+        upstream_remote=$(git config "branch.${base}.remote" 2>/dev/null || true)
+        if [[ -z "$upstream_remote" ]]; then
             # No remote tracking - local-only branch, nothing to refresh
             return 0
         fi
-        if ! git checkout "$base" --quiet 2>/dev/null; then
-            warn "Could not checkout $base to update - targets may branch from stale ref"
-            return 1
+        upstream_ref=$(git config "branch.${base}.merge" 2>/dev/null || true)
+        upstream_ref="${upstream_ref#refs/heads/}"
+        [[ -z "$upstream_ref" ]] && upstream_ref="$base"
+        # Try fast-forward update without checkout
+        if ! err_output=$(git fetch "$upstream_remote" "$upstream_ref:$base" 2>&1); then
+            # Fetch-to-ref failed (diverged) - rebase in temp worktree
+            _enter_branch "$base" || {
+                warn "Could not access $base to update - targets may branch from stale ref"
+                return 1
+            }
+            if ! err_output=$(git -C "$_DISPATCH_WT_PATH" pull --rebase 2>&1); then
+                warn "Failed to update $base:"
+                warn "  $err_output"
+                warn "Targets may branch from stale ref"
+                git -C "$_DISPATCH_WT_PATH" rebase --abort 2>/dev/null || true
+                _leave_branch
+                return 1
+            fi
+            _leave_branch
         fi
-        if ! err_output=$(git pull --rebase 2>&1); then
-            warn "Failed to update $base:"
-            warn "  $err_output"
-            warn "Targets may branch from stale ref"
-            git rebase --abort 2>/dev/null || true
-            git checkout "$current" --quiet 2>/dev/null
-            return 1
-        fi
-        git checkout "$current" --quiet 2>/dev/null
     fi
 
     new_sha=$(git rev-parse "$base" 2>/dev/null) || return 0
@@ -408,49 +421,46 @@ _handle_cherry_pick_conflict() {
     fi
 }
 
-# Cherry-pick into a branch, adding Target-Id to commits that lack them
-_cherry_pick_with_trailers() {
-    local resolve="$1" branch="$2" target_id="$3"; shift 3
-    local hashes=("$@")
-    local wt
-    wt=$(worktree_for_branch "$branch")
-    local -a git_cmd=(git)
-    [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
 
-    local stashed=false
+# Unified cherry-pick into a branch via temp worktree (no main-worktree checkout).
+# Usage: _cherry_pick_commits resolve branch [--add-trailer tid] [--theirs-fallback] hash...
+# Sets DISPATCH_LAST_PICKED / DISPATCH_LAST_SKIPPED globals.
+_cherry_pick_commits() {
+    local resolve="$1" branch="$2"; shift 2
+    local add_trailer="" theirs_fallback=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --add-trailer) add_trailer="$2"; shift 2 ;;
+            --theirs-fallback) theirs_fallback=true; shift ;;
+            *) break ;;
+        esac
+    done
+    local hashes=("$@")
+
     DISPATCH_LAST_PICKED=0
     DISPATCH_LAST_SKIPPED=0
 
-    if [[ -z "$wt" ]]; then
-        local orig
-        orig=$(current_branch)
-        # Stash everything (including untracked) before checkout to avoid conflicts
-        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-            warn "Uncommitted changes detected. Stash first with: git stash -u"
-            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
-            stashed=true
-        fi
-        if ! git checkout "$branch" --quiet 2>/dev/null; then
-            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-            die "Cannot checkout $branch. Check for stale worktrees or conflicting files."
-        fi
-    else
-        if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null; then
-            "${git_cmd[@]}" stash push --quiet -m "git-dispatch: auto-stash before cherry-pick"
-            stashed=true
-        fi
-    fi
+    _enter_branch "$branch" || die "Cannot access branch $branch (worktree conflict?)"
+    local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
 
     for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
         local hash="${hashes[$_idx]}"
-        local tid
-        tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-        if [[ "$tid" == "$target_id" ]]; then
-            if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
-                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    if "${git_cmd[@]}" diff --cached --quiet; then
-                        warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                        "${git_cmd[@]}" cherry-pick --skip
+
+        # Decide: plain cherry-pick or trailer-rewrite cherry-pick
+        local needs_trailer=false
+        if [[ -n "$add_trailer" ]]; then
+            local tid
+            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" != "$add_trailer" ]] && needs_trailer=true
+        fi
+
+        if $needs_trailer; then
+            # cherry-pick --no-commit, then commit with trailer rewrite
+            if ! "${gcmd[@]}" cherry-pick --no-commit "$hash" 2>/dev/null; then
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    if "${gcmd[@]}" diff --cached --quiet; then
+                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
                         DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     fi
@@ -459,27 +469,66 @@ _cherry_pick_with_trailers() {
                 local _source_keep
                 _source_keep=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
                 if [[ -n "$_source_keep" ]]; then
-                    "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                    if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
-                        warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                        DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
-                        continue
+                    "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if "${gcmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                        # Fall through to commit with trailer rewrite below
+                    else
+                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
+                        if [[ "$resolve" == "true" ]]; then
+                            echo ""
+                            warn "Worktree left at: $_DISPATCH_WT_PATH"
+                            _DISPATCH_WT_CREATED=false  # prevent cleanup
+                        else
+                            _leave_branch
+                        fi
+                        return 1
                     fi
+                else
+                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
+                    if [[ "$resolve" == "true" ]]; then
+                        echo ""
+                        warn "Worktree left at: $_DISPATCH_WT_PATH"
+                        _DISPATCH_WT_CREATED=false  # prevent cleanup
+                    else
+                        _leave_branch
+                    fi
+                    return 1
                 fi
-                _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
-                if [[ "$resolve" != "true" ]]; then
-                    if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-                    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+            fi
+            # Empty no-commit pick: skip
+            if "${gcmd[@]}" diff --cached --quiet; then
+                warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
                 fi
-                return 1
+                DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                continue
+            fi
+            local msg
+            msg=$(git log -1 --format="%B" "$hash")
+            if ! "${gcmd[@]}" commit -m "$msg" --trailer "Target-Id=$add_trailer" --quiet; then
+                if "${gcmd[@]}" diff --cached --quiet; then
+                    warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+                    if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
+                    fi
+                    DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                    continue
+                fi
+                "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                _leave_branch
+                die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         else
-            if ! "${git_cmd[@]}" cherry-pick --no-commit "$hash"; then
-                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    if "${git_cmd[@]}" diff --cached --quiet; then
-                        warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                        "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
+            # Standard cherry-pick -x
+            if ! "${gcmd[@]}" cherry-pick -x "$hash" 2>/dev/null; then
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+                    if "${gcmd[@]}" diff --cached --quiet; then
+                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
+                        "${gcmd[@]}" cherry-pick --skip
+                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     fi
                 fi
@@ -487,128 +536,37 @@ _cherry_pick_with_trailers() {
                 local _source_keep2
                 _source_keep2=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
                 if [[ -n "$_source_keep2" ]]; then
-                    "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                    if "${git_cmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
-                        warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                        # Fall through to commit with trailer rewrite below
-                    else
-                        _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
-                        if [[ "$resolve" != "true" ]]; then
-                            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-                            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-                        fi
-                        return 1
+                    "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                        DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
+                        continue
                     fi
+                fi
+                # --theirs-fallback: retry with --theirs for fresh target creation
+                if $theirs_fallback; then
+                    "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
+                        warn "  Auto-resolved conflict (--theirs): $(git log -1 --oneline "$hash")"
+                        DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
+                        continue
+                    fi
+                fi
+                _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "false" "${hashes[@]:$((_idx+1))}"
+                if [[ "$resolve" == "true" ]]; then
+                    echo ""
+                    warn "Worktree left at: $_DISPATCH_WT_PATH"
+                    _DISPATCH_WT_CREATED=false  # prevent cleanup
                 else
-                    _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
-                    if [[ "$resolve" != "true" ]]; then
-                        if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-                        if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-                    fi
-                    return 1
+                    _leave_branch
                 fi
-            fi
-            # Some no-op picks can succeed with --no-commit but stage nothing.
-            # Treat them as empty cherry-picks instead of failing on commit.
-            if "${git_cmd[@]}" diff --cached --quiet; then
-                warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                    "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
-                fi
-                DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                continue
-            fi
-            local msg
-            msg=$(git log -1 --format="%B" "$hash")
-            if ! "${git_cmd[@]}" commit -m "$msg" --trailer "Target-Id=$target_id" --quiet; then
-                if "${git_cmd[@]}" diff --cached --quiet; then
-                    warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                    if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                        "${git_cmd[@]}" cherry-pick --skip 2>/dev/null || "${git_cmd[@]}" reset HEAD --quiet
-                    fi
-                    DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
-                    continue
-                fi
-                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-                die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
+                return 1
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         fi
     done
 
-    if $stashed; then
-        _stash_pop_dispatch "${git_cmd[@]}" || true
-    fi
-    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-}
-
-# Cherry-pick into a branch, worktree-aware
-cherry_pick_into() {
-    local resolve="$1" branch="$2"; shift 2
-    local hashes=("$@")
-    local wt
-    wt=$(worktree_for_branch "$branch")
-    local -a git_cmd=(git)
-    [[ -n "$wt" ]] && git_cmd=(git -C "$wt")
-
-    local stashed=false
-
-    if [[ -z "$wt" ]]; then
-        local orig
-        orig=$(current_branch)
-        # Stash before checkout (including untracked) to avoid checkout failures
-        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
-            stashed=true
-        fi
-        local checkout_err
-        if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
-            if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-            die "Cannot checkout $branch: $checkout_err"
-        fi
-    else
-        # Worktree: stash in the worktree context
-        if ! "${git_cmd[@]}" diff --quiet 2>/dev/null || ! "${git_cmd[@]}" diff --cached --quiet 2>/dev/null || [[ -n "$("${git_cmd[@]}" ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-            "${git_cmd[@]}" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before cherry-pick"
-            stashed=true
-        fi
-    fi
-
-    for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
-        local hash="${hashes[$_idx]}"
-        if ! "${git_cmd[@]}" cherry-pick -x "$hash"; then
-            if "${git_cmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
-                if "${git_cmd[@]}" diff --cached --quiet; then
-                    warn "  Skipping empty cherry-pick: $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                    "${git_cmd[@]}" cherry-pick --skip
-                    continue
-                fi
-            fi
-            # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
-            local _source_keep
-            _source_keep=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
-            if [[ -n "$_source_keep" ]]; then
-                "${git_cmd[@]}" cherry-pick --abort 2>/dev/null || true
-                if "${git_cmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
-                    warn "  Force-accepted (Source-Keep): $("${git_cmd[@]}" log -1 --oneline "$hash")"
-                    continue
-                fi
-            fi
-            _handle_cherry_pick_conflict "${wt:-}" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "$stashed" "${hashes[@]:$((_idx+1))}"
-            if [[ "$resolve" != "true" ]]; then
-                if $stashed; then _stash_pop_dispatch "${git_cmd[@]}" || true; fi
-                if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
-            fi
-            return 1
-        fi
-    done
-
-    if $stashed; then
-        _stash_pop_dispatch "${git_cmd[@]}" || true
-    fi
-    if [[ -z "$wt" ]]; then git checkout "$orig" --quiet; fi
+    _leave_branch
 }
 
 # Resolve source branch: current branch or from dispatchsource
@@ -977,15 +935,6 @@ cmd_apply() {
     local prev_branch="$base"
     local created=0 updated=0 skipped=0 failed=0
 
-    # Stash once before the loop to avoid per-target stash/pop churn
-    local apply_stashed=false
-    if ! $dry_run; then
-        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-            git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before apply"
-            apply_stashed=true
-        fi
-    fi
-
     # --reset <id>: delete the target branch so apply recreates it fresh
     if [[ -n "$reset_target" ]]; then
         local reset_branch
@@ -1010,12 +959,10 @@ cmd_apply() {
                     if [[ -t 0 ]]; then
                         read -p "Proceed? [y/N] " confirm
                         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-                            if $apply_stashed; then _stash_pop_dispatch || true; fi
                             echo "Aborted."
                             return 0
                         fi
                     else
-                        if $apply_stashed; then _stash_pop_dispatch || true; fi
                         die "Use --force to confirm --reset with target-only commits."
                     fi
                 fi
@@ -1040,11 +987,9 @@ cmd_apply() {
             if delete_err=$(git branch -D "$reset_branch" 2>&1); then
                 info "Deleted $reset_branch (will regenerate)"
             else
-                if $apply_stashed; then _stash_pop_dispatch || true; fi
                 die "Could not delete $reset_branch: $delete_err"
             fi
         else
-            if $apply_stashed; then _stash_pop_dispatch || true; fi
             die "Branch $reset_branch does not exist"
         fi
     fi
@@ -1126,7 +1071,7 @@ cmd_apply() {
             done <<< "$cherry_out"
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
-                cherry_pick_into "$resolve" "$branch_name" "${new_hashes[@]}"
+                _cherry_pick_commits "$resolve" "$branch_name" "${new_hashes[@]}"
                 info "  Updated $branch_name (${#new_hashes[@]} new commits)"
                 updated=$((updated + 1))
             else
@@ -1138,52 +1083,14 @@ cmd_apply() {
             git branch --no-track "$branch_name" "$parent_branch" 2>/dev/null || \
                 die "Could not create branch $branch_name"
 
-            local orig
-            orig=$(current_branch)
-
-            local checkout_err
-            if ! checkout_err=$(git checkout "$branch_name" --quiet 2>&1); then
-                git branch -D "$branch_name" 2>/dev/null || true
-                warn "  Failed to checkout $branch_name:"
-                warn "  $checkout_err"
-                warn "  Skipping this target. Fix the issue and re-run apply."
-                failed=$((failed + 1))
-                prev_branch="$branch_name"
-                continue
-            fi
-
-            local cherry_pick_failed=false
-            for hash in "${hashes[@]}"; do
-                local cp_err
-                if ! cp_err=$(git cherry-pick -x "$hash" 2>&1); then
-                    if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && git diff --cached --quiet; then
-                        warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$hash")"
-                        git cherry-pick --skip
-                        continue
-                    fi
-                    # Retry with --theirs to auto-resolve conflicts (safe on fresh targets)
-                    git cherry-pick --abort 2>/dev/null || true
-                    if git cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
-                        warn "  Auto-resolved conflict (--theirs): $(git log -1 --oneline "$hash")"
-                        continue
-                    fi
-                    # --theirs also failed
-                    warn "  Cherry-pick failed on $(git log -1 --oneline "$hash")"
-                    [[ -n "$cp_err" ]] && warn "  $cp_err"
-                    git cherry-pick --abort 2>/dev/null || true
-                    cherry_pick_failed=true
-                    break
-                fi
-            done
-
-            local checkout_err
-            if ! checkout_err=$(git checkout "$orig" --quiet 2>&1); then
-                warn "Could not return to $orig: $checkout_err"
-            fi
-
-            # Set up stack metadata
+            # Set up stack metadata early so _cherry_pick_commits can find the branch
             stack_add "$branch_name" "$parent_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
+
+            local cherry_pick_failed=false
+            if ! _cherry_pick_commits "$resolve" "$branch_name" --theirs-fallback "${hashes[@]}"; then
+                cherry_pick_failed=true
+            fi
 
             if $cherry_pick_failed; then
                 warn "  $branch_name created (cherry-pick conflicted)"
@@ -1194,10 +1101,6 @@ cmd_apply() {
         fi
         prev_branch="$branch_name"
     done
-
-    if $apply_stashed; then
-        _stash_pop_dispatch || true
-    fi
 
     echo ""
     if $dry_run; then
@@ -1283,7 +1186,7 @@ cmd_cherry_pick() {
             return
         fi
 
-        cherry_pick_into "$resolve" "$target_branch" "${new_hashes[@]}"
+        _cherry_pick_commits "$resolve" "$target_branch" "${new_hashes[@]}"
         info "Cherry-picked ${#new_hashes[@]} commit(s) to $target_branch"
 
     else
@@ -1328,7 +1231,7 @@ cmd_cherry_pick() {
         fi
 
         # Cherry-pick with trailer addition
-        _cherry_pick_with_trailers "$resolve" "$source" "$from" "${new_hashes[@]}"
+        _cherry_pick_commits "$resolve" "$source" --add-trailer "$from" "${new_hashes[@]}"
         if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
             info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
         else
@@ -1389,43 +1292,28 @@ cmd_rebase() {
         return
     fi
 
-    local orig
-    orig=$(current_branch)
+    _enter_branch "$source" || die "Cannot access branch $source (worktree conflict?)"
+    local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
 
-    # Auto-stash dirty working tree
-    local did_stash=false
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || \
-       [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
-        git stash --include-untracked -m "git-dispatch: auto-stash before rebase" --quiet
-        did_stash=true
-    fi
-
-    local checkout_err
-    if ! checkout_err=$(git checkout "$source" --quiet 2>&1); then
-        $did_stash && { _stash_pop_dispatch || true; }
-        die "Cannot checkout $source: $checkout_err"
-    fi
-
-    if ! git rebase "$base"; then
+    if ! "${gcmd[@]}" rebase "$base"; then
         echo ""
         warn "Rebase conflict on $source onto $base"
-        _show_conflict_diff ""
+        _show_conflict_diff "$_DISPATCH_WT_PATH"
         if $resolve; then
             echo ""
-            warn "Resolve conflicts, then run: git rebase --continue"
-            $did_stash && warn "Auto-stashed changes will be restored after rebase completes."
+            warn "Resolve conflicts, then run: git -C $_DISPATCH_WT_PATH rebase --continue"
+            warn "Worktree left at: $_DISPATCH_WT_PATH"
+            _DISPATCH_WT_CREATED=false  # prevent cleanup
             exit 1
         fi
-        git rebase --abort 2>/dev/null || true
-        [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-        $did_stash && { _stash_pop_dispatch || true; }
+        "${gcmd[@]}" rebase --abort 2>/dev/null || true
+        _leave_branch
         echo ""
         warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
         exit 1
     fi
 
-    [[ "$orig" != "$source" ]] && git checkout "$orig" --quiet 2>/dev/null || true
-    $did_stash && { _stash_pop_dispatch || true; }
+    _leave_branch
     info "Rebased $source onto $base"
 }
 
@@ -1492,16 +1380,7 @@ cmd_merge() {
         return
     fi
 
-    local orig
-    orig=$(current_branch)
     local merged=0 uptodate=0 failed=0
-
-    # Stash once before the loop (including untracked) to avoid checkout failures
-    local merge_stashed=false
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
-        git stash push --include-untracked --quiet -m "git-dispatch: auto-stash before merge"
-        merge_stashed=true
-    fi
 
     for branch in "${branches[@]}"; do
         local count
@@ -1512,56 +1391,35 @@ cmd_merge() {
             continue
         fi
 
-        # Worktree-aware: merge in worktree if branch is checked out there
-        local wt
-        wt=$(worktree_for_branch "$branch")
-        local -a gcmd=(git)
-        [[ -n "$wt" ]] && gcmd=(git -C "$wt")
-
-        if [[ -z "$wt" ]]; then
-            local checkout_err
-            if ! checkout_err=$(git checkout "$branch" --quiet 2>&1); then
-                warn "  Cannot checkout $branch: $checkout_err"
-                failed=$((failed + 1))
-                continue
-            fi
-        fi
+        _enter_branch "$branch" || {
+            warn "  Cannot access $branch (worktree conflict?)"
+            failed=$((failed + 1))
+            continue
+        }
+        local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
 
         if ! "${gcmd[@]}" merge "$base" --no-edit; then
             echo ""
             warn "Merge conflict on $branch from $base"
-            _show_conflict_diff "${wt:-}"
+            _show_conflict_diff "$_DISPATCH_WT_PATH"
             if $resolve; then
                 echo ""
-                warn "Resolve conflicts, then run: git commit"
-                if $merge_stashed; then
-                    warn "Note: your uncommitted changes were auto-stashed."
-                    warn "After resolving, run: git stash pop"
-                fi
+                warn "Resolve conflicts in worktree, then run: git -C $_DISPATCH_WT_PATH commit"
+                warn "Worktree left at: $_DISPATCH_WT_PATH"
+                _DISPATCH_WT_CREATED=false  # prevent cleanup
                 exit 1
             fi
             "${gcmd[@]}" merge --abort 2>/dev/null || true
+            _leave_branch
             warn "  $branch: merge conflict (skipped)"
             failed=$((failed + 1))
-            if [[ -z "$wt" ]]; then git checkout "$orig" --quiet 2>/dev/null || true; fi
             continue
         fi
 
         info "  Merged $base into $branch"
         merged=$((merged + 1))
-        if [[ -z "$wt" ]]; then git checkout "$orig" --quiet 2>/dev/null || true; fi
+        _leave_branch
     done
-
-    # Return to original branch if not already there
-    local cur
-    cur=$(current_branch)
-    if [[ "$cur" != "$orig" ]]; then
-        git checkout "$orig" --quiet 2>/dev/null || true
-    fi
-
-    if $merge_stashed; then
-        _stash_pop_dispatch || true
-    fi
 
     echo ""
     info "Summary: $merged merged, $uptodate up to date${failed:+, $failed failed}"
