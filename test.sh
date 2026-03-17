@@ -2528,6 +2528,647 @@ test_continue_detects_pending_conflict() {
     teardown
 }
 
+# ---------- checkout tests ----------
+
+test_checkout_creates_branch() {
+    echo "=== test: checkout creates branch ==="
+    setup
+    create_source  # commits: tid=3, tid=4(x2), tid=5
+
+    local output
+    output=$(bash "$DISPATCH" checkout 4 2>&1)
+
+    assert_branch_exists "dispatch-checkout/source/feature/4" "checkout branch created"
+
+    # Should have tid=3 and tid=4 commits (3 total), not tid=5
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/4" | wc -l | tr -d ' ')
+    assert_eq "3" "$count" "checkout has 3 commits (tid=3 + tid=4 x2)"
+
+    assert_contains "$output" "dispatch-checkout/source/feature/4" "output shows branch name"
+
+    teardown
+}
+
+test_checkout_includes_all_commits() {
+    echo "=== test: checkout includes Dispatch-Target-Id: all ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "shared" > shared.txt; git add shared.txt
+    git commit -m "shared config$(printf '\n\nDispatch-Target-Id: all')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    # Should have tid=1, tid=all, tid=2 (3 commits), not tid=3
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
+    assert_eq "3" "$count" "checkout has 3 commits (tid=1 + all + tid=2)"
+
+    # shared.txt should exist (from tid=all commit)
+    local shared_exists
+    shared_exists=$(git show "dispatch-checkout/source/feature/2:shared.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "shared" "$shared_exists" "all commit content present"
+
+    # c.txt should NOT exist (from tid=3)
+    local c_exists
+    c_exists=$(git show "dispatch-checkout/source/feature/2:c.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "MISSING" "$c_exists" "tid=3 content excluded"
+
+    teardown
+}
+
+test_checkout_preserves_source_order() {
+    echo "=== test: checkout preserves source commit order ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A-tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "B-tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "C-tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "d" > d.txt; git add d.txt
+    git commit -m "D-tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    # All 4 commits should be present
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
+    assert_eq "4" "$count" "all 4 commits included"
+
+    # Check order: first commit should be A (tid=2), not grouped
+    local first_msg
+    first_msg=$(git log --reverse --oneline "master..dispatch-checkout/source/feature/2" | head -1)
+    assert_contains "$first_msg" "A-tid2" "first commit is A (source order preserved)"
+
+    teardown
+}
+
+test_checkout_decimal_targets() {
+    echo "=== test: checkout with decimal target ids ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid1.5$(printf '\n\nDispatch-Target-Id: 1.5')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "d" > d.txt; git add d.txt
+    git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
+    assert_eq "3" "$count" "includes tid=1, 1.5, 2 (excludes tid=3)"
+
+    # b.txt from tid=1.5 should exist
+    local b_exists
+    b_exists=$(git show "dispatch-checkout/source/feature/2:b.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "b" "$b_exists" "decimal target 1.5 included"
+
+    # d.txt from tid=3 should NOT exist
+    local d_exists
+    d_exists=$(git show "dispatch-checkout/source/feature/2:d.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "MISSING" "$d_exists" "tid=3 excluded"
+
+    teardown
+}
+
+test_checkout_works_without_apply() {
+    echo "=== test: checkout works without prior apply ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    # Do NOT apply
+
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    assert_branch_exists "dispatch-checkout/source/feature/2" "checkout works without apply"
+
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "both commits present"
+
+    teardown
+}
+
+test_checkout_errors_if_exists() {
+    echo "=== test: checkout errors if branch exists ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" checkout 4 >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" checkout 4 2>&1) || true
+    assert_contains "$output" "already exists" "errors when checkout branch exists"
+
+    teardown
+}
+
+test_checkout_errors_if_not_initialized() {
+    echo "=== test: checkout errors if not initialized ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit --no-verify -m "no init" -q
+
+    local output
+    output=$(bash "$DISPATCH" checkout 3 2>&1) || true
+    assert_contains "$output" "Not initialized" "errors when not initialized"
+
+    teardown
+}
+
+test_checkout_empty_range() {
+    echo "=== test: checkout with no matching commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid5$(printf '\n\nDispatch-Target-Id: 5')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" checkout 3 2>&1) || true
+    assert_contains "$output" "No commits" "errors when no matching commits"
+
+    teardown
+}
+
+test_checkout_large_N_includes_all() {
+    echo "=== test: checkout with large N includes all commits ==="
+    setup
+    create_source  # commits: tid=3, tid=4(x2), tid=5
+
+    bash "$DISPATCH" checkout 999 >/dev/null 2>&1
+
+    local count
+    count=$(git log --oneline "master..dispatch-checkout/source/feature/999" | wc -l | tr -d ' ')
+    assert_eq "4" "$count" "all 4 commits included with N=999"
+
+    teardown
+}
+
+# ---------- checkout source tests ----------
+
+test_checkout_source_returns_to_source() {
+    echo "=== test: checkout source returns to source ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" checkout 4 >/dev/null 2>&1
+
+    # Switch to checkout branch
+    git checkout "dispatch-checkout/source/feature/4" -q
+
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+
+    local cur
+    cur=$(git symbolic-ref --short HEAD)
+    assert_eq "source/feature" "$cur" "back on source branch"
+
+    # Checkout branch should still exist
+    assert_branch_exists "dispatch-checkout/source/feature/4" "checkout branch preserved"
+
+    teardown
+}
+
+test_checkout_source_noop_on_source() {
+    echo "=== test: checkout source no-op when already on source ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" checkout source 2>&1)
+    assert_contains "$output" "Already on source" "informational message on source"
+
+    teardown
+}
+
+# ---------- checkout clear tests ----------
+
+test_checkout_clear_removes_branch() {
+    echo "=== test: checkout clear removes branch ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" checkout 4 >/dev/null 2>&1
+
+    bash "$DISPATCH" checkout clear >/dev/null 2>&1
+
+    assert_branch_not_exists "dispatch-checkout/source/feature/4" "checkout branch deleted"
+
+    local cur
+    cur=$(git symbolic-ref --short HEAD)
+    assert_eq "source/feature" "$cur" "still on source"
+
+    teardown
+}
+
+test_checkout_clear_warns_unpicked_commits() {
+    echo "=== test: checkout clear warns about unpicked commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Make a new commit on checkout branch
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "new" > new.txt; git add new.txt
+    git commit -m "new commit$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1) || true
+    assert_contains "$output" "unpicked" "warns about unpicked commits"
+
+    # Branch should still exist
+    assert_branch_exists "dispatch-checkout/source/feature/1" "branch preserved"
+
+    teardown
+}
+
+test_checkout_clear_force_with_unpicked() {
+    echo "=== test: checkout clear --force removes despite unpicked ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Make a new commit on checkout branch
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "new" > new.txt; git add new.txt
+    git commit -m "new commit$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git checkout source/feature -q
+
+    bash "$DISPATCH" checkout clear --force >/dev/null 2>&1
+
+    assert_branch_not_exists "dispatch-checkout/source/feature/1" "branch deleted with --force"
+
+    teardown
+}
+
+test_checkout_clear_no_checkout_exists() {
+    echo "=== test: checkout clear when no checkout exists ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1)
+    assert_contains "$output" "No checkout branch" "informational message"
+
+    teardown
+}
+
+test_checkout_clear_from_checkout_branch() {
+    echo "=== test: checkout clear from checkout branch ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" checkout 4 >/dev/null 2>&1
+
+    # Switch to checkout branch
+    git checkout "dispatch-checkout/source/feature/4" -q
+
+    bash "$DISPATCH" checkout clear >/dev/null 2>&1
+
+    local cur
+    cur=$(git symbolic-ref --short HEAD)
+    assert_eq "source/feature" "$cur" "switched to source"
+
+    assert_branch_not_exists "dispatch-checkout/source/feature/4" "checkout branch deleted"
+
+    teardown
+}
+
+# ---------- checkin tests ----------
+
+test_checkin_picks_new_commits_to_source() {
+    echo "=== test: checkin picks new commits to source ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    # Make a new commit on checkout
+    git checkout "dispatch-checkout/source/feature/2" -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "bugfix$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    # Source should have the new commit
+    local source_count
+    source_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+    assert_eq "3" "$source_count" "source has 3 commits (2 original + 1 checkin)"
+
+    # Verify the new commit has correct trailer
+    local last_tid
+    last_tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "source/feature" | tr -d '[:space:]')
+    assert_eq "2" "$last_tid" "checkin commit has correct Dispatch-Target-Id"
+
+    teardown
+}
+
+test_checkin_no_new_commits() {
+    echo "=== test: checkin no-op with no new commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/1" -q
+
+    local output
+    output=$(bash "$DISPATCH" checkin 2>&1)
+    assert_contains "$output" "No new commits" "reports no new commits"
+
+    teardown
+}
+
+test_checkin_multiple_commits_different_targets() {
+    echo "=== test: checkin with multiple commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 3 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/3" -q
+    echo "fix2" > fix2.txt; git add fix2.txt
+    git commit -m "fix for 2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "fix3" > fix3.txt; git add fix3.txt
+    git commit -m "fix for 3$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    local source_count
+    source_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+    assert_eq "5" "$source_count" "source has 5 commits (3 original + 2 checkin)"
+
+    teardown
+}
+
+test_checkin_does_not_auto_apply() {
+    echo "=== test: checkin does not auto-apply to targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "bugfix$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" checkin 2>&1)
+
+    # Target should NOT have the fix yet
+    local target_count
+    target_count=$(git log --oneline "master..source/feature-1" | wc -l | tr -d ' ')
+    assert_eq "1" "$target_count" "target not auto-updated"
+
+    assert_contains "$output" "apply" "output suggests running apply"
+
+    teardown
+}
+
+test_checkin_errors_if_not_on_checkout() {
+    echo "=== test: checkin errors if not on checkout ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" checkin 2>&1) || true
+    assert_contains "$output" "Not on a checkout branch" "errors on source branch"
+
+    teardown
+}
+
+test_checkin_skips_original_commits() {
+    echo "=== test: checkin skips original commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local before_count
+    before_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/2" -q
+    echo "new" > new.txt; git add new.txt
+    git commit -m "new work$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    local after_count
+    after_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+    assert_eq "3" "$after_count" "only 1 new commit added (originals skipped)"
+
+    teardown
+}
+
+test_checkin_source_keep_auto_resolves_conflict() {
+    echo "=== test: checkin Dispatch-Source-Keep auto-resolves conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "original" > swagger.json; git add swagger.json
+    git commit -m "add swagger$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Modify swagger on source (creates conflict)
+    echo "source-version" > swagger.json; git add swagger.json
+    git commit -m "source swagger update$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Modify swagger on checkout (different version)
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "checkout-version" > swagger.json; git add swagger.json
+    git commit -m "regen swagger$(printf '\n\nDispatch-Target-Id: 1\nDispatch-Source-Keep: true')" -q
+
+    local output
+    output=$(bash "$DISPATCH" checkin 2>&1)
+
+    # Should auto-resolve - checkout version wins
+    local swagger_content
+    swagger_content=$(git show "source/feature:swagger.json")
+    assert_eq "checkout-version" "$swagger_content" "checkout version accepted via Source-Keep"
+
+    teardown
+}
+
+test_checkin_then_apply_lifecycle() {
+    echo "=== test: checkin then apply lifecycle ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/2" -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "fix for 1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Checkin
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    # Switch to source and apply
+    git checkout source/feature -q
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Target-1 should have the fix
+    local fix_content
+    fix_content=$(git show "source/feature-1:fix.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "fix" "$fix_content" "target-1 has fix after apply"
+
+    # Target-2 should NOT have the fix (it was tid=1)
+    local fix_on_t2
+    fix_on_t2=$(git show "source/feature-2:fix.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "MISSING" "$fix_on_t2" "target-2 does not have tid=1 fix"
+
+    teardown
+}
+
+test_checkout_full_lifecycle() {
+    echo "=== test: checkout full lifecycle ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "shared" > shared.txt; git add shared.txt
+    git commit -m "shared$(printf '\n\nDispatch-Target-Id: all')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Checkout 2
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+    assert_branch_exists "dispatch-checkout/source/feature/2" "checkout created"
+
+    # Verify content
+    local shared
+    shared=$(git show "dispatch-checkout/source/feature/2:shared.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "shared" "$shared" "all commit present"
+
+    # Switch back to source
+    git checkout "dispatch-checkout/source/feature/2" -q
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+    local cur
+    cur=$(git symbolic-ref --short HEAD)
+    assert_eq "source/feature" "$cur" "back on source"
+
+    # Clear
+    bash "$DISPATCH" checkout clear >/dev/null 2>&1
+    assert_branch_not_exists "dispatch-checkout/source/feature/2" "checkout cleared"
+
+    teardown
+}
+
+test_checkout_does_not_affect_targets() {
+    echo "=== test: checkout does not affect targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    local target1_sha_before target2_sha_before
+    target1_sha_before=$(git rev-parse source/feature-1)
+    target2_sha_before=$(git rev-parse source/feature-2)
+
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    # Targets unchanged
+    local target1_sha_after target2_sha_after
+    target1_sha_after=$(git rev-parse source/feature-1)
+    target2_sha_after=$(git rev-parse source/feature-2)
+
+    assert_eq "$target1_sha_before" "$target1_sha_after" "target-1 unchanged"
+    assert_eq "$target2_sha_before" "$target2_sha_after" "target-2 unchanged"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2624,6 +3265,32 @@ test_stash_pop_conflict_warns
 test_continue_cleans_completed_worktree
 test_clean_lists_and_removes_worktrees
 test_continue_detects_pending_conflict
+test_checkout_creates_branch
+test_checkout_includes_all_commits
+test_checkout_preserves_source_order
+test_checkout_decimal_targets
+test_checkout_works_without_apply
+test_checkout_errors_if_exists
+test_checkout_errors_if_not_initialized
+test_checkout_empty_range
+test_checkout_large_N_includes_all
+test_checkout_source_returns_to_source
+test_checkout_source_noop_on_source
+test_checkout_clear_removes_branch
+test_checkout_clear_warns_unpicked_commits
+test_checkout_clear_force_with_unpicked
+test_checkout_clear_no_checkout_exists
+test_checkout_clear_from_checkout_branch
+test_checkin_picks_new_commits_to_source
+test_checkin_no_new_commits
+test_checkin_multiple_commits_different_targets
+test_checkin_does_not_auto_apply
+test_checkin_errors_if_not_on_checkout
+test_checkin_skips_original_commits
+test_checkin_source_keep_auto_resolves_conflict
+test_checkin_then_apply_lifecycle
+test_checkout_full_lifecycle
+test_checkout_does_not_affect_targets
 
 echo ""
 echo "======================="

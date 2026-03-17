@@ -2079,6 +2079,301 @@ cmd_clean() {
     git worktree prune 2>/dev/null || true
 }
 
+# ---------- checkout ----------
+
+cmd_checkout() {
+    local resolve=false force=false
+    local subcmd=""
+    local -a positional=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resolve)  resolve=true; shift ;;
+            --force)    force=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          positional+=("$1"); shift ;;
+        esac
+    done
+
+    [[ ${#positional[@]} -gt 0 ]] || die "Usage: git dispatch checkout <N|source|clear>"
+    subcmd="${positional[0]}"
+
+    case "$subcmd" in
+        source) _checkout_source ;;
+        clear)  _checkout_clear "$force" ;;
+        *)      _checkout_create "$subcmd" "$resolve" ;;
+    esac
+}
+
+_checkout_branch_name() {
+    local source="$1" n="$2"
+    echo "dispatch-checkout/${source}/${n}"
+}
+
+_find_checkout_branch() {
+    local source="$1"
+    git for-each-ref --format='%(refname:short)' "refs/heads/dispatch-checkout/${source}/" 2>/dev/null | head -1
+}
+
+_checkout_create() {
+    local n="$1" resolve="$2"
+    _require_init
+
+    # Validate N is numeric
+    if ! echo "$n" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+        die "Invalid target id '$n'. Use a positive number (e.g., 3, 1.5)"
+    fi
+
+    local base source
+    base=$(_get_config base)
+    source=$(current_branch)
+
+    # Must be on source branch
+    local dispatch_base
+    dispatch_base=$(_get_config base)
+    [[ -n "$dispatch_base" ]] || die "Not initialized. Run: git dispatch init"
+    # Verify we're on source (has dispatch config and is not a target)
+    local cur_source
+    cur_source=$(git config "branch.${source}.dispatchsource" 2>/dev/null || true)
+    [[ -z "$cur_source" ]] || die "Cannot checkout from target branch. Switch to source first."
+
+    local checkout_branch
+    checkout_branch=$(_checkout_branch_name "$source" "$n")
+
+    # Error if already exists
+    if git rev-parse --verify "refs/heads/$checkout_branch" &>/dev/null; then
+        die "Checkout branch '$checkout_branch' already exists. Run: git dispatch checkout clear"
+    fi
+
+    # Parse source commits
+    local commit_file
+    commit_file=$(mktemp)
+    trap "rm -f '$commit_file'" RETURN
+
+    while IFS= read -r hash; do
+        local tid
+        tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        [[ -n "$tid" ]] && echo "$hash $tid"
+    done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
+
+    # Filter: tid <= N (numeric) or tid == "all"
+    local -a hashes=()
+    while read -r hash tid; do
+        if [[ "$tid" == "all" ]]; then
+            hashes+=("$hash")
+        elif echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+            if awk "BEGIN {exit !($tid <= $n)}"; then
+                hashes+=("$hash")
+            fi
+        fi
+    done < "$commit_file"
+
+    if [[ ${#hashes[@]} -eq 0 ]]; then
+        die "No commits with Dispatch-Target-Id <= $n"
+    fi
+
+    # Create branch from base
+    git branch --no-track "$checkout_branch" "$base" -q
+
+    # Store active checkout in config
+    git config dispatch.checkoutBranch "$checkout_branch"
+
+    info "Creating checkout branch: $checkout_branch (${#hashes[@]} commits)"
+
+    # Cherry-pick all filtered commits
+    if ! _cherry_pick_commits "$resolve" "$checkout_branch" "${hashes[@]}"; then
+        warn "Conflict during checkout. Resolve and run: git dispatch continue"
+        return 1
+    fi
+
+    info "Checkout ready: $checkout_branch ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
+
+    # Print worktree path if one was created, or show how to use it
+    local wt_path
+    wt_path=$(worktree_for_branch "$checkout_branch")
+    if [[ -n "$wt_path" ]]; then
+        echo -e "  ${CYAN}worktree:${NC} $wt_path"
+    else
+        echo -e "  ${CYAN}branch:${NC} $checkout_branch"
+        echo "  Switch with: git checkout $checkout_branch"
+    fi
+}
+
+_checkout_source() {
+    local cur
+    cur=$(current_branch)
+
+    # Check if on a checkout branch
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        # Extract source from branch name: dispatch-checkout/<source>/<N>
+        # Source may contain slashes, N is the last segment
+        local rest="${cur#dispatch-checkout/}"
+        local source="${rest%/*}"
+        if [[ -n "$source" ]]; then
+            git checkout "$source" -q
+            info "Switched to source: $source"
+            return
+        fi
+    fi
+
+    # Try dispatch config
+    local dispatch_base
+    dispatch_base=$(_get_config base 2>/dev/null || true)
+    if [[ -n "$dispatch_base" ]]; then
+        # Already on source
+        info "Already on source: $cur"
+        return
+    fi
+
+    # On a target branch? Find source from config
+    local csource
+    csource=$(git config "branch.${cur}.dispatchsource" 2>/dev/null || true)
+    if [[ -n "$csource" ]]; then
+        git checkout "$csource" -q
+        info "Switched to source: $csource"
+        return
+    fi
+
+    die "Cannot determine source branch."
+}
+
+_checkout_clear() {
+    local force="$1"
+    local source checkout_branch
+
+    local cur
+    cur=$(current_branch)
+
+    # If on checkout branch, find source and switch first
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        local rest="${cur#dispatch-checkout/}"
+        source="${rest%/*}"
+        checkout_branch="$cur"
+        git checkout "$source" -q
+        info "Switched to source: $source"
+    else
+        source=$(resolve_source "")
+        checkout_branch=$(_find_checkout_branch "$source")
+    fi
+
+    if [[ -z "$checkout_branch" ]]; then
+        info "No checkout branch found."
+        return
+    fi
+
+    # Check for unpicked commits
+    if ! $force; then
+        local base
+        base=$(_get_config base)
+        # Count commits on checkout that aren't on source (by patch-id)
+        local checkout_count source_pids unpicked=0
+        source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
+            git show "$h" 2>/dev/null
+        done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+
+        while IFS= read -r ch; do
+            [[ -z "$ch" ]] && continue
+            local cpid
+            cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+            [[ -z "$cpid" ]] && continue
+            if ! echo "$source_pids" | grep -Fxq "$cpid"; then
+                unpicked=$((unpicked + 1))
+            fi
+        done < <(git log --format="%H" "$base..$checkout_branch")
+
+        if [[ $unpicked -gt 0 ]]; then
+            warn "$unpicked unpicked commit(s) on $checkout_branch"
+            warn "Run: git dispatch checkin  (to pick back to source)"
+            warn "  or: git dispatch checkout clear --force  (to discard)"
+            return 1
+        fi
+    fi
+
+    # Remove worktree if exists
+    local wt_path
+    wt_path=$(worktree_for_branch "$checkout_branch")
+    if [[ -n "$wt_path" ]]; then
+        git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
+    fi
+
+    # Delete branch
+    git branch -D "$checkout_branch" -q 2>/dev/null
+    git config --unset dispatch.checkoutBranch 2>/dev/null || true
+    git worktree prune 2>/dev/null || true
+
+    info "Cleared: $checkout_branch"
+}
+
+# ---------- checkin ----------
+
+cmd_checkin() {
+    local resolve=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resolve)  resolve=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    local cur
+    cur=$(current_branch)
+
+    # Must be on a checkout branch
+    [[ "$cur" == dispatch-checkout/* ]] || die "Not on a checkout branch. Run from dispatch-checkout/<source>/<N>"
+
+    # Extract source from branch name
+    local rest="${cur#dispatch-checkout/}"
+    local source="${rest%/*}"
+    [[ -n "$source" ]] || die "Cannot parse source from branch name: $cur"
+
+    local base
+    base=$(git -C "$(git rev-parse --show-toplevel)" config dispatch.base 2>/dev/null || true)
+    # Try reading base from source branch config
+    if [[ -z "$base" ]]; then
+        local source_wt
+        source_wt=$(worktree_for_branch "$source")
+        if [[ -n "$source_wt" ]]; then
+            base=$(git -C "$source_wt" config dispatch.base 2>/dev/null || true)
+        fi
+    fi
+    [[ -n "$base" ]] || die "Cannot determine base branch."
+
+    # Build patch-id set for source commits
+    local source_pids
+    source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
+        git show "$h" 2>/dev/null
+    done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+
+    # Find new commits on checkout (not in source by patch-id)
+    local -a new_hashes=()
+    while IFS= read -r ch; do
+        [[ -z "$ch" ]] && continue
+        local cpid
+        cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+        [[ -z "$cpid" ]] && continue
+        if ! echo "$source_pids" | grep -Fxq "$cpid"; then
+            new_hashes+=("$ch")
+        fi
+    done < <(git log --reverse --format="%H" "$base..$cur")
+
+    if [[ ${#new_hashes[@]} -eq 0 ]]; then
+        info "No new commits to pick."
+        return
+    fi
+
+    info "Picking ${#new_hashes[@]} commit(s) to source: $source"
+
+    # Cherry-pick to source, honoring Dispatch-Source-Keep
+    if ! _cherry_pick_commits "$resolve" "$source" "${new_hashes[@]}"; then
+        warn "Conflict during checkin. Resolve and run: git dispatch continue"
+        return 1
+    fi
+
+    info "Checked in $DISPATCH_LAST_PICKED commit(s) to $source"
+    echo -e "  ${CYAN}Next:${NC} git dispatch checkout source && git dispatch apply"
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -2168,6 +2463,8 @@ main() {
         status)       cmd_status "$@" ;;
         diff)         cmd_diff "$@" ;;
         verify)       cmd_verify "$@" ;;
+        checkout)     cmd_checkout "$@" ;;
+        checkin)      cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;
         clean)        cmd_clean "$@" ;;
         reset)        cmd_reset "$@" ;;
