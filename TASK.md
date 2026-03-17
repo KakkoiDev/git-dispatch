@@ -14,7 +14,7 @@ This task adds checkout/checkin commands for integration testing and renames
 ## Subtasks
 
 ### 1. Rename Target-Id -> Dispatch-Target-Id and none -> all
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (~40 occurrences), hooks/commit-msg (~9), hooks/prepare-commit-msg (~7), test.sh (~149)
 
 Two renames in one pass:
@@ -39,7 +39,7 @@ No backward compat. Clean break. 385 total occurrences across 13 files.
 - This is a behavior change. "none" was excluded from targets. "all" is included in all targets.
 
 ### 2. git dispatch checkout <N>
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (new cmd_checkout function)
 
 Create an integration test branch `dispatch-checkout/<source>/<N>` containing all
@@ -67,7 +67,7 @@ source commits with Dispatch-Target-Id <= N or Dispatch-Target-Id == "all", in s
 - Works with both independent and stacked modes (same behavior)
 
 ### 3. git dispatch checkout source
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (within cmd_checkout)
 
 Navigate back to the source branch from a checkout branch.
@@ -84,7 +84,7 @@ Navigate back to the source branch from a checkout branch.
 - Does NOT destroy the checkout worktree (user may want to return)
 
 ### 4. git dispatch checkout clear
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (within cmd_checkout)
 
 Remove the checkout branch and its worktree.
@@ -105,7 +105,7 @@ Remove the checkout branch and its worktree.
 - Handles case where no checkout exists (informational message)
 
 ### 5. git dispatch checkin
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (new cmd_checkin function)
 
 Cherry-pick new commits from checkout branch back to source. Does NOT auto-apply
@@ -133,7 +133,7 @@ workflow explicit: checkin syncs to source, apply syncs to targets.
 - Works when source has advanced since checkout was created (may conflict)
 
 ### 6. Simplify push command syntax
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (cmd_push)
 
 Replace `--from` flag with positional argument. Simpler, more natural.
@@ -150,7 +150,7 @@ New: `git dispatch push all`, `git dispatch push 3`, `git dispatch push source`
 - Error if no argument given
 
 ### 7. Update documentation
-**Status:** [ ] not started
+**Status:** [x] done
 **Files:** git-dispatch.sh (cmd_help), hooks/commit-msg
 
 Update `cmd_help` output to document:
