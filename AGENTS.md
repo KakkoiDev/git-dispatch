@@ -1,6 +1,6 @@
 ---
 name: git-dispatch
-description: Stacked PRs without the stack. Groups commits into multi-commit PRs via Dispatch-Target-Id trailers. Independent target branches, no force-push, integration test with checkout/checkin. Use when working with source branches that need to become grouped PRs, when applying source commits to target branches, when integration testing with checkout, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User wants to test targets together. user: 'I need to test targets 1 through 3 together' assistant: 'I'll use git-dispatch checkout 3 to create an integration branch.' </example> <example>Context: User fixed something on a checkout branch. user: 'Pick my fixes back to source' assistant: 'I'll use git-dispatch checkin to cherry-pick the new commits back to source.' </example> <example>Context: User needs to regen swagger for a failing target. user: 'Target 3 CI fails because swagger is wrong' assistant: 'I'll checkout 3, regen swagger, checkin with Source-Keep, then apply.' </example>
+description: Stacked PRs without the stack. Groups commits into multi-commit PRs via Dispatch-Target-Id trailers. Independent target branches, no force-push, integration test with checkout/checkin. Use when working with source branches that need to become grouped PRs, when applying source commits to target branches, or when integration testing with checkout. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User wants to test targets together. user: 'I need to test targets 1 through 3 together' assistant: 'I'll use git-dispatch checkout 3 to create an integration branch.' </example> <example>Context: User fixed something on a checkout branch. user: 'Pick my fixes back to source' assistant: 'I'll use git-dispatch checkin to cherry-pick the new commits back to source.' </example> <example>Context: User needs to regen swagger for a failing target. user: 'Target 3 CI fails because swagger is wrong' assistant: 'I'll checkout 3, regen swagger, checkin with Source-Keep, then apply.' </example>
 ---
 
 Workflow agent for the source -> target branches -> PRs pipeline.
@@ -23,30 +23,26 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL targets from source |
-| `git dispatch checkout <N>` | Create integration branch with targets 1..N + "all" commits |
+| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force]` | Create/update targets from source |
+| `git dispatch apply reset <N> [--force]` | Regenerate one target from scratch |
+| `git dispatch checkout <N> [--dry-run] [--resolve]` | Create integration branch with targets 1..N + "all" commits |
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
-| `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
-| `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
+| `git dispatch checkin [<N>] [--dry-run] [--resolve]` | Cherry-pick checkout commits back to source |
+| `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence, stale targets |
-| `git dispatch diff --to <id>` | File-level diff between source and target |
-| `git dispatch verify` | Cross-target file dependency detection |
 | `git dispatch continue` | Resume after conflict resolution |
-| `git dispatch clean [--force]` | Remove leftover worktrees |
 | `git dispatch reset [--force]` | Delete targets and config |
 
-## Apply vs Cherry-pick
+## Apply Options
 
 | Want | Command |
 |------|---------|
 | Create new targets + update all | `git dispatch apply` |
-| Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
-| Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
-| Regenerate one target | `git dispatch apply --reset <id>` |
-
-`apply` is the only command that creates new target branches.
+| Update one existing target | `git dispatch apply <N>` |
+| Regenerate one target from scratch | `git dispatch apply reset <N>` |
+| Merge base into all targets first | `git dispatch apply --base` |
 
 ## Workflows
 
@@ -169,20 +165,18 @@ All propagation commands support `--resolve` to leave conflicts active.
 
 Only files from that target's own commits are checked.
 
-Fix: `git dispatch diff --to <id>` then cherry-pick correct direction.
+Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
 | Target behind source | `git dispatch apply` |
-| Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
-| DIVERGED | `diff --to <id>` then cherry-pick correct direction |
+| Target ahead of source | `checkout`, `checkin`, then `apply` |
+| DIVERGED | `checkout`, reconcile, `checkin`, `apply` |
 | Stale target (tid reassigned) | `git dispatch apply --force` |
-| Cross-target file dependency | `git dispatch verify` |
 | Generated file conflict | `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
 | Need upstream changes | `git dispatch apply --base` |
-| Cherry-pick mid-batch fail | Re-run same command (picks remaining) |

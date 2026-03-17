@@ -44,18 +44,16 @@ Source is the single point of truth. Targets never touch base directly. Checkout
 
 ```
 git dispatch init --base <branch> --target-pattern <pattern>
-git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]
-git dispatch checkout <N>
+git dispatch init --hooks
+git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force]
+git dispatch apply reset <N> [--force]
+git dispatch checkout <N> [--dry-run] [--resolve]
 git dispatch checkout source
 git dispatch checkout clear [--force]
-git dispatch checkin [--resolve]
-git dispatch cherry-pick --from <x> --to <y> [--dry-run] [--resolve]
-git dispatch push <all|source|N> [--force] [--dry-run]
+git dispatch checkin [<N>] [--dry-run] [--resolve]
+git dispatch push <all|source|N> [--dry-run] [--force]
 git dispatch status
-git dispatch diff --to <id>
-git dispatch verify
 git dispatch continue
-git dispatch clean [--force]
 git dispatch reset [--force]
 ```
 
@@ -79,13 +77,13 @@ git dispatch reset [--force]
 
 **checkout clear** - Remove checkout branch and worktree. Warns if unpicked commits exist (use `--force` to discard, or `checkin` first).
 
-**checkin** - Cherry-pick new commits from checkout branch back to source. Uses patch-id to identify which commits are new. Honors `Dispatch-Source-Keep` for auto-conflict resolution. Does NOT auto-apply to targets.
-
-**cherry-pick** - Move commits between source and a target bidirectionally.
+**checkin [<N>]** - Cherry-pick new commits from checkout branch back to source. Optional `<N>` to cherry-pick only commits for a specific target. Uses patch-id to identify which commits are new. Honors `Dispatch-Source-Keep` for auto-conflict resolution. Does NOT auto-apply to targets.
 
 **push** - Push branches. Positional arg: `push all`, `push source`, `push 3`.
 
 **status** - Show mode, base, source, all targets with sync state, divergence, stale detection.
+
+**continue** - Resume after conflict resolution.
 
 ## Dispatch-Target-Id Trailer
 
@@ -134,7 +132,6 @@ Every command supports `--dry-run`.
 ```
 init --> apply --> push
      \-> checkout <N> --> checkin --> checkout source --> apply --> push
-     \-> cherry-pick / merge --> apply --> push
      \-> reset
 ```
 

@@ -47,21 +47,17 @@ git dispatch push all
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
-| `git dispatch apply` | Create/update target branches from source |
-| `git dispatch checkout <N>` | Integration branch with targets 1..N |
+| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force]` | Create/update target branches from source |
+| `git dispatch apply reset <N> [--force]` | Regenerate one target from scratch |
+| `git dispatch checkout <N> [--dry-run] [--resolve]` | Integration branch with targets 1..N |
 | `git dispatch checkout source` | Return to source branch |
-| `git dispatch checkout clear` | Remove checkout branch |
-| `git dispatch checkin` | Cherry-pick checkout commits back to source |
-| `git dispatch cherry-pick --from <x> --to <y>` | Move commits between source and targets |
-| `git dispatch push <all\|source\|N>` | Push branches to origin |
+| `git dispatch checkout clear [--force]` | Remove checkout branch |
+| `git dispatch checkin [<N>] [--dry-run] [--resolve]` | Cherry-pick checkout commits back to source |
+| `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence |
-| `git dispatch diff --to <id>` | File-level diff between source and target |
-| `git dispatch verify` | Detect cross-target file dependencies |
 | `git dispatch continue` | Resume after conflict resolution |
-| `git dispatch clean` | Remove leftover worktrees |
-| `git dispatch reset` | Delete targets and config |
-
-All propagation commands support `--dry-run`, `--resolve`, and `--force`.
+| `git dispatch reset [--force]` | Delete targets and config |
 
 ## Trailers
 
@@ -163,16 +159,14 @@ git dispatch apply
 git dispatch push all
 ```
 
-## Apply vs Cherry-pick
+## Apply Options
 
 | Want | Command |
 |------|---------|
 | Create new targets + update all | `git dispatch apply` |
-| Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
-| Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
-| Regenerate one target | `git dispatch apply --reset <id>` |
-
-`apply` is the only command that creates new target branches.
+| Update one existing target | `git dispatch apply <N>` |
+| Regenerate one target from scratch | `git dispatch apply reset <N>` |
+| Merge base into all targets first | `git dispatch apply --base` |
 
 ## Branch Naming
 
@@ -200,7 +194,7 @@ All commands show conflicted files and diff on failure.
 - `(DIVERGED)` - file content differs. Changes may be lost.
 - `(cosmetic)` - same content, different SHAs. Safe to ignore.
 
-Fix: `git dispatch diff --to <id>` then cherry-pick in correct direction.
+Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
 
 ## Stale Target Detection
 

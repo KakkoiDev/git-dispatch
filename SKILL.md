@@ -16,18 +16,16 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL target branches from source |
-| `git dispatch checkout <N>` | Create integration branch with targets 1..N + "all" commits |
+| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force]` | Create/update target branches from source |
+| `git dispatch apply reset <N> [--force]` | Regenerate one target from scratch |
+| `git dispatch checkout <N> [--dry-run] [--resolve]` | Create integration branch with targets 1..N + "all" commits |
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
-| `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
-| `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
+| `git dispatch checkin [<N>] [--dry-run] [--resolve]` | Cherry-pick checkout commits back to source |
+| `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
-| `git dispatch diff --to <id>` | Show file-level diff between source and target |
-| `git dispatch verify` | Detect cross-target file dependencies |
 | `git dispatch continue` | Resume after conflict resolution |
-| `git dispatch clean [--force]` | Remove leftover worktrees |
 | `git dispatch reset [--force]` | Delete target branches and config |
 
 ## Trailers
@@ -106,14 +104,14 @@ git dispatch apply
 git dispatch push all
 ```
 
-## Apply vs Cherry-pick
+## Apply Options
 
 | Want | Command |
 |------|---------|
 | Create new targets + update all | `git dispatch apply` |
-| Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
-| Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
-| Regenerate one target from scratch | `git dispatch apply --reset <id>` |
+| Update one existing target | `git dispatch apply <N>` |
+| Regenerate one target from scratch | `git dispatch apply reset <N>` |
+| Merge base into all targets first | `git dispatch apply --base` |
 
 ## Config
 
@@ -137,17 +135,16 @@ All propagation commands support `--resolve` to leave conflicts active for manua
 - `(DIVERGED)` - file content differs (changes may be lost)
 - `(cosmetic)` - same content, different SHAs (safe to ignore)
 
-Fix: `git dispatch diff --to <id>` then cherry-pick in correct direction.
+Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
 
 ## Common Fixes
 
 | Problem | Fix |
 |---------|-----|
 | Target behind source | `git dispatch apply` |
-| Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
-| DIVERGED after conflict | `diff --to <id>` then cherry-pick correct direction |
+| Target ahead of source | `checkout`, `checkin`, then `apply` |
+| DIVERGED after conflict | `checkout`, reconcile, `checkin`, `apply` |
 | Stale target after tid reassignment | `git dispatch apply --force` |
-| Cross-target file dependency | `git dispatch verify` to detect |
 | Generated file conflict | Add `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (missing swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Use decimal: `Dispatch-Target-Id=1.5` |
