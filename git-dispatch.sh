@@ -975,8 +975,18 @@ cmd_apply() {
             done <<< "$cherry_out"
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
+                # Detect suspected source rebase: if "new" commits >= existing target commits,
+                # source was likely rebased and all patches look new.
+                local _target_count
+                _target_count=$(git rev-list --count "$base..$branch_name" 2>/dev/null || echo 0)
+                if [[ ${#new_hashes[@]} -gt 1 && $_target_count -gt 0 && ${#new_hashes[@]} -ge $_target_count ]]; then
+                    warn "  $branch_name: ${#new_hashes[@]} new commits detected (target has $_target_count)."
+                    warn "  Source may have been rebased. Cherry-picking may conflict or duplicate."
+                    warn "  If push fails (non-fast-forward), use: git dispatch push $tid --force"
+                    warn "  To avoid this: use merge instead of rebase on source."
+                fi
                 _cherry_pick_commits "$resolve" "$branch_name" "${new_hashes[@]}"
-                info "  Updated $branch_name (${#new_hashes[@]} new commits)"
+                info "  Updated $branch_name ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
                 updated=$((updated + 1))
             else
                 echo "  $branch_name: in sync"
@@ -2294,10 +2304,10 @@ WORKFLOW
        git dispatch cherry-pick --from source --to 2    # source to one target
        git dispatch cherry-pick --from 2 --to source    # target back to source
 
-  5. Update with base changes:
-       git dispatch merge --from base --to source       # source only, safe
+  5. Update with base changes (prefer merge over rebase):
+       git dispatch merge --from base --to source       # safe, no force-push needed
        git dispatch merge --from base --to all          # source + all targets
-       git dispatch rebase --from base --to source      # rewrites history
+       git dispatch rebase --from base --to source      # rewrites history, may need force-push
 
 COMMANDS
   init        Configure dispatch on current source branch
