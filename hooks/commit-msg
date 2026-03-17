@@ -1,5 +1,5 @@
 #!/bin/bash
-# git-dispatch commit-msg hook: enforces Target-Id trailer on every commit
+# git-dispatch commit-msg hook: enforces Dispatch-Target-Id trailer on every commit
 # Install with: git dispatch init
 
 msg_file="$1"
@@ -9,24 +9,24 @@ if git rev-parse MERGE_HEAD &>/dev/null; then
     exit 0
 fi
 
-if ! grep -q "^Target-Id:" "$msg_file"; then
-    echo "Error: Missing Target-Id trailer."
-    echo "Use: git commit --trailer 'Target-Id=N'"
+if ! grep -q "^Dispatch-Target-Id:" "$msg_file"; then
+    echo "Error: Missing Dispatch-Target-Id trailer."
+    echo "Use: git commit --trailer 'Dispatch-Target-Id=N'"
     exit 1
 fi
 
-# Validate Target-Id is numeric (integer or decimal) or "none"
-target_id=$(grep "^Target-Id:" "$msg_file" | head -1 | sed 's/^Target-Id:[[:space:]]*//')
-if [[ "$target_id" == "none" ]]; then
+# Validate Dispatch-Target-Id is numeric (integer or decimal) or "all"
+target_id=$(grep "^Dispatch-Target-Id:" "$msg_file" | head -1 | sed 's/^Dispatch-Target-Id:[[:space:]]*//')
+if [[ "$target_id" == "all" ]]; then
     exit 0
 fi
 if ! echo "$target_id" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
     if echo "$target_id" | grep -Eq '^0[0-9]'; then
-        echo "Error: Target-Id '$target_id' has a leading zero. Use '${target_id#0}' instead."
+        echo "Error: Dispatch-Target-Id '$target_id' has a leading zero. Use '${target_id#0}' instead."
     elif [[ "$target_id" == "0" ]]; then
-        echo "Error: Target-Id '0' is not valid. Use a positive integer."
+        echo "Error: Dispatch-Target-Id '0' is not valid. Use a positive integer."
     else
-        echo "Error: Target-Id '$target_id' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5) or 'none'."
+        echo "Error: Dispatch-Target-Id '$target_id' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5) or 'all'."
     fi
     exit 1
 fi

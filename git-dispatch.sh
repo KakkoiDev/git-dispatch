@@ -312,18 +312,18 @@ _commit_semantically_in_branch() {
     return 1
 }
 
-# Get files touched by commits with a specific Target-Id on a branch.
+# Get files touched by commits with a specific Dispatch-Target-Id on a branch.
 _target_id_files() {
     local base="$1" branch="$2" tid="$3"
     while IFS= read -r hash; do
         local ctid
-        ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
         [[ "$ctid" == "$tid" ]] && git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null
     done < <(git log --format="%H" "$base..$branch")
 }
 
 # Check if source and target have diverged content (not just different SHAs).
-# Only checks files from commits with the matching Target-Id (avoids false
+# Only checks files from commits with the matching Dispatch-Target-Id (avoids false
 # positives from generated files or other tasks' changes in independent mode).
 # Returns 0 if content actually differs, 1 if same content (different commits only).
 _target_content_diverged() {
@@ -337,7 +337,7 @@ _target_content_diverged() {
     return 0
 }
 
-# Extract Target-Id from a branch name by reversing the target-pattern.
+# Extract Dispatch-Target-Id from a branch name by reversing the target-pattern.
 _extract_tid_from_branch() {
     local branch="$1"
     local pattern
@@ -495,7 +495,7 @@ _cherry_pick_commits() {
         local needs_trailer=false
         if [[ -n "$add_trailer" ]]; then
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
             [[ "$tid" != "$add_trailer" ]] && needs_trailer=true
         fi
 
@@ -528,7 +528,7 @@ _cherry_pick_commits() {
             fi
             local msg
             msg=$(git log -1 --format="%B" "$hash")
-            if ! "${gcmd[@]}" commit -m "$msg" --trailer "Target-Id=$add_trailer" --quiet; then
+            if ! "${gcmd[@]}" commit -m "$msg" --trailer "Dispatch-Target-Id=$add_trailer" --quiet; then
                 if "${gcmd[@]}" diff --cached --quiet; then
                     _skip_empty_pick "$hash" "${gcmd[@]}"; continue
                 fi
@@ -804,14 +804,14 @@ cmd_apply() {
     trap "rm -f '$commit_file' '$patch_map_file'" RETURN
 
     while IFS= read -r _h; do
-        # Skip merge commits (they have no Target-Id and that's expected)
+        # Skip merge commits (they have no Dispatch-Target-Id and that's expected)
         local _pc
         _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
         (( _pc > 2 )) && continue
         # Skip commits from base (already integrated)
         git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
@@ -824,33 +824,33 @@ cmd_apply() {
         die "No commits found between $base and $source"
     fi
 
-    # Check if all commits are source-only (Target-Id: none)
+    # Check if all commits target all (Dispatch-Target-Id: all) with no specific targets
     local _has_targets
-    _has_targets=$(awk '$2 != "none" {found=1; exit} END {print found+0}' "$commit_file")
+    _has_targets=$(awk '$2 != "all" {found=1; exit} END {print found+0}' "$commit_file")
     if [[ "$_has_targets" -eq 0 ]]; then
-        info "All commits are source-only (Target-Id: none). Nothing to apply."
+        info "All commits target all (Dispatch-Target-Id: all). No specific targets to apply."
         return
     fi
 
-    # Validate all commits have numeric Target-Id or "none"
+    # Validate all commits have numeric Dispatch-Target-Id or "all"
     while read -r hash tid; do
-        [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Target-Id trailer"
-        [[ "$tid" == "none" ]] && continue
+        [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Dispatch-Target-Id trailer"
+        [[ "$tid" == "all" ]] && continue
         if ! echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
             if echo "$tid" | grep -Eq '^0[0-9]'; then
-                die "Commit $(echo "$hash" | cut -c1-8) has Target-Id '$tid' with leading zero. Use '${tid#0}' instead."
+                die "Commit $(echo "$hash" | cut -c1-8) has Dispatch-Target-Id '$tid' with leading zero. Use '${tid#0}' instead."
             elif [[ "$tid" == "0" ]]; then
-                die "Commit $(echo "$hash" | cut -c1-8) has Target-Id '0'. Use a positive integer."
+                die "Commit $(echo "$hash" | cut -c1-8) has Dispatch-Target-Id '0'. Use a positive integer."
             fi
-            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Target-Id '$tid'"
+            die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Dispatch-Target-Id '$tid'"
         fi
     done < "$commit_file"
 
-    # Ordered unique target ids (numeric sort), excluding "none"
+    # Ordered unique target ids (numeric sort), excluding "all"
     local -a target_ids=()
     while IFS= read -r tid; do
         target_ids+=("$tid")
-    done < <(awk '$2 != "none" && !seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
+    done < <(awk '$2 != "all" && !seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
 
     # --- Stale target detection ---
     _build_source_patch_id_map "$patch_map_file" "$commit_file"
@@ -887,7 +887,7 @@ cmd_apply() {
 
     if [[ ${#stale_branches[@]} -gt 0 ]]; then
         echo ""
-        warn "Stale targets detected (Target-Id reassigned on source):"
+        warn "Stale targets detected (Dispatch-Target-Id reassigned on source):"
         echo ""
         for i in "${!stale_branches[@]}"; do
             local sb="${stale_branches[$i]}"
@@ -895,7 +895,7 @@ cmd_apply() {
             local sc="${stale_counts[$i]}"
             local to="${stale_target_only[$i]}"
             echo -e "  ${RED}${sb}${NC} (tid ${st})"
-            [[ $sc -gt 0 ]] && echo "    ${sc} commit(s) reassigned to different Target-Id"
+            [[ $sc -gt 0 ]] && echo "    ${sc} commit(s) reassigned to different Dispatch-Target-Id"
             [[ $to -gt 0 ]] && echo -e "    ${RED}${to} target-only commit(s) will be lost${NC}"
         done
         echo ""
@@ -955,7 +955,7 @@ cmd_apply() {
                     _rpc=$(git rev-list --parents -n1 "$_rh" | wc -w)
                     (( _rpc > 2 )) && continue
                     local _rtid
-                    _rtid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
+                    _rtid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
                     [[ -z "$_rtid" || "$_rtid" != "$reset_target" ]] && _target_only=$((_target_only + 1))
                 done < <(git log --format="%H" "${reset_parent:-$base}..$reset_branch" 2>/dev/null)
                 if [[ $_target_only -gt 0 ]]; then
@@ -998,12 +998,12 @@ cmd_apply() {
         fi
     fi
 
-    # Display source-only (none) commits in dry-run
+    # Display all-target commits in dry-run
     if $dry_run; then
-        local none_count
-        none_count=$(awk '$2 == "none"' "$commit_file" | wc -l | tr -d ' ')
-        if [[ "$none_count" -gt 0 ]]; then
-            echo -e "  ${GREEN}skip${NC} $none_count source-only commit(s) (Target-Id: none)"
+        local all_count
+        all_count=$(awk '$2 == "all"' "$commit_file" | wc -l | tr -d ' ')
+        if [[ "$all_count" -gt 0 ]]; then
+            echo -e "  ${GREEN}include${NC} $all_count commit(s) in all targets (Dispatch-Target-Id: all)"
         fi
     fi
 
@@ -1011,11 +1011,11 @@ cmd_apply() {
         local branch_name
         branch_name=$(_target_branch_name "$tid")
 
-        # Collect hashes for this target
+        # Collect hashes for this target (including "all" commits, in source order)
         local -a hashes=()
         while IFS= read -r h; do
             hashes+=("$h")
-        done < <(awk -v t="$tid" '$2 == t {print $1}' "$commit_file")
+        done < <(awk -v t="$tid" '$2 == t || $2 == "all" {print $1}' "$commit_file")
 
         # Determine parent branch for this target
         local parent_branch="$base"
@@ -1034,8 +1034,8 @@ cmd_apply() {
                     local hash
                     hash=$(echo "$line" | awk '{print $2}')
                     local ctid
-                    ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-                    [[ "$ctid" == "$tid" ]] && new_count=$((new_count + 1))
+                    ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+                    [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && new_count=$((new_count + 1))
                 done <<< "$cherry_out"
                 if [[ $new_count -gt 0 ]]; then
                     echo -e "  ${YELLOW}cherry-pick${NC} $new_count commit(s) to target $tid  $branch_name"
@@ -1061,7 +1061,7 @@ cmd_apply() {
                 continue
             fi
 
-            # Target exists locally - cherry-pick new commits
+            # Target exists locally - cherry-pick new commits (including "all" commits)
             local -a new_hashes=()
             local cherry_out
             cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
@@ -1070,8 +1070,8 @@ cmd_apply() {
                 local hash
                 hash=$(echo "$line" | awk '{print $2}')
                 local ctid
-                ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-                [[ "$ctid" == "$tid" ]] && new_hashes+=("$hash")
+                ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+                [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && new_hashes+=("$hash")
             done <<< "$cherry_out"
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
@@ -1176,8 +1176,8 @@ cmd_cherry_pick() {
             local hash
             hash=$(echo "$line" | awk '{print $2}')
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$to" ]] && new_hashes+=("$hash")
+            tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$tid" == "$to" || "$tid" == "all" ]] && new_hashes+=("$hash")
         done <<< "$cherry_out"
 
         if [[ ${#new_hashes[@]} -eq 0 ]]; then
@@ -1195,7 +1195,7 @@ cmd_cherry_pick() {
 
     else
         # Cherry-pick from target <id> to source
-        [[ "$to" == "source" ]] || die "Invalid --to '$to'. Use: source or a Target-Id"
+        [[ "$to" == "source" ]] || die "Invalid --to '$to'. Use: source or a Dispatch-Target-Id"
 
         local target_branch
         target_branch=$(_target_branch_name "$from")
@@ -1512,7 +1512,7 @@ cmd_status() {
         [[ -n "$c" ]] && ordered+=("$c")
     done < <(find_dispatch_targets "$source" | order_by_stack)
 
-    # Also find Target-Ids in source that don't have branches yet
+    # Also find Dispatch-Target-Ids in source that don't have branches yet
     local -a source_tids=()
     local status_commit_file status_map_file
     status_commit_file=$(mktemp)
@@ -1520,7 +1520,7 @@ cmd_status() {
     trap "rm -f '$status_commit_file' '$status_map_file'" RETURN
     while IFS= read -r _h; do
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         if [[ -n "$_t" ]]; then
             source_tids+=("$_t")
             echo "$_h $_t" >> "$status_commit_file"
@@ -1584,8 +1584,8 @@ cmd_status() {
             local hash
             hash=$(echo "$line" | awk '{print $2}')
             local ctid
-            ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$ctid" == "$tid" ]] && source_to_target_candidates+=("$hash")
+            ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && source_to_target_candidates+=("$hash")
         done <<< "$cherry_out"
 
         if [[ ${#source_to_target_candidates[@]} -gt 0 ]]; then
@@ -1660,7 +1660,7 @@ cmd_status() {
             fi
         fi
 
-        # Count untracked commits: target commits with no Target-Id or mismatched Target-Id
+        # Count untracked commits: target commits with no Dispatch-Target-Id or mismatched Dispatch-Target-Id
         local untracked=0
         while IFS= read -r thash; do
             [[ -n "$thash" ]] || continue
@@ -1669,8 +1669,8 @@ cmd_status() {
             _pcount=$(git rev-list --parents -n1 "$thash" | wc -w)
             (( _pcount > 2 )) && continue
             local _ctid
-            _ctid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$thash" | tr -d '[:space:]')
-            [[ -z "$_ctid" || ( "$_ctid" != "$tid" && "$_ctid" != "none" ) ]] && untracked=$((untracked + 1))
+            _ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$thash" | tr -d '[:space:]')
+            [[ -z "$_ctid" || ( "$_ctid" != "$tid" && "$_ctid" != "all" ) ]] && untracked=$((untracked + 1))
         done < <(git log --format="%H" "${parent:-$base}..$branch_name" 2>/dev/null)
 
         if [[ $source_to_target -eq 0 && $target_to_source -eq 0 && $untracked -eq 0 ]]; then
@@ -1714,7 +1714,7 @@ cmd_status() {
 
     if [[ ${#orphaned_branches[@]} -gt 0 ]]; then
         echo ""
-        warn "Stale targets (Target-Id no longer in source):"
+        warn "Stale targets (Dispatch-Target-Id no longer in source):"
         for i in "${!orphaned_branches[@]}"; do
             printf "  ${RED}%-${max_tid}s${NC}  %-${max_branch}s  ${RED}stale (all commits reassigned)${NC}\n" \
                 "${orphaned_tids[$i]}" "${orphaned_branches[$i]}"
@@ -1825,7 +1825,7 @@ cmd_verify() {
         _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
         (( _pc > 2 )) && continue
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
@@ -1916,10 +1916,10 @@ cmd_verify() {
         echo "Shared file modifications may cause CI failures on targets."
         echo ""
         echo -e "${CYAN}Options:${NC}"
-        echo "  1. Move commits so dependent files share a Target-Id"
+        echo "  1. Move commits so dependent files share a Dispatch-Target-Id"
         echo "  2. Switch to stacked mode: git dispatch init --mode stacked ..."
         echo "  3. Accept and resolve conflicts during apply"
-        echo "  4. Tag source-only commits with Target-Id: none and use Dispatch-Source-Keep for auto-resolve"
+        echo "  4. Tag shared commits with Dispatch-Target-Id: all and use Dispatch-Source-Keep for auto-resolve"
     else
         info "All ${#target_ids[@]} targets are file-independent."
     fi
@@ -2098,8 +2098,8 @@ SETUP
   --hooks installs only the commit hooks (useful in worktrees).
 
 WORKFLOW
-  1. Tag every commit with a Target-Id trailer:
-       git commit -m "Add feature" --trailer "Target-Id=1"
+  1. Tag every commit with a Dispatch-Target-Id trailer:
+       git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
 
   2. Create target branches:
        git dispatch apply
@@ -2118,7 +2118,7 @@ WORKFLOW
 COMMANDS
   init      Configure dispatch on current source branch
   apply     Make all targets match source (create/update). Detects stale targets
-            after Target-Id reassignment. --reset <id> to regenerate.
+            after Dispatch-Target-Id reassignment. --reset <id> to regenerate.
   cherry-pick  Move commits between source and target (--from/--to)
   rebase    Rebase source onto base (--from base --to source)
   merge     Merge base into branches (--from base --to <source|id|all>)
@@ -2137,15 +2137,15 @@ FLAGS (on propagation commands)
   --force     Override safety checks (apply: rebuild stale targets)
 
 TRAILERS
-  Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "none"
-    git commit -m "message" --trailer "Target-Id=1"
-    git commit -m "source-only change" --trailer "Target-Id=none"
+  Dispatch-Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "all"
+    git commit -m "message" --trailer "Dispatch-Target-Id=1"
+    git commit -m "shared change" --trailer "Dispatch-Target-Id=all"
 
-  "none" marks source-only commits that are skipped during apply.
-  Hook auto-carries Target-Id from previous commit when absent.
+  "all" includes the commit in every target during apply.
+  Hook auto-carries Dispatch-Target-Id from previous commit when absent.
 
   Dispatch-Source-Keep (optional): force-accept source version on conflict
-    git commit -m "regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+    git commit -m "regen files" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
 
   When a cherry-pick conflicts on a commit with this trailer, the source
   version is auto-accepted with --strategy-option theirs.

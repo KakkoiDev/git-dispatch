@@ -92,16 +92,16 @@ assert_branch_not_exists() {
 create_source() {
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add enum$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add enum$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     echo "b" > api.txt; git add api.txt
-    git commit -m "Create GET endpoint$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Create GET endpoint$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     echo "c" > dto.txt; git add dto.txt
-    git commit -m "Add DTOs$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Add DTOs$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     echo "d" > validate.txt; git add validate.txt
-    git commit -m "Implement validation$(printf '\n\nTarget-Id: 5')" -q
+    git commit -m "Implement validation$(printf '\n\nDispatch-Target-Id: 5')" -q
 
     # Init dispatch
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
@@ -272,7 +272,7 @@ test_init_hooks_only() {
 # ---------- hook tests ----------
 
 test_hook_rejects_missing_trailer() {
-    echo "=== test: hook rejects commit without Target-Id ==="
+    echo "=== test: hook rejects commit without Dispatch-Target-Id ==="
     setup
 
     git checkout -b source/feature master -q
@@ -280,10 +280,10 @@ test_hook_rejects_missing_trailer() {
 
     echo "x" > x.txt; git add x.txt
     if git commit -m "no trailer" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject commit without Target-Id"
+        echo -e "  ${RED}FAIL${NC} hook should reject commit without Dispatch-Target-Id"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Target-Id"
+        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Dispatch-Target-Id"
         PASS=$((PASS + 1))
     fi
 
@@ -291,16 +291,16 @@ test_hook_rejects_missing_trailer() {
 }
 
 test_hook_allows_valid_trailer() {
-    echo "=== test: hook allows commit with Target-Id ==="
+    echo "=== test: hook allows commit with Dispatch-Target-Id ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    git commit -m "with trailer$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "with trailer$(printf '\n\nDispatch-Target-Id: 1')" -q
     if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows commit with Target-Id"
+        echo -e "  ${GREEN}PASS${NC} hook allows commit with Dispatch-Target-Id"
         PASS=$((PASS + 1))
     fi
 
@@ -308,18 +308,18 @@ test_hook_allows_valid_trailer() {
 }
 
 test_hook_rejects_non_numeric_target_id() {
-    echo "=== test: hook rejects non-numeric Target-Id ==="
+    echo "=== test: hook rejects non-numeric Dispatch-Target-Id ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    if git commit -m "bad id$(printf '\n\nTarget-Id: task-3')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Target-Id"
+    if git commit -m "bad id$(printf '\n\nDispatch-Target-Id: task-3')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Dispatch-Target-Id"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Target-Id"
+        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Dispatch-Target-Id"
         PASS=$((PASS + 1))
     fi
 
@@ -327,16 +327,16 @@ test_hook_rejects_non_numeric_target_id() {
 }
 
 test_hook_allows_decimal_target_id() {
-    echo "=== test: hook allows decimal Target-Id ==="
+    echo "=== test: hook allows decimal Dispatch-Target-Id ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    git commit -m "decimal$(printf '\n\nTarget-Id: 1.5')" -q
+    git commit -m "decimal$(printf '\n\nDispatch-Target-Id: 1.5')" -q
     if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows decimal Target-Id"
+        echo -e "  ${GREEN}PASS${NC} hook allows decimal Dispatch-Target-Id"
         PASS=$((PASS + 1))
     fi
 
@@ -344,41 +344,41 @@ test_hook_allows_decimal_target_id() {
 }
 
 test_hook_auto_carry_target_id() {
-    echo "=== test: hook auto-carries Target-Id from previous commit ==="
+    echo "=== test: hook auto-carries Dispatch-Target-Id from previous commit ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "first$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     echo "b" > b.txt; git add b.txt
     git commit -m "second" -q
 
     local carried
-    carried=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "3" "$carried" "Target-Id auto-carried from previous commit"
+    carried=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$carried" "Dispatch-Target-Id auto-carried from previous commit"
 
     teardown
 }
 
 test_hook_auto_carry_no_override() {
-    echo "=== test: hook does not override explicit Target-Id ==="
+    echo "=== test: hook does not override explicit Dispatch-Target-Id ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "first$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     echo "b" > b.txt; git add b.txt
-    git commit -m "second" --trailer "Target-Id=4" -q
+    git commit -m "second" --trailer "Dispatch-Target-Id=4" -q
 
     local target_id
-    target_id=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "4" "$target_id" "explicit Target-Id not overridden by auto-carry"
+    target_id=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "4" "$target_id" "explicit Dispatch-Target-Id not overridden by auto-carry"
 
     teardown
 }
@@ -399,27 +399,27 @@ test_worktree_shares_hooks_via_hookspath() {
         FAIL=$((FAIL + 1))
     fi
 
-    # Create worktree from master (no Target-Id on HEAD) to test rejection
+    # Create worktree from master (no Dispatch-Target-Id on HEAD) to test rejection
     local wt_path="$TMPDIR/worktree-test"
     git worktree add "$wt_path" -b wt-branch master -q 2>/dev/null
 
-    # Verify commit without Target-Id is rejected from the worktree
+    # Verify commit without Dispatch-Target-Id is rejected from the worktree
     (cd "$wt_path" && echo "wt" > wt.txt && git add wt.txt)
     local wt_err
     if wt_err=$(git -C "$wt_path" commit -m "no trailer" 2>&1); then
-        echo -e "  ${RED}FAIL${NC} worktree should reject commit without Target-Id"
+        echo -e "  ${RED}FAIL${NC} worktree should reject commit without Dispatch-Target-Id"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} worktree rejects commit without Target-Id"
+        echo -e "  ${GREEN}PASS${NC} worktree rejects commit without Dispatch-Target-Id"
         PASS=$((PASS + 1))
     fi
 
-    # Verify commit with Target-Id works from the worktree
-    if git -C "$wt_path" commit -m "with trailer" --trailer "Target-Id=1" -q 2>/dev/null; then
-        echo -e "  ${GREEN}PASS${NC} worktree allows commit with Target-Id"
+    # Verify commit with Dispatch-Target-Id works from the worktree
+    if git -C "$wt_path" commit -m "with trailer" --trailer "Dispatch-Target-Id=1" -q 2>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC} worktree allows commit with Dispatch-Target-Id"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} worktree should allow commit with Target-Id"
+        echo -e "  ${RED}FAIL${NC} worktree should allow commit with Dispatch-Target-Id"
         FAIL=$((FAIL + 1))
     fi
 
@@ -494,7 +494,7 @@ test_apply_incremental() {
 
     # Add a new commit to source for target 4
     echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix DTO validation$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Fix DTO validation$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     local before
     before=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
@@ -515,10 +515,10 @@ test_apply_new_target_mid_stack() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add A$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "c" > c.txt; git add c.txt
-    git commit -m "Add C$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add C$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -528,7 +528,7 @@ test_apply_new_target_mid_stack() {
 
     # Add target 2 (mid-stack insert via numeric sort)
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Add B$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     bash "$DISPATCH" apply >/dev/null
 
@@ -564,13 +564,13 @@ test_apply_stacked_mode() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add enum$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add enum$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "b" > api.txt; git add api.txt
-    git commit -m "Create endpoint$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Create endpoint$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     echo "c" > validate.txt; git add validate.txt
-    git commit -m "Add validation$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add validation$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
     bash "$DISPATCH" apply
@@ -597,10 +597,10 @@ test_apply_conflict_aborts() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "b" > file.txt; git add file.txt
-    git commit -m "Modify file$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Modify file$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -634,11 +634,11 @@ test_apply_create_auto_resolves_with_theirs() {
 
     # Commit 1: modify generated file (will conflict since master has different content after next step)
     echo "source-v1" > generated.txt; git add generated.txt
-    git commit -m "Update generated file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Update generated file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Commit 2: another change to same target
     echo "source-v2" > generated.txt; git add generated.txt
-    git commit -m "Update generated again$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Update generated again$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Advance master so the file diverges from base
     git checkout master -q
@@ -681,7 +681,7 @@ test_cherry_pick_source_to_target() {
 
     # Add new commit for target 4
     echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix endpoint$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Fix endpoint$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     local before
     before=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
@@ -723,13 +723,13 @@ test_cherry_pick_target_to_source() {
 }
 
 test_cherry_pick_adds_trailer() {
-    echo "=== test: cherry-pick --from <id> --to source adds Target-Id ==="
+    echo "=== test: cherry-pick --from <id> --to source adds Dispatch-Target-Id ==="
     setup
     create_source
 
     bash "$DISPATCH" apply >/dev/null
 
-    # Commit on target without proper Target-Id
+    # Commit on target without proper Dispatch-Target-Id
     git checkout source/feature-3 -q
     echo "fix" > fix.txt; git add fix.txt
     git commit --no-verify -m "Fix without trailer" -q
@@ -738,8 +738,8 @@ test_cherry_pick_adds_trailer() {
     bash "$DISPATCH" cherry-pick --from 3 --to source
 
     local source_trailer
-    source_trailer=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "3" "$source_trailer" "Target-Id trailer added on cherry-pick to source"
+    source_trailer=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" source/feature | tr -d '[:space:]')
+    assert_eq "3" "$source_trailer" "Dispatch-Target-Id trailer added on cherry-pick to source"
 
     teardown
 }
@@ -752,7 +752,7 @@ test_cherry_pick_dry_run() {
     bash "$DISPATCH" apply >/dev/null
 
     echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Fix$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 4 --dry-run)
@@ -769,7 +769,7 @@ test_cherry_pick_target_to_source_noop_semantic_sync() {
 
     bash "$DISPATCH" apply >/dev/null
 
-    # Target-only commit (Target-Id 3): add "hotfix" line.
+    # Target-only commit (Dispatch-Target-Id 3): add "hotfix" line.
     git checkout source/feature-3 -q
     printf "a\nhotfix\n" > file.txt; git add file.txt
     git commit --no-verify -m "Target hotfix" -q
@@ -780,7 +780,7 @@ test_cherry_pick_target_to_source_noop_semantic_sync() {
     printf "a\nhotfix\n" > file.txt
     echo "extra" > extra.txt
     git add file.txt extra.txt
-    git commit -m "Broader source change$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Broader source change$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     local before after cp_output status_output target3_line
     before=$(git rev-list --count master..source/feature)
@@ -1005,7 +1005,7 @@ test_status_shows_pending() {
 
     # Add new commit for target 4
     echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Fix$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     local output
     output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
@@ -1021,7 +1021,7 @@ test_status_not_created() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "A$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1100,18 +1100,18 @@ test_install_chmod() {
 # ---------- decimal target-id ordering ----------
 
 test_apply_decimal_target_id() {
-    echo "=== test: apply with decimal Target-Id ordering ==="
+    echo "=== test: apply with decimal Dispatch-Target-Id ordering ==="
     setup
 
     git checkout -b source/feature master -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add B$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Add B$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add A$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add A$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "mid" > mid.txt; git add mid.txt
-    git commit -m "Add mid$(printf '\n\nTarget-Id: 1.5')" -q
+    git commit -m "Add mid$(printf '\n\nDispatch-Target-Id: 1.5')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply
@@ -1138,7 +1138,7 @@ test_cherry_pick_conflict_shows_details() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1150,7 +1150,7 @@ test_cherry_pick_conflict_shows_details() {
 
     git checkout source/feature -q
     echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
@@ -1170,11 +1170,11 @@ test_cherry_pick_conflict_resolve_leaves_active() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
     echo "d" > d.txt; git add d.txt
-    git commit -m "Add d$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add d$(printf '\n\nDispatch-Target-Id: 1')" -q
     echo "e" > e.txt; git add e.txt
-    git commit -m "Add e$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add e$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1186,9 +1186,9 @@ test_cherry_pick_conflict_resolve_leaves_active() {
 
     git checkout source/feature -q
     echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
     echo "f" > f.txt; git add f.txt
-    git commit -m "Add f$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add f$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
@@ -1218,7 +1218,7 @@ test_cherry_pick_conflict_batch_reporting() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1231,11 +1231,11 @@ test_cherry_pick_conflict_batch_reporting() {
     # Add 3 new source commits for target 1 - first will conflict
     git checkout source/feature -q
     echo "source-a" > a.txt; git add a.txt
-    git commit -m "Source modifies a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies a$(printf '\n\nDispatch-Target-Id: 1')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
     echo "c" > c.txt; git add c.txt
-    git commit -m "Add c$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add c$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
@@ -1256,7 +1256,7 @@ test_rebase_conflict_shows_details() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1284,7 +1284,7 @@ test_rebase_conflict_resolve() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1313,7 +1313,7 @@ test_merge_conflict_shows_details() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1339,7 +1339,7 @@ test_merge_conflict_resolve() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1370,7 +1370,7 @@ test_status_shows_diverged() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1382,7 +1382,7 @@ test_status_shows_diverged() {
 
     git checkout source/feature -q
     echo "source-version" > file.txt; git add file.txt
-    git commit -m "Source modification$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modification$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
@@ -1399,7 +1399,7 @@ test_diff_shows_diverged_files() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1411,7 +1411,7 @@ test_diff_shows_diverged_files() {
 
     git checkout source/feature -q
     echo "source-version" > file.txt; git add file.txt
-    git commit -m "Source modification$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modification$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" diff --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
@@ -1431,7 +1431,7 @@ test_diff_no_difference() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1450,7 +1450,7 @@ test_status_semantic_source_to_target() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -1479,10 +1479,10 @@ test_apply_reset_regenerates_target() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "file1" > f1.txt; git add f1.txt
-    git commit -m "Task 1$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Task 1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "file2" > f2.txt; git add f2.txt
-    git commit -m "Task 2$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Task 2$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     bash "$DISPATCH" apply >/dev/null
 
@@ -1521,13 +1521,13 @@ test_full_lifecycle() {
 
     # 2. Build
     echo "schema" > schema.sql; git add schema.sql
-    git commit -m "Schema change$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Schema change$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     echo "endpoint" > endpoint.ts; git add endpoint.ts
-    git commit -m "Backend endpoint$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Backend endpoint$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     echo "component" > component.tsx; git add component.tsx
-    git commit -m "Frontend component$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Frontend component$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     # 3. Apply
     bash "$DISPATCH" apply >/dev/null
@@ -1543,7 +1543,7 @@ test_full_lifecycle() {
 
     # 5. Add fix, re-apply
     echo "fix" > fix.ts; git add fix.ts
-    git commit -m "Fix endpoint$(printf '\n\nTarget-Id: 2')" -q
+    git commit -m "Fix endpoint$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     bash "$DISPATCH" apply >/dev/null
 
@@ -1590,7 +1590,7 @@ test_refresh_base_fetches_remote() {
     bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Simulate stale origin/master by pushing new commits from another clone
     local other_clone="$TMPDIR/other"
@@ -1633,7 +1633,7 @@ test_refresh_base_noop_when_up_to_date() {
     bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # No new upstream commits - base is already current
     local output
@@ -1653,7 +1653,7 @@ test_refresh_base_local_branch_with_remote() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Push upstream commit from another clone to advance origin/master
     local other_clone="$TMPDIR/other"
@@ -1689,7 +1689,7 @@ test_refresh_base_warns_on_fetch_failure() {
     git config dispatch.mode "independent"
 
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Apply should warn but not crash
     local output
@@ -1708,7 +1708,7 @@ test_rebase_refreshes_base() {
     bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Push upstream commit from another clone
     local other_clone="$TMPDIR/other"
@@ -1745,9 +1745,9 @@ test_apply_detects_stale_after_reassignment() {
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
     echo "feature B" > b.txt; git add b.txt
-    git commit -m "Feature B$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 8')" -q
 
     bash "$DISPATCH" apply >/dev/null 2>&1
     assert_eq "true" "$(git rev-parse --verify refs/heads/target-8 &>/dev/null && echo true || echo false)" "target-8 exists after apply"
@@ -1755,9 +1755,9 @@ test_apply_detects_stale_after_reassignment() {
     # Rewrite source with different tid (simulates rebase + trailer change)
     git reset --hard master -q
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 15')" -q
     echo "feature B" > b.txt; git add b.txt
-    git commit -m "Feature B$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 15')" -q
 
     # Apply should detect stale and fail without --force
     local output exit_code=0
@@ -1779,18 +1779,18 @@ test_apply_force_rebuilds_stale() {
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
     echo "feature B" > b.txt; git add b.txt
-    git commit -m "Feature B$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 8')" -q
 
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     # Rewrite source with different tid
     git reset --hard master -q
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 15')" -q
     echo "feature B" > b.txt; git add b.txt
-    git commit -m "Feature B$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 15')" -q
 
     local output
     output=$(bash "$DISPATCH" apply --force 2>&1)
@@ -1815,14 +1815,14 @@ test_status_shows_stale() {
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
 
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     # Rewrite source with different tid
     git reset --hard master -q
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 15')" -q
 
     local output
     output=$(bash "$DISPATCH" status 2>&1)
@@ -1842,7 +1842,7 @@ test_apply_stale_warns_target_only_commits() {
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
 
     bash "$DISPATCH" apply >/dev/null 2>&1
 
@@ -1855,7 +1855,7 @@ test_apply_stale_warns_target_only_commits() {
     # Rewrite source with different tid
     git reset --hard master -q
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 15')" -q
 
     local output exit_code=0
     output=$(bash "$DISPATCH" apply 2>&1) || exit_code=$?
@@ -1874,14 +1874,14 @@ test_apply_stale_dry_run() {
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 8')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
 
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     # Rewrite source with different tid
     git reset --hard master -q
     echo "feature A" > a.txt; git add a.txt
-    git commit -m "Feature A$(printf '\n\nTarget-Id: 15')" -q
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 15')" -q
 
     local output
     output=$(bash "$DISPATCH" apply --dry-run 2>&1)
@@ -1901,9 +1901,9 @@ test_verify_no_deps() {
 
     git checkout -b source/feature master -q
     echo "schema" > schema.ts; git add schema.ts
-    git commit -m "Add schema$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add schema$(printf '\n\nDispatch-Target-Id: 3')" -q
     echo "endpoint" > endpoint.ts; git add endpoint.ts
-    git commit -m "Add endpoint$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Add endpoint$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1921,10 +1921,10 @@ test_verify_new_file_dep() {
 
     git checkout -b source/feature master -q
     echo "export const auth = true" > auth.ts; git add auth.ts
-    git commit -m "Add auth$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add auth$(printf '\n\nDispatch-Target-Id: 3')" -q
     echo "import auth" > api.ts; git add api.ts
     echo "// updated" >> auth.ts; git add auth.ts
-    git commit -m "Add API using auth$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Add API using auth$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1948,9 +1948,9 @@ test_verify_shared_file_dep() {
 
     git checkout -b source/feature master -q
     echo "change A" >> shared.ts; git add shared.ts
-    git commit -m "Modify shared A$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Modify shared A$(printf '\n\nDispatch-Target-Id: 3')" -q
     echo "change B" >> shared.ts; git add shared.ts
-    git commit -m "Modify shared B$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Modify shared B$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -1969,7 +1969,7 @@ test_verify_stacked_mode_skips() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
 
@@ -1987,9 +1987,9 @@ test_verify_before_apply() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 4')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 4')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
@@ -2010,35 +2010,35 @@ test_verify_before_apply() {
 
 
 
-# ---------- Target-Id: none ----------
+# ---------- Dispatch-Target-Id: all ----------
 
-test_target_id_none_hook_accepts() {
-    echo "=== test: hook accepts Target-Id: none ==="
+test_target_id_all_hook_accepts() {
+    echo "=== test: hook accepts Dispatch-Target-Id: all ==="
     setup
 
     git checkout -b source master -q
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     echo "a" > a.txt; git add a.txt
-    git commit -m "Source-only change$(printf '\n\nTarget-Id: none')" -q
+    git commit -m "Shared change$(printf '\n\nDispatch-Target-Id: all')" -q
 
     # If we get here, the hook accepted it
     local tid
-    tid=$(git log -1 --format="%(trailers:key=Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "none" "$tid" "hook accepted Target-Id: none"
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "all" "$tid" "hook accepted Dispatch-Target-Id: all"
 
     teardown
 }
 
-test_target_id_none_skipped_during_apply() {
-    echo "=== test: none commits are skipped during apply ==="
+test_target_id_all_included_in_all_targets() {
+    echo "=== test: all commits are included in every target ==="
     setup
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Source-only$(printf '\n\nTarget-Id: none')" -q
+    git commit -m "Shared change$(printf '\n\nDispatch-Target-Id: all')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
@@ -2046,32 +2046,32 @@ test_target_id_none_skipped_during_apply() {
 
     assert_branch_exists "target-3" "target-3 created"
 
-    # target-3 should have b.txt but NOT a.txt (source-only)
+    # target-3 should have BOTH b.txt AND a.txt (all commits included in every target)
     local has_b has_a
     has_b=$(git show target-3:b.txt 2>/dev/null || echo "")
     has_a=$(git show target-3:a.txt 2>/dev/null || echo "MISSING")
     assert_eq "b" "$has_b" "target has b.txt"
-    assert_eq "MISSING" "$has_a" "target does not have a.txt (source-only)"
+    assert_eq "a" "$has_a" "target has a.txt (all-target commit included)"
 
     teardown
 }
 
-test_target_id_none_dry_run_display() {
-    echo "=== test: dry-run shows source-only for none commits ==="
+test_target_id_all_dry_run_display() {
+    echo "=== test: dry-run shows included in all targets for all commits ==="
     setup
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Source-only$(printf '\n\nTarget-Id: none')" -q
+    git commit -m "Shared change$(printf '\n\nDispatch-Target-Id: all')" -q
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
     local output
     output=$(bash "$DISPATCH" apply --dry-run 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
-    assert_contains "$output" "source-only" "shows source-only in dry-run"
+    assert_contains "$output" "in all targets" "shows in all targets in dry-run"
 
     teardown
 }
@@ -2087,14 +2087,14 @@ test_source_keep_force_accepts_conflict() {
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     # Create conflict: source modifies generated.txt with Source-Keep
     echo "source-version" > generated.txt; git add generated.txt
-    git commit -m "Regen files$(printf '\n\nTarget-Id: 3\nDispatch-Source-Keep: true')" -q
+    git commit -m "Regen files$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Source-Keep: true')" -q
 
     # Advance target's generated.txt so it conflicts
     git checkout target-3 -q
@@ -2121,7 +2121,7 @@ test_source_keep_no_conflict_normal_pick() {
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3\nDispatch-Source-Keep: true')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Source-Keep: true')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null 2>&1
@@ -2144,14 +2144,14 @@ test_no_source_keep_conflict_still_fails() {
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     # Create conflict WITHOUT Source-Keep trailer
     echo "source-version" > generated.txt; git add generated.txt
-    git commit -m "Update generated$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Update generated$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     # Advance target's generated.txt so it conflicts
     git checkout target-3 -q
@@ -2173,7 +2173,7 @@ test_apply_from_target_branch() {
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
@@ -2182,7 +2182,7 @@ test_apply_from_target_branch() {
 
     # Add new commit on source
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     # Switch to target branch and run apply from there
     git checkout target-3 -q
@@ -2208,7 +2208,7 @@ test_apply_skips_base_ancestor_commits() {
 
     git checkout -b source master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 3')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
@@ -2229,7 +2229,7 @@ test_resolve_warns_about_dangling_stash() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2243,7 +2243,7 @@ test_resolve_warns_about_dangling_stash() {
     # Create dirty working tree - should NOT be disturbed
     echo "dirty" > untracked.txt
     echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
@@ -2269,14 +2269,14 @@ test_cherry_pick_stash_before_checkout() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
 
     # Add new source commit to cherry-pick
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Create untracked file that would block checkout
     echo "untracked" > untracked.txt
@@ -2305,7 +2305,7 @@ test_merge_worktree_aware() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2331,7 +2331,7 @@ test_apply_warns_base_drift() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2344,7 +2344,7 @@ test_apply_warns_base_drift() {
 
     # Add a new source commit to trigger the update path
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
     output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
@@ -2361,13 +2361,13 @@ test_status_shows_untracked_commits() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
 
-    # Add commit on target without proper Target-Id trailer
-    # Must unset prepare-commit-msg to avoid auto-carry of Target-Id
+    # Add commit on target without proper Dispatch-Target-Id trailer
+    # Must unset prepare-commit-msg to avoid auto-carry of Dispatch-Target-Id
     git checkout source/feature-1 -q
     echo "extra" > extra.txt; git add extra.txt
     GIT_AUTHOR_DATE="2020-01-01T00:00:00" git -c core.hooksPath=/dev/null commit -m "Extra commit without trailer" -q
@@ -2388,7 +2388,7 @@ test_stash_pop_conflict_warns() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2398,7 +2398,7 @@ test_stash_pop_conflict_warns() {
 
     # Add new source commit
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # Cherry-pick via worktree should not touch staged changes
     local output
@@ -2421,14 +2421,14 @@ test_continue_cleans_completed_worktree() {
 
     git checkout -b source/feature master -q
     echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
 
     # Add a new commit and cherry-pick (non-conflicting)
     echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" cherry-pick --from source --to 1 >/dev/null 2>&1
 
@@ -2446,7 +2446,7 @@ test_clean_lists_and_removes_worktrees() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2458,7 +2458,7 @@ test_clean_lists_and_removes_worktrees() {
 
     git checkout source/feature -q
     echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # --resolve leaves worktree alive
     bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
@@ -2488,7 +2488,7 @@ test_continue_detects_pending_conflict() {
 
     git checkout -b source/feature master -q
     echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
@@ -2500,7 +2500,7 @@ test_continue_detects_pending_conflict() {
 
     git checkout source/feature -q
     echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nTarget-Id: 1')" -q
+    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
 
@@ -2595,9 +2595,9 @@ test_verify_stacked_mode_skips
 test_verify_before_apply
 test_apply_from_target_branch
 test_apply_skips_base_ancestor_commits
-test_target_id_none_hook_accepts
-test_target_id_none_skipped_during_apply
-test_target_id_none_dry_run_display
+test_target_id_all_hook_accepts
+test_target_id_all_included_in_all_targets
+test_target_id_all_dry_run_display
 test_source_keep_force_accepts_conflict
 test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails
