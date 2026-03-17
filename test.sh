@@ -3121,6 +3121,130 @@ test_checkout_does_not_affect_targets() {
     teardown
 }
 
+test_continue_resumes_remaining_queue() {
+    echo "=== test: continue resumes remaining commits after conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    # Commit 1: clean
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Commit 2: will conflict with base version of file.txt
+    echo "source-version" > file.txt; git add file.txt
+    git commit -m "tid1-conflict$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Commit 3: clean, should land after conflict resolution
+    echo "c" > c.txt; git add c.txt
+    git commit -m "tid1-after$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Create conflict on base: add file.txt to master so cherry-pick conflicts
+    git checkout master -q
+    echo "base-version" > file.txt; git add file.txt
+    git commit --no-verify -m "base adds file.txt" -q
+    git checkout source/feature -q
+
+    # Checkout with --resolve (will conflict on commit 2)
+    local output
+    output=$(bash "$DISPATCH" checkout 1 --resolve 2>&1) || true
+
+    # Find the worktree
+    local wt
+    wt=$(git worktree list --porcelain | awk '/^worktree / {path=substr($0, 10)} /^branch / {if (path ~ /git-dispatch-wt\./) print path}' | head -1)
+
+    if [[ -n "$wt" ]]; then
+        # Queue file should exist with remaining commits
+        assert_eq "true" "$(test -f "$wt/.dispatch-queue" && echo true || echo false)" "queue file created"
+
+        # Resolve the conflict
+        git -C "$wt" checkout --theirs file.txt 2>/dev/null
+        git -C "$wt" add file.txt 2>/dev/null
+        git -C "$wt" cherry-pick --continue --no-edit 2>/dev/null
+
+        # Continue should resume remaining commits
+        local cont_output
+        cont_output=$(bash "$DISPATCH" continue 2>&1)
+        assert_contains "$cont_output" "Resuming" "continue resumes remaining commits"
+
+        # Check all 3 commits landed
+        local count
+        count=$(git log --oneline "master..dispatch-checkout/source/feature/1" | wc -l | tr -d ' ')
+        assert_eq "3" "$count" "all 3 commits landed after continue"
+
+        # c.txt should exist (from commit 3, the one that was in queue)
+        local c_exists
+        c_exists=$(git show "dispatch-checkout/source/feature/1:c.txt" 2>/dev/null || echo "MISSING")
+        assert_eq "c" "$c_exists" "queued commit content present"
+    else
+        echo -e "  ${RED}FAIL${NC} no worktree found for conflict resolution"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # Cleanup
+    bash "$DISPATCH" clean --force >/dev/null 2>&1
+
+    teardown
+}
+
+test_continue_resumes_apply_queue() {
+    echo "=== test: continue resumes apply queue after conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Create conflict: target modifies file, source adds new commit modifying same file
+    git checkout source/feature-1 -q
+    echo "target-change" > a.txt; git add a.txt
+    git commit --no-verify -m "target modifies a" -q
+    git checkout source/feature -q
+
+    echo "source-change" > a.txt; git add a.txt
+    git commit -m "source modifies a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Add another commit AFTER the conflicting one
+    echo "d" > d.txt; git add d.txt
+    git commit -m "another commit$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Apply with --resolve
+    bash "$DISPATCH" apply --resolve 2>&1 || true
+
+    # Find worktree
+    local wt
+    wt=$(git worktree list --porcelain | awk '/^worktree / {path=substr($0, 10)} /^branch / {if (path ~ /git-dispatch-wt\./) print path}' | head -1)
+
+    if [[ -n "$wt" ]]; then
+        # Resolve conflict
+        git -C "$wt" checkout --theirs a.txt 2>/dev/null
+        git -C "$wt" add a.txt 2>/dev/null
+        git -C "$wt" cherry-pick --continue --no-edit 2>/dev/null
+
+        # Continue should pick remaining
+        local cont_output
+        cont_output=$(bash "$DISPATCH" continue 2>&1)
+
+        # d.txt should exist on target (from the queued commit)
+        local d_exists
+        d_exists=$(git show "source/feature-1:d.txt" 2>/dev/null || echo "MISSING")
+        assert_eq "d" "$d_exists" "queued apply commit landed after continue"
+    else
+        echo -e "  ${RED}FAIL${NC} no worktree found for conflict resolution"
+        FAIL=$((FAIL + 1))
+    fi
+
+    bash "$DISPATCH" clean --force >/dev/null 2>&1
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -3241,6 +3365,8 @@ test_checkin_source_keep_auto_resolves_conflict
 test_checkin_then_apply_lifecycle
 test_checkout_full_lifecycle
 test_checkout_does_not_affect_targets
+test_continue_resumes_remaining_queue
+test_continue_resumes_apply_queue
 
 echo ""
 echo "======================="

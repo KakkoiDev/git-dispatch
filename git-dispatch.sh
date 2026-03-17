@@ -437,6 +437,8 @@ _handle_cherry_pick_conflict() {
             for rh in "${remaining_hashes[@]}"; do
                 echo "  $(git log -1 --oneline "$rh")"
             done
+            # Persist queue for continue to resume
+            printf '%s\n' "${remaining_hashes[@]}" > "$wt_path/.dispatch-queue"
         fi
     else
         "${gcmd[@]}" cherry-pick --abort 2>/dev/null || "${gcmd[@]}" reset --merge 2>/dev/null || true
@@ -1922,11 +1924,64 @@ cmd_continue() {
             warn "  Resolve in: $wt"
             warn "  Then run:   git -C $wt rebase --continue"
         else
+            # Cherry-pick resolved. Check for remaining queue.
+            if [[ -f "$wt/.dispatch-queue" ]]; then
+                local -a remaining=()
+                while IFS= read -r qh; do
+                    [[ -n "$qh" ]] && remaining+=("$qh")
+                done < "$wt/.dispatch-queue"
+                rm -f "$wt/.dispatch-queue"
+
+                if [[ ${#remaining[@]} -gt 0 ]]; then
+                    info "Resuming cherry-pick on $branch (${#remaining[@]} remaining commits)"
+                    # Cherry-pick remaining commits in the worktree
+                    local -a gcmd=(git -C "$wt")
+                    local _cont_picked=0 _cont_skipped=0
+                    for (( _qi=0; _qi < ${#remaining[@]}; _qi++ )); do
+                        local qhash="${remaining[$_qi]}"
+                        if ! "${gcmd[@]}" cherry-pick -x "$qhash" 2>/dev/null; then
+                            if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && "${gcmd[@]}" diff --cached --quiet; then
+                                warn "  Skipping empty cherry-pick: $(git log -1 --oneline "$qhash")"
+                                "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet
+                                _cont_skipped=$((_cont_skipped + 1))
+                                continue
+                            fi
+                            # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
+                            local _sk
+                            _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$qhash" | tr -d '[:space:]')
+                            if [[ -n "$_sk" ]]; then
+                                "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                                if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$qhash" 2>/dev/null; then
+                                    warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$qhash")"
+                                    _cont_picked=$((_cont_picked + 1))
+                                    continue
+                                fi
+                            fi
+                            # Conflict - save remaining queue and pause
+                            local -a new_remaining=("${remaining[@]:$((_qi+1))}")
+                            if [[ ${#new_remaining[@]} -gt 0 ]]; then
+                                printf '%s\n' "${new_remaining[@]}" > "$wt/.dispatch-queue"
+                            fi
+                            echo ""
+                            warn "Conflict on commit $((_qi + 1))/${#remaining[@]}: $(git log -1 --oneline "$qhash")"
+                            _show_conflict_diff "$wt"
+                            echo ""
+                            warn "Resolve conflicts, then run: ${gcmd[*]} cherry-pick --continue"
+                            warn "Then run: git dispatch continue"
+                            if [[ ${#new_remaining[@]} -gt 0 ]]; then
+                                warn "${#new_remaining[@]} commits remaining after this one."
+                            fi
+                            info "Resumed: $_cont_picked picked, $_cont_skipped skipped before conflict"
+                            git worktree prune 2>/dev/null || true
+                            return 1
+                        fi
+                        _cont_picked=$((_cont_picked + 1))
+                    done
+                    info "Resumed: $_cont_picked picked, $_cont_skipped skipped"
+                fi
+            fi
             info "Operation complete on $branch. Cleaning up $wt"
             git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
-            echo ""
-            warn "Remaining commits may not have been applied."
-            echo -e "  ${CYAN}Run:${NC} git dispatch apply  (to process any remaining commits)"
         fi
     done
     git worktree prune 2>/dev/null || true

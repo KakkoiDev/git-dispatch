@@ -60,8 +60,29 @@ no cascade, no destroyed review context. Ever.
 - install.sh: remove --mode from usage examples
 - Help text in cmd_help()
 
-## Acceptance criteria
-- [ ] No references to "stacked" in git-dispatch.sh
+---
+
+## PLANNED: Remove rebase command
+
+Rebase rewrites history. This tool exists to avoid force-push. Merge handles
+base updates without history rewrite. Rebase after targets are pushed forces
+force-push on all targets, violating the core promise.
+
+### What to remove
+- `cmd_rebase()` function
+- `rebase` from command dispatch in `main()`
+- `rebase` from help text
+- All rebase tests
+- Rebase conflict resolution code
+- References in SKILL.md, AGENTS.md, README.md, DESIGN.md
+
+### What to keep
+- `merge --from base --to source` (the safe alternative)
+
+---
+
+## Acceptance criteria (stacked mode removal - done)
+- [x] No references to "stacked" in git-dispatch.sh
 - [ ] No references to "stacked" in test.sh
 - [ ] No --mode flag
 - [ ] No dispatchtargets config
