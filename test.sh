@@ -753,10 +753,12 @@ test_cherry_pick_target_to_source_noop_semantic_sync() {
 
 # ---------- merge tests ----------
 
-test_merge_base_to_source() {
-    echo "=== test: merge --from base --to source ==="
+test_apply_base_merges_and_applies() {
+    echo "=== test: apply --base merges base into source then applies ==="
     setup
     create_source
+
+    bash "$DISPATCH" apply >/dev/null
 
     # Advance master
     git checkout master -q
@@ -764,26 +766,31 @@ test_merge_base_to_source() {
     git commit --no-verify -m "advance master" -q
     git checkout source/feature -q
 
-    bash "$DISPATCH" merge --from base --to source
+    bash "$DISPATCH" apply --base >/dev/null 2>&1
 
-    # Source should have merge commit
-    local parent_count
-    parent_count=$(git cat-file -p HEAD | grep -c '^parent ')
-    assert_eq "2" "$parent_count" "source has merge commit"
-
-    if [[ -f "new.txt" ]]; then
-        echo -e "  ${GREEN}PASS${NC} base content merged into source"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} base content not merged"
-        FAIL=$((FAIL + 1))
-    fi
+    # Source should have merge commit (base merged in)
+    local has_new
+    has_new=$(git show source/feature:new.txt 2>/dev/null || echo "MISSING")
+    assert_eq "new" "$has_new" "base content merged into source"
 
     teardown
 }
 
-test_merge_dry_run() {
-    echo "=== test: merge --dry-run ==="
+test_apply_base_up_to_date() {
+    echo "=== test: apply --base when already up to date ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" apply --base 2>&1)
+
+    assert_contains "$output" "up to date" "reports already up to date"
+
+    teardown
+}
+
+test_apply_base_dry_run() {
+    echo "=== test: apply --base --dry-run ==="
     setup
     create_source
 
@@ -793,9 +800,10 @@ test_merge_dry_run() {
     git checkout source/feature -q
 
     local output
-    output=$(bash "$DISPATCH" merge --from base --to source --dry-run)
+    output=$(bash "$DISPATCH" apply --base --dry-run 2>&1)
 
-    assert_contains "$output" "dry-run" "dry-run label shown"
+    assert_contains "$output" "dry-run" "dry-run shows merge plan"
+    assert_contains "$output" "merge" "shows merge action"
 
     teardown
 }
@@ -1160,8 +1168,8 @@ test_cherry_pick_conflict_batch_reporting() {
     teardown
 }
 
-test_merge_conflict_shows_details() {
-    echo "=== test: merge conflict shows details ==="
+test_apply_base_conflict_shows_details() {
+    echo "=== test: apply --base conflict shows details ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1177,40 +1185,10 @@ test_merge_conflict_shows_details() {
     git checkout source/feature -q
 
     local output
-    output=$(bash "$DISPATCH" merge --from base --to source 2>&1) || true
+    output=$(bash "$DISPATCH" apply --base 2>&1) || true
 
     assert_contains "$output" "Merge conflict" "shows merge conflict header"
-    assert_contains "$output" "Conflicted files" "shows conflicted files"
     assert_contains "$output" "file.txt" "shows conflicted filename"
-
-    teardown
-}
-
-test_merge_conflict_resolve() {
-    echo "=== test: merge --resolve leaves conflict active ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    git checkout master -q
-    echo "conflict" > file.txt; git add file.txt
-    git commit --no-verify -m "Master changes file" -q
-
-    git checkout source/feature -q
-
-    local output
-    output=$(bash "$DISPATCH" merge --from base --to source --resolve 2>&1) || true
-
-    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
-    assert_contains "$output" "commit" "shows commit command"
-    assert_contains "$output" "Worktree left at:" "shows worktree path"
-
-    # Clean up any leftover worktrees
-    git worktree prune 2>/dev/null || true
 
     teardown
 }
@@ -2122,32 +2100,6 @@ test_cherry_pick_stash_before_checkout() {
     teardown
 }
 
-test_merge_worktree_aware() {
-    echo "=== test: merge handles worktree branches ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Add a commit to master (base) to have something to merge
-    git checkout master -q
-    echo "base-update" > base.txt; git add base.txt
-    git commit --no-verify -m "Update base" -q
-    git checkout source/feature -q
-
-    local output
-    output=$(bash "$DISPATCH" merge --from base --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
-
-    assert_contains "$output" "Merged" "merge into target succeeds"
-    assert_not_contains "$output" "error" "no errors"
-
-    teardown
-}
-
 test_apply_warns_base_drift() {
     echo "=== test: apply warns when source is behind base ==="
     setup
@@ -2173,7 +2125,7 @@ test_apply_warns_base_drift() {
     output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
     assert_contains "$output" "behind" "warns source is behind base"
-    assert_contains "$output" "merge --from base" "suggests merge command"
+    assert_contains "$output" "apply --base" "suggests apply --base command"
 
     teardown
 }
@@ -3135,8 +3087,9 @@ test_cherry_pick_target_to_source
 test_cherry_pick_adds_trailer
 test_cherry_pick_dry_run
 test_cherry_pick_target_to_source_noop_semantic_sync
-test_merge_base_to_source
-test_merge_dry_run
+test_apply_base_merges_and_applies
+test_apply_base_up_to_date
+test_apply_base_dry_run
 test_push_dry_run_all
 test_push_dry_run_single
 test_push_force_dry_run
@@ -3153,8 +3106,7 @@ test_apply_decimal_target_id
 test_cherry_pick_conflict_shows_details
 test_cherry_pick_conflict_resolve_leaves_active
 test_cherry_pick_conflict_batch_reporting
-test_merge_conflict_shows_details
-test_merge_conflict_resolve
+test_apply_base_conflict_shows_details
 test_status_shows_diverged
 test_diff_shows_diverged_files
 test_diff_no_difference
@@ -3185,7 +3137,6 @@ test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails
 test_resolve_warns_about_dangling_stash
 test_cherry_pick_stash_before_checkout
-test_merge_worktree_aware
 test_apply_warns_base_drift
 test_status_shows_untracked_commits
 test_stash_pop_conflict_warns

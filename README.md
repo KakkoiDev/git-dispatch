@@ -53,7 +53,6 @@ git dispatch push all
 | `git dispatch checkout clear` | Remove checkout branch |
 | `git dispatch checkin` | Cherry-pick checkout commits back to source |
 | `git dispatch cherry-pick --from <x> --to <y>` | Move commits between source and targets |
-| `git dispatch merge --from base --to <source\|id\|all>` | Merge base into branches |
 | `git dispatch push <all\|source\|N>` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence |
 | `git dispatch diff --to <id>` | File-level diff between source and target |
@@ -159,7 +158,7 @@ git dispatch push 2
 ## Workflow: Keep Up With Main
 
 ```bash
-git dispatch merge --from base --to source
+git dispatch apply --base
 git dispatch apply
 git dispatch push all
 ```

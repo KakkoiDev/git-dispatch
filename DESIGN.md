@@ -50,7 +50,6 @@ git dispatch checkout source
 git dispatch checkout clear [--force]
 git dispatch checkin [--resolve]
 git dispatch cherry-pick --from <x> --to <y> [--dry-run] [--resolve]
-git dispatch merge --from base --to <source|id|all> [--resolve]
 git dispatch push <all|source|N> [--force] [--dry-run]
 git dispatch status
 git dispatch diff --to <id>
@@ -220,7 +219,7 @@ git dispatch push 2
 
 ```bash
 # Safe (no force-push)
-git dispatch merge --from base --to source
+git dispatch apply --base
 git dispatch apply
 git dispatch push all
 ```
@@ -300,7 +299,7 @@ git dispatch checkout clear
 
 ### Base update
 ```bash
-git dispatch merge --from base --to source
+git dispatch apply --base
 git dispatch apply
 git dispatch push all
 ```

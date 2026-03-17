@@ -29,7 +29,6 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
-| `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into branches |
 | `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence, stale targets |
 | `git dispatch diff --to <id>` | File-level diff between source and target |
@@ -107,7 +106,7 @@ git dispatch push 2
 
 ### Keep up with main
 ```bash
-git dispatch merge --from base --to source
+git dispatch apply --base
 git dispatch apply
 git dispatch push all
 ```
@@ -185,5 +184,5 @@ Fix: `git dispatch diff --to <id>` then cherry-pick correct direction.
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
-| Need upstream changes | `merge --from base --to source` then `apply` |
+| Need upstream changes | `git dispatch apply --base` |
 | Cherry-pick mid-batch fail | Re-run same command (picks remaining) |

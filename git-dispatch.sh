@@ -691,7 +691,7 @@ cmd_apply() {
     _require_init
     _acquire_lock
 
-    local dry_run=false resolve=false force=false reset_target=""
+    local dry_run=false resolve=false force=false reset_target="" merge_base=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -699,6 +699,7 @@ cmd_apply() {
             --resolve)  resolve=true; shift ;;
             --force)    force=true; shift ;;
             --reset)    reset_target="$2"; shift 2 ;;
+            --base)     merge_base=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          die "Unexpected argument: $1" ;;
         esac
@@ -711,6 +712,37 @@ cmd_apply() {
 
     # Ensure base ref is up-to-date before creating/updating targets (best-effort)
     _refresh_base "$base" || true
+
+    # --base: merge base into source first
+    if $merge_base; then
+        local base_count
+        base_count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
+        if [[ "$base_count" -eq 0 ]]; then
+            info "Source already up to date with $base"
+        elif $dry_run; then
+            echo -e "${YELLOW}[dry-run]${NC} merge $base ($base_count commits) into $source"
+        else
+            _enter_branch "$source" || die "Cannot access source branch (worktree conflict?)"
+            local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
+            if ! "${gcmd[@]}" merge "$base" --no-edit; then
+                echo ""
+                warn "Merge conflict on $source from $base"
+                _show_conflict_diff "$_DISPATCH_WT_PATH"
+                if $resolve; then
+                    echo ""
+                    warn "Resolve conflicts in worktree, then run: git -C $_DISPATCH_WT_PATH commit"
+                    warn "Then run: git dispatch continue && git dispatch apply"
+                    _DISPATCH_WT_CREATED=false
+                    exit 1
+                fi
+                "${gcmd[@]}" merge --abort 2>/dev/null || true
+                _leave_branch
+                die "Base merge conflict. Re-run with --resolve to resolve manually."
+            fi
+            info "Merged $base into $source ($base_count commits)"
+            _leave_branch
+        fi
+    fi
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file patch_map_file
@@ -1029,7 +1061,7 @@ cmd_apply() {
             if [[ "$_base_ahead" -gt 0 ]]; then
                 echo ""
                 warn "Note: source is $_base_ahead commit(s) behind $base."
-                warn "Targets may need base update. Run: git dispatch merge --from base --to all"
+                warn "Run: git dispatch apply --base  (to merge base into source and re-apply)"
             fi
         fi
     fi
@@ -1150,112 +1182,6 @@ cmd_cherry_pick() {
 }
 
 # ---------- merge ----------
-
-cmd_merge() {
-    _require_init
-    _acquire_lock
-
-    local from="" to="" dry_run=false resolve=false force=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --from)     from="$2"; shift 2 ;;
-            --to)       to="$2"; shift 2 ;;
-            --dry-run)  dry_run=true; shift ;;
-            --resolve)  resolve=true; shift ;;
-            --force)    force=true; shift ;;
-            -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
-        esac
-    done
-
-    [[ -n "$from" ]] || die "Missing --from"
-    [[ -n "$to" ]] || die "Missing --to"
-    [[ "$from" == "base" ]] || die "Only --from base is supported"
-
-    local base source
-    base=$(_get_config base)
-    source=$(resolve_source "")
-
-    # Ensure base ref is up-to-date before merging (best-effort)
-    _refresh_base "$base" || true
-
-    # Build list of branches to merge into
-    local -a branches=()
-    if [[ "$to" == "source" ]]; then
-        branches=("$source")
-    elif [[ "$to" == "all" ]]; then
-        branches=("$source")
-        while IFS= read -r c; do
-            [[ -n "$c" ]] && branches+=("$c")
-        done < <(find_dispatch_targets "$source")
-        [[ ${#branches[@]} -gt 1 ]] || die "No targets found"
-    else
-        # Numeric target id
-        local target_branch
-        target_branch=$(_target_branch_name "$to")
-        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
-        branches=("$target_branch")
-    fi
-
-    if $dry_run; then
-        for branch in "${branches[@]}"; do
-            local count
-            count=$(git rev-list --count "$branch..$base" 2>/dev/null || echo 0)
-            if [[ "$count" -eq 0 ]]; then
-                echo -e "  ${GREEN}$branch${NC}: up to date"
-            else
-                echo -e "  ${YELLOW}[dry-run]${NC} merge $base ($count commits) into $branch"
-            fi
-        done
-        return
-    fi
-
-    local merged=0 uptodate=0 failed=0
-
-    for branch in "${branches[@]}"; do
-        local count
-        count=$(git rev-list --count "$branch..$base" 2>/dev/null || echo 0)
-        if [[ "$count" -eq 0 ]]; then
-            info "  $branch: up to date"
-            uptodate=$((uptodate + 1))
-            continue
-        fi
-
-        _enter_branch "$branch" || {
-            warn "  Cannot access $branch (worktree conflict?)"
-            failed=$((failed + 1))
-            continue
-        }
-        local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
-
-        if ! "${gcmd[@]}" merge "$base" --no-edit; then
-            echo ""
-            warn "Merge conflict on $branch from $base"
-            _show_conflict_diff "$_DISPATCH_WT_PATH"
-            if $resolve; then
-                echo ""
-                warn "Resolve conflicts in worktree, then run: git -C $_DISPATCH_WT_PATH commit"
-                warn "Worktree left at: $_DISPATCH_WT_PATH"
-                _DISPATCH_WT_CREATED=false  # prevent cleanup
-                exit 1
-            fi
-            "${gcmd[@]}" merge --abort 2>/dev/null || true
-            _leave_branch
-            warn "  $branch: merge conflict (skipped)"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        info "  Merged $base into $branch"
-        merged=$((merged + 1))
-        _leave_branch
-    done
-
-    echo ""
-    info "Summary: $merged merged, $uptodate up to date${failed:+, $failed failed}"
-}
 
 # ---------- push ----------
 
@@ -2278,13 +2204,12 @@ WORKFLOW
        git dispatch cherry-pick --from 2 --to source    # target back to source
 
   5. Update with base changes:
-       git dispatch merge --from base --to source       # source only
-       git dispatch merge --from base --to all          # source + all targets
+       git dispatch apply --base                        # merge base into source, then apply
 
 COMMANDS
   init        Configure dispatch on current source branch
-  apply       Make all targets match source (create/update). Detects stale targets
-              after Dispatch-Target-Id reassignment. --reset <id> to regenerate.
+  apply       Make all targets match source (create/update). --base merges base
+              into source first. --reset <id> to regenerate a target.
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
@@ -2292,7 +2217,6 @@ COMMANDS
   checkin     Cherry-pick new commits from checkout branch back to source.
               Honors Dispatch-Source-Keep for auto-conflict resolution.
   cherry-pick Move commits between source and target (--from/--to)
-  merge       Merge base into branches (--from base --to <source|id|all>)
   push        Push branches (push <all|source|N>)
   status      Show base, source, and all targets with sync state
   verify      Detect cross-target file dependencies
@@ -2300,7 +2224,8 @@ COMMANDS
   clean       List (or --force remove) leftover dispatch worktrees
   reset       Delete all dispatch metadata and target branches
 
-FLAGS (on propagation commands)
+FLAGS
+  --base      Merge base into source before applying (apply only)
   --dry-run   Show plan, make no changes
   --resolve   Leave conflict active in a temp worktree for manual resolution.
               The worktree path is printed. After resolving, run the shown
@@ -2334,7 +2259,6 @@ main() {
         init)         cmd_init "$@" ;;
         apply)        cmd_apply "$@" ;;
         cherry-pick)  cmd_cherry_pick "$@" ;;
-        merge)        cmd_merge "$@" ;;
         push)         cmd_push "$@" ;;
         status)       cmd_status "$@" ;;
         diff)         cmd_diff "$@" ;;
