@@ -1,14 +1,16 @@
 # git-dispatch
 
-Create target branches from a source branch. Keep them in sync bidirectionally. Two modes: independent (no force-push) or stacked (CI always passes).
+Multi-commit stacked PRs. Code on one source branch, group commits by `Dispatch-Target-Id`, apply into target branches for focused PRs. Integration test with checkout/checkin.
+
+Unlike ghstack/spr (1 commit = 1 PR), git-dispatch supports N commits = 1 PR.
 
 ## Problem
 
-You code the whole feature on one branch, then need focused PRs for review. Manually cherry-picking and keeping branches in sync is tedious and error-prone. Stacked PR tools force-push when parents merge, destroying review context.
+You code the whole feature on one branch, then need focused PRs for review. Manually cherry-picking and keeping branches in sync is tedious. Stacked PR tools force 1:1 commit-to-PR mapping.
 
 ## Solution
 
-Tag commits with `Target-Id` trailers. `git dispatch apply` groups them into target branches. `git dispatch cherry-pick` syncs changes both ways. Independent mode means no force-push, ever.
+Tag commits with `Dispatch-Target-Id` trailers to group them. `apply` creates target branches. `checkout` creates integration test branches. `checkin` brings fixes back. Two modes: independent (no force-push) or stacked (CI always passes).
 
 ## Quick Start
 
@@ -18,22 +20,20 @@ curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/insta
 
 # Init on your source branch
 git checkout -b feature/auth master
-git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"
+git dispatch init --base origin/master --target-pattern "feature/auth-{id}"
 
-# Code with Target-Id trailers (hook auto-carries from previous commit)
-git commit -m "Add PurchaseOrder to enum"      --trailer "Target-Id=3"
-git commit -m "Create GET endpoint"            --trailer "Target-Id=4"
-git commit -m "Add DTOs"                       --trailer "Target-Id=4"
-git commit -m "Implement validation"           --trailer "Target-Id=5"
+# Code with Dispatch-Target-Id trailers (hook auto-carries from previous commit)
+git commit -m "Add user model"        --trailer "Dispatch-Target-Id=1"
+git commit -m "Add auth middleware"   --trailer "Dispatch-Target-Id=2"
+git commit -m "Add login endpoint"    --trailer "Dispatch-Target-Id=2"
+git commit -m "Add validation"        --trailer "Dispatch-Target-Id=3"
 
-# Create target branches
+# Create target branches and push
 git dispatch apply
-# feature/auth-task-3  (1 commit, branched from master)
-# feature/auth-task-4  (2 commits, branched from master)
-# feature/auth-task-5  (1 commit, branched from master)
-
-# Push and create PRs
-git dispatch push --from all
+git dispatch push all
+# feature/auth-1  (1 commit)
+# feature/auth-2  (2 commits)
+# feature/auth-3  (1 commit)
 ```
 
 ## Two Modes
@@ -46,366 +46,227 @@ git dispatch push --from all
 | CI on targets | May fail if depends on parent | Always passes |
 | Best for | Isolated tasks, different files | Sequential dependent work |
 
-Choose at init time:
-
-```bash
-git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode independent   # default mode
-git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode stacked
-```
-
-Independent mode eliminates the industry-wide force-push problem. Each target branches from base, carrying only its own commits. When a parent PR merges, sibling targets are unaffected.
-
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init` | Configure dispatch on source branch |
-| `git dispatch apply` | Create/update target branches from source commits |
-| `git dispatch cherry-pick --from <x> --to <y>` | Propagate commits between source and targets |
-| `git dispatch rebase --from base --to source` | Rebase source onto updated base |
-| `git dispatch merge --from base --to source` | Merge base into source (safe, no rewrite) |
-| `git dispatch push --from <id\|all\|source>` | Push branches to origin |
-| `git dispatch status` | Show mode, base, targets, sync state |
-| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
-| `git dispatch reset` | Delete target branches and dispatch config |
-| `git dispatch help` | Show usage guide |
+| `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
+| `git dispatch apply` | Create/update target branches from source |
+| `git dispatch checkout <N>` | Integration branch with targets 1..N |
+| `git dispatch checkout source` | Return to source branch |
+| `git dispatch checkout clear` | Remove checkout branch |
+| `git dispatch checkin` | Cherry-pick checkout commits back to source |
+| `git dispatch cherry-pick --from <x> --to <y>` | Move commits between source and targets |
+| `git dispatch merge --from base --to <source\|id\|all>` | Merge base into branches |
+| `git dispatch rebase --from base --to source` | Rebase source onto base |
+| `git dispatch push <all\|source\|N>` | Push branches to origin |
+| `git dispatch status` | Show sync state, divergence |
+| `git dispatch diff --to <id>` | File-level diff between source and target |
+| `git dispatch verify` | Detect cross-target file dependencies |
+| `git dispatch continue` | Resume after conflict resolution |
+| `git dispatch clean` | Remove leftover worktrees |
+| `git dispatch reset` | Delete targets and config |
 
 All propagation commands support `--dry-run`, `--resolve`, and `--force`.
 
-## Target-Id Trailers
+## Trailers
 
-Every commit needs a `Target-Id` trailer:
-
-```bash
-git commit -m "Add feature" --trailer "Target-Id=3"
-git commit -m "Source-only tooling change" --trailer "Target-Id=none"
-git commit -m "Regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
-```
-
-Rules:
-- Numeric: integer or decimal (1, 2, 1.5, 3.1)
-- Determines target branch and stack order
-- Decimals enable mid-stack insertion
-- `none`: source-only commits skipped during apply
-- `Dispatch-Source-Keep: true`: auto-resolve conflicts with source version (`--strategy-option theirs`). Use for generated files that should stay on source but not affect targets.
-- Hook auto-carries Target-Id from previous commit
-- Hook rejects commits without Target-Id
-
-Parse trailers (zero regex, git-native):
+Every commit needs a `Dispatch-Target-Id` trailer:
 
 ```bash
-git log --format="%H %(trailers:key=Target-Id,valueonly)" master..source
+git commit -m "Add feature" --trailer "Dispatch-Target-Id=3"
+git commit -m "Update CI config" --trailer "Dispatch-Target-Id=all"
+git commit -m "Regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
 ```
+
+| Value | Meaning |
+|-------|---------|
+| Numeric (1, 2, 1.5) | Assigns commit to target N. Decimals for mid-stack insertion. |
+| `all` | Included in every target during apply. For shared infra, CI configs. |
+| `Dispatch-Source-Keep: true` | Auto-resolve conflicts with incoming version. For generated files. |
+
+Hook auto-carries `Dispatch-Target-Id` from previous commit. Hook rejects commits without it.
+
+## Workflow: Develop and Create PRs
+
+```bash
+# 1. Init
+git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
+
+# 2. Code with trailers
+git commit -m "Add user model"      --trailer "Dispatch-Target-Id=1"
+git commit -m "Add auth middleware"  --trailer "Dispatch-Target-Id=2"
+git commit -m "Add login endpoint"   --trailer "Dispatch-Target-Id=2"
+
+# 3. Apply and push
+git dispatch apply
+git dispatch push all
+```
+
+## Workflow: Integration Testing
+
+Target branches in independent mode may not compile alone (missing dependencies from other targets). Checkout creates an integration branch combining targets 1..N.
+
+```bash
+git dispatch checkout 3           # branch with targets 1..3 + "all" commits
+pnpm test                         # run integration tests
+git dispatch checkout source      # back to source
+git dispatch checkout clear       # remove test branch
+```
+
+## Workflow: Fix During Integration
+
+```bash
+git dispatch checkout 3
+# fix bug
+git commit -m "Fix auth race" --trailer "Dispatch-Target-Id=2"
+git dispatch checkin              # cherry-picks fix to source
+git dispatch checkout source
+git dispatch apply                # propagates to target-2
+git dispatch push 2
+git dispatch checkout clear
+```
+
+## Workflow: Generated Files (OpenAPI, Protobuf)
+
+Generated files need the combined codebase. Two approaches:
+
+### Regen on source (for all targets)
+
+```bash
+pnpm openapi
+git commit -m "regen" --trailer "Dispatch-Target-Id=all" \
+  --trailer "Dispatch-Source-Keep=true"
+git dispatch apply               # Source-Keep forces through per-target
+```
+
+### Regen for specific failing target
+
+```bash
+git dispatch checkout 3
+pnpm openapi                     # correct swagger for targets 1..3
+git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" \
+  --trailer "Dispatch-Source-Keep=true"
+git dispatch checkin             # Source-Keep auto-resolves conflict
+git dispatch checkout source
+git dispatch apply
+git dispatch push 3
+```
+
+## Workflow: Review Feedback
+
+```bash
+git commit -m "Rename field per review" --trailer "Dispatch-Target-Id=2"
+git dispatch apply
+git dispatch push 2
+```
+
+## Workflow: Keep Up With Main
+
+```bash
+git dispatch merge --from base --to source
+git dispatch apply
+git dispatch push all
+```
+
+## Apply vs Cherry-pick
+
+| Want | Command |
+|------|---------|
+| Create new targets + update all | `git dispatch apply` |
+| Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
+| Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
+| Regenerate one target | `git dispatch apply --reset <id>` |
+
+`apply` is the only command that creates new target branches.
 
 ## Branch Naming
 
-`<target-pattern>` where `{id}` is replaced by `Target-Id`.
+`<target-pattern>` where `{id}` is replaced by `Dispatch-Target-Id`.
 
-| Target Pattern | Target-Id | Branch |
-|---------------|-----------|--------|
-| `feature/auth-task-{id}` | `3` | `feature/auth-task-3` |
+| Pattern | Id | Branch |
+|---------|----|--------|
 | `feature/auth-{id}` | `3` | `feature/auth-3` |
-| `cyril/feat/po-{id}-done` | `1` | `cyril/feat/po-1-done` |
+| `feat/po-task-{id}` | `1.5` | `feat/po-task-1.5` |
 
-## Example: Full Workflow
+Checkout branches: `dispatch-checkout/<source>/<N>`
 
-### Step 1: Init and code
+## Conflict Handling
 
-```bash
-git checkout -b cyril/source/po-transactions master
-git dispatch init --base origin/master --target-pattern "cyril/source/po-transactions-task-{id}" --mode independent
+All commands show conflicted files and diff on failure.
 
-# Task 3 - Schema
-git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
+- **Default**: aborts cleanly, no changes made
+- **`--resolve`**: leaves conflict active in worktree for manual resolution
+- **`Dispatch-Source-Keep`**: auto-resolves with `--strategy-option theirs`
+- **`git dispatch continue`**: checks for pending resolutions
 
-# Task 4 - GET endpoint (2 commits, same Target-Id)
-git commit -m "Create DTOs for PO transaction" --trailer "Target-Id=4"
-git commit -m "Add controller and service"     --trailer "Target-Id=4"
+## Divergence Detection
 
-# Task 5 - Validation
-git commit -m "Implement PO validation"        --trailer "Target-Id=5"
-```
+`status` tags targets:
+- `(DIVERGED)` - file content differs. Changes may be lost.
+- `(cosmetic)` - same content, different SHAs. Safe to ignore.
 
-### Step 2: Apply
+Fix: `git dispatch diff --to <id>` then cherry-pick in correct direction.
 
-```bash
-git dispatch apply
-```
+## Stale Target Detection
 
-Creates one branch per Target-Id:
-- `cyril/source/po-transactions-task-3` (1 commit)
-- `cyril/source/po-transactions-task-4` (2 commits)
-- `cyril/source/po-transactions-task-5` (1 commit)
-
-### Step 3: Push
+When a commit's `Dispatch-Target-Id` is changed on source (e.g., during rebase), `apply` detects stale targets via patch-id matching:
 
 ```bash
-git dispatch push --from all
+git dispatch apply              # reports stale targets
+git dispatch apply --force      # rebuilds them
 ```
-
-### Step 4: Iterate on source
-
-Fix something on source, re-apply:
-
-```bash
-git commit -m "Fix tax mapping edge case" --trailer "Target-Id=4"
-git dispatch apply          # cherry-picks new commit to task-4
-git dispatch push --from 4
-```
-
-### Step 5: Review feedback on target
-
-Fix on the target branch, cherry-pick back to source:
-
-```bash
-git switch cyril/source/po-transactions-task-4
-git commit -m "Fix review feedback" --trailer "Target-Id=4"
-git dispatch cherry-pick --from 4 --to source
-git dispatch apply          # propagate to any other targets
-git dispatch push --from all
-```
-
-### Step 6: Base moved ahead
-
-```bash
-# Safe approach (no force-push, preserves review context)
-git dispatch merge --from base --to source
-git dispatch apply
-git dispatch push --from all
-
-# Or linear history (requires force-push on targets)
-git dispatch rebase --from base --to source --force
-git dispatch apply
-git dispatch push --from all --force
-```
-
-### Step 7: Cleanup
-
-```bash
-git dispatch reset --force
-```
-
-## Commands Reference
-
-### init
-
-```bash
-git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
-```
-
-Configure dispatch on the current source branch. Stores config in git config. Installs hooks (Target-Id enforcement + auto-carry). Re-running warns if config already exists.
-
-Defaults: `--mode independent`.
-Required: `--base` and `--target-pattern` (must include `{id}`).
-Recommended base: `origin/master` (or your remote default branch).
-
-### apply
-
-```bash
-git dispatch apply [--dry-run] [--force] [--reset <id>]
-```
-
-Create or update target branches from source commits grouped by Target-Id. First run creates all branches. Subsequent runs cherry-pick only new commits. Idempotent and safe.
-
-Detects stale targets after Target-Id reassignment (e.g., rebase to move commits from tid 8 to 15). Uses `git patch-id` to match target commits against source by content. Without `--force`, reports stale targets and exits. With `--force`, deletes stale targets and recreates them.
-
-If `apply` is interrupted by local uncommitted changes during branch switch, one or more targets may remain behind source (for example `1 behind source`). Fix by cleaning/stashing local changes and re-running `git dispatch apply`.
-
-### cherry-pick
-
-```bash
-git dispatch cherry-pick --from <source|id> --to <source|id|all> [--dry-run]
-```
-
-Move commits between source and a target:
-
-| Direction | Effect |
-|-----------|--------|
-| `--from source --to 4` | Cherry-pick new Target-Id=4 commits from source to target |
-| `--from 4 --to source` | Cherry-pick target commits back to source (adds Target-Id trailer) |
-| `--from source --to all` | Same as `apply` |
-
-Notes for `--from <id> --to source`:
-- If a target commit is already integrated in source semantically (cherry-picking it would be a no-op), dispatch skips it.
-- In that case output reports either:
-  - `Source already has all commits from target <id>` (filtered before pick), or
-  - `No new commits applied ... (N empty/no-op)` (detected during pick).
-
-### rebase
-
-```bash
-git dispatch rebase --from base --to source [--force] [--dry-run]
-```
-
-Rebase source onto updated base. Rewrites history. Blocked when open PRs detected on downstream targets unless `--force`.
-
-### merge
-
-```bash
-git dispatch merge --from base --to source [--dry-run]
-```
-
-Merge base into source. No history rewrite. No force-push needed. Safe for open PRs.
-
-### push
-
-```bash
-git dispatch push --from <id|all|source> [--force] [--dry-run]
-```
-
-Push branches to origin. `--force` uses `--force-with-lease` internally.
-
-### status
-
-```bash
-git dispatch status
-```
-
-Show mode, base, source, and all targets with sync state.
-
-`status` is semantic-aware for target -> source sync:
-- A target commit is not counted as `ahead` when cherry-picking it onto source would be empty/no-op.
-- This avoids false out-of-sync states after equivalent changes were integrated through different commit history.
-
-### reset
-
-```bash
-git dispatch reset [--force]
-```
-
-Delete all target branches, dispatch config, and hooks. Asks for confirmation unless `--force`.
-
-### Stale Target Detection
-
-When a commit's Target-Id trailer is changed on source (e.g., during interactive rebase), `apply` detects that the old target branch is stale:
-
-```bash
-git dispatch status
-#  8  target-8  stale (all commits reassigned)
-
-git dispatch apply
-# Stale targets detected (Target-Id reassigned on source):
-#   target-8 (tid 8)
-#     2 commit(s) reassigned to different Target-Id
-# Run: git dispatch apply --force  to rebuild stale targets.
-
-git dispatch apply --force    # deletes target-8, creates target-15
-```
-
-If stale targets have target-only commits (added directly on the target), apply warns they will be lost.
-
-## Adding a Target Mid-Stack
-
-Use decimal Target-Id for insertion between existing targets:
-
-```bash
-git commit -m "Add migration" --trailer "Target-Id=1.5"
-git dispatch apply    # creates target between 1 and 2
-```
-
-Numeric sort: 1 < 1.5 < 2 < 3 < 3.1 < 4.
 
 ## Config
 
-Stored in git config:
-
-| Key | Set by | Description |
-|-----|--------|-------------|
-| `dispatch.base` | init | Base branch (recommended: origin/master) |
-| `dispatch.targetPattern` | init | Target branch naming pattern, must include `{id}` |
-| `dispatch.mode` | init | independent or stacked |
-| `branch.<name>.dispatchtargets` | apply | Target branches (multi-value) |
-| `branch.<name>.dispatchsource` | apply | Source branch reference |
-
-### Commit Trailers
-
-| Trailer | Values | Description |
-|---------|--------|-------------|
-| `Target-Id` | numeric, `none` | Required. Target branch assignment. `none` = source-only. |
-| `Dispatch-Source-Keep` | `true` | Optional. Auto-resolve cherry-pick conflicts with `--strategy-option theirs`. |
-
-`Dispatch-Source-Keep` is for commits that belong on source but whose content should not block target branch updates. When a cherry-pick conflict occurs on a `Dispatch-Source-Keep` commit, dispatch accepts the source version automatically via `--strategy-option theirs`. Typical use: generated files (OpenAPI specs, swagger.json, API clients) that differ across targets.
-
-## Hooks
-
-Installed automatically by `git dispatch init`:
-
-- **`prepare-commit-msg`** - auto-carries Target-Id from previous commit
-- **`commit-msg`** - rejects commits without numeric Target-Id, skips merge commits
-
-To enforce globally:
-
-```bash
-mkdir -p ~/.git-hooks
-cp hooks/prepare-commit-msg hooks/commit-msg ~/.git-hooks/
-git config --global core.hooksPath ~/.git-hooks
-```
-
-Bypass when needed: `git commit --no-verify -m "message"`
-
-## Worktree Support
-
-Cherry-pick operations are worktree-aware. If a target branch has a worktree checked out, dispatch cherry-picks directly into the worktree instead of checkout gymnastics.
+| Key | Description |
+|-----|-------------|
+| `dispatch.base` | Base branch |
+| `dispatch.targetPattern` | Target branch pattern (must include `{id}`) |
+| `dispatch.mode` | independent or stacked |
+| `dispatch.checkoutBranch` | Active checkout branch |
+| `branch.<name>.dispatchtargets` | Target branches |
+| `branch.<name>.dispatchsource` | Source branch reference |
 
 ## AI Integration
 
 ### Universal (AGENTS.md)
 
-Works with Cursor, Windsurf, Codex, Aider, and other AI coding tools:
+Works with Cursor, Windsurf, Codex, Aider:
 
 ```bash
 cp AGENTS.md /path/to/project/
 ```
 
-### Skill (SKILL.md)
-
-Deeper integration for Claude Code and GitHub Copilot:
+### Claude Code (skill + agent)
 
 ```bash
-# Claude Code
-mkdir -p ~/.claude/skills/git-dispatch && cp SKILL.md ~/.claude/skills/git-dispatch/
-
-# GitHub Copilot
-mkdir -p ~/.copilot/skills/git-dispatch && cp SKILL.md ~/.copilot/skills/git-dispatch/
+mkdir -p ~/.claude/skills/git-dispatch ~/.claude/agents
+cp SKILL.md ~/.claude/skills/git-dispatch/SKILL.md
+cp AGENTS.md ~/.claude/agents/git-dispatch.md
 ```
 
-### Agent (Claude Code only)
-
-Full automation with a dispatch workflow subagent:
+### Or use the installer
 
 ```bash
-mkdir -p ~/.claude/agents && cp AGENTS.md ~/.claude/agents/git-dispatch.md
+bash install.sh --ai
 ```
 
 ## Installation
 
-Install via curl:
-
 ```bash
+# Remote install
 curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/install-remote.sh | bash
-```
 
-Or clone and install locally:
-
-```bash
+# Local install
 git clone git@github.com:KakkoiDev/git-dispatch.git && cd git-dispatch
 bash install.sh
-```
-
-Both installers:
-- Create a global git alias: `git dispatch` -> `git-dispatch.sh`.
-- Do not auto-install AI agent/skill files (they print optional commands for Claude/Codex/Gemini).
-
-Quick start (one-liner after install):
-
-```bash
-git dispatch init --base origin/master --target-pattern "$(git branch --show-current)-task-{id}" --mode independent
 ```
 
 ## Testing
 
 ```bash
-bash test.sh    # 175 tests
+bash test.sh    # 254 tests
 ```
 
 ## Requirements
