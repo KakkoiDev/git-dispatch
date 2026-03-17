@@ -1163,20 +1163,20 @@ cmd_status() {
         [[ -n "$c" ]] && ordered+=("$c")
     done < <(find_dispatch_targets "$source")
 
-    # Also find Dispatch-Target-Ids in source that don't have branches yet
+    # Batch: extract all trailers in one git log pass (not per-commit)
     local -a source_tids=()
     local status_commit_file status_map_file
     status_commit_file=$(mktemp)
     status_map_file=$(mktemp)
     trap "rm -f '$status_commit_file' '$status_map_file'" RETURN
-    while IFS= read -r _h; do
-        local _t
-        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
-        if [[ -n "$_t" ]]; then
+    while IFS= read -r _line; do
+        local _h="${_line%% *}" _t="${_line#* }"
+        _t=$(echo "$_t" | tr -d '[:space:]')
+        if [[ -n "$_t" && -n "$_h" ]]; then
             source_tids+=("$_t")
             echo "$_h $_t" >> "$status_commit_file"
         fi
-    done < <(git log --format="%H" "$base..$source")
+    done < <(git log --format="%H %(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$source")
     _build_source_patch_id_map "$status_map_file" "$status_commit_file"
     # Unique sorted, excluding "all" (not a real target)
     local -a unique_tids=()
@@ -1185,9 +1185,11 @@ cmd_status() {
         unique_tids+=("$t")
     done < <(printf '%s\n' "${source_tids[@]}" | sort -t. -k1,1n -k2,2n -u)
 
-    # Cache PR info
+    # Cache PR info (skip if gh not available for speed)
     local pr_cache=""
-    pr_cache=$(_get_open_prs "$source" 2>/dev/null) || true
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+        pr_cache=$(_get_open_prs "$source" 2>/dev/null) || true
+    fi
 
     # Pre-compute column widths
     local max_tid=0 max_branch=0
@@ -1235,8 +1237,9 @@ cmd_status() {
             [[ "$line" == +* ]] || continue
             local hash
             hash=$(echo "$line" | awk '{print $2}')
+            # Look up tid from cached commit file instead of per-commit git log
             local ctid
-            ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            ctid=$(awk -v h="$hash" '$1 == h {print $2; exit}' "$status_commit_file")
             [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && source_to_target_candidates+=("$hash")
         done <<< "$cherry_out"
 
@@ -1257,10 +1260,10 @@ cmd_status() {
             if [[ ${#candidate_files_uniq[@]} -gt 0 ]] && git diff --quiet "$source" "$branch_name" -- "${candidate_files_uniq[@]}" 2>/dev/null; then
                 source_to_target=0
             else
+                # Fast blob check first, expensive cherry-pick check only on failures
                 for hash in "${source_to_target_candidates[@]}"; do
-                    if _commit_semantically_in_branch "$hash" "$branch_name"; then
-                        continue
-                    fi
+                    _commit_effect_in_branch "$hash" "$branch_name" && continue
+                    _would_cherry_pick_be_empty_on_branch "$hash" "$branch_name" && continue
                     source_to_target=$((source_to_target + 1))
                 done
             fi
@@ -1301,27 +1304,25 @@ cmd_status() {
             if [[ ${#t2s_files_uniq[@]} -gt 0 ]] && git diff --quiet "$source" "$branch_name" -- "${t2s_files_uniq[@]}" 2>/dev/null; then
                 target_to_source=0
             else
+                # Fast blob check first, expensive cherry-pick check only on failures
                 for hash in "${target_to_source_candidates[@]}"; do
-                    if _commit_semantically_in_branch "$hash" "$source"; then
-                        continue
-                    fi
+                    _commit_effect_in_branch "$hash" "$source" && continue
+                    _would_cherry_pick_be_empty_on_branch "$hash" "$source" && continue
                     target_to_source=$((target_to_source + 1))
                 done
             fi
         fi
 
-        # Count untracked commits: target commits with no Dispatch-Target-Id or mismatched Dispatch-Target-Id
+        # Count untracked commits: batch extraction, skip merges
         local untracked=0
-        while IFS= read -r thash; do
-            [[ -n "$thash" ]] || continue
-            # Skip merge commits
-            local _pcount
-            _pcount=$(git rev-list --parents -n1 "$thash" | wc -w)
-            (( _pcount > 2 )) && continue
-            local _ctid
-            _ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$thash" | tr -d '[:space:]')
-            [[ -z "$_ctid" || ( "$_ctid" != "$tid" && "$_ctid" != "all" ) ]] && untracked=$((untracked + 1))
-        done < <(git log --format="%H" "$base..$branch_name" 2>/dev/null)
+        while IFS= read -r _uline; do
+            [[ -z "$_uline" ]] && continue
+            local _uhash="${_uline%% *}"
+            [[ ${#_uhash} -lt 10 ]] && continue  # skip junk lines
+            local _utid="${_uline#* }"
+            _utid=$(echo "$_utid" | tr -d '[:space:]')
+            [[ -z "$_utid" || ( "$_utid" != "$tid" && "$_utid" != "all" ) ]] && untracked=$((untracked + 1))
+        done < <(git log --no-merges --format="%H %(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$branch_name" 2>/dev/null)
 
         if [[ $source_to_target -eq 0 && $target_to_source -eq 0 && $untracked -eq 0 ]]; then
             printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
