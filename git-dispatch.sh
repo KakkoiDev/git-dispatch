@@ -1552,50 +1552,10 @@ cmd_continue() {
     git worktree prune 2>/dev/null || true
 }
 
-# ---------- clean ----------
-
-cmd_clean() {
-    local force=false
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --force) force=true; shift ;;
-            -*)      die "Unknown flag: $1" ;;
-            *)       die "Unexpected argument: $1" ;;
-        esac
-    done
-
-    local -a wt_paths=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && wt_paths+=("$line")
-    done < <(_find_dispatch_worktrees)
-
-    if [[ ${#wt_paths[@]} -eq 0 ]]; then
-        info "No dispatch worktrees to clean."
-        return
-    fi
-
-    for wt in "${wt_paths[@]}"; do
-        local branch
-        branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
-        if $force; then
-            git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
-            info "  Removed $wt ($branch)"
-        else
-            echo "  $wt ($branch)"
-        fi
-    done
-
-    if ! $force; then
-        echo ""
-        warn "Run: git dispatch clean --force  to remove all."
-    fi
-    git worktree prune 2>/dev/null || true
-}
-
 # ---------- checkout ----------
 
 cmd_checkout() {
-    local resolve=false force=false
+    local resolve=false force=false dry_run=false
     local subcmd=""
     local -a positional=()
 
@@ -1603,6 +1563,7 @@ cmd_checkout() {
         case "$1" in
             --resolve)  resolve=true; shift ;;
             --force)    force=true; shift ;;
+            --dry-run)  dry_run=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          positional+=("$1"); shift ;;
         esac
@@ -1614,7 +1575,7 @@ cmd_checkout() {
     case "$subcmd" in
         source) _checkout_source ;;
         clear)  _checkout_clear "$force" ;;
-        *)      _checkout_create "$subcmd" "$resolve" ;;
+        *)      _checkout_create "$subcmd" "$resolve" "$dry_run" ;;
     esac
 }
 
@@ -1629,7 +1590,7 @@ _find_checkout_branch() {
 }
 
 _checkout_create() {
-    local n="$1" resolve="$2"
+    local n="$1" resolve="$2" dry_run="${3:-false}"
     _require_init
 
     # Validate N is numeric
@@ -1683,6 +1644,14 @@ _checkout_create() {
 
     if [[ ${#hashes[@]} -eq 0 ]]; then
         die "No commits with Dispatch-Target-Id <= $n"
+    fi
+
+    if $dry_run; then
+        echo -e "${YELLOW}[dry-run]${NC} checkout $n: ${#hashes[@]} commits from $base"
+        for h in "${hashes[@]}"; do
+            echo "  $(git log -1 --oneline "$h")"
+        done
+        return
     fi
 
     # Create branch from base
@@ -1820,29 +1789,38 @@ _checkout_clear() {
 # ---------- checkin ----------
 
 cmd_checkin() {
-    local resolve=false
+    local resolve=false dry_run=false
+    local checkin_n=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --resolve)  resolve=true; shift ;;
+            --dry-run)  dry_run=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
+            *)          [[ -z "$checkin_n" ]] && checkin_n="$1" || die "Unexpected argument: $1"; shift ;;
         esac
     done
 
-    local cur
+    local cur checkout_branch source base
     cur=$(current_branch)
 
-    # Must be on a checkout branch
-    [[ "$cur" == dispatch-checkout/* ]] || die "Not on a checkout branch. Run from dispatch-checkout/<source>/<N>"
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        # On checkout branch directly
+        checkout_branch="$cur"
+        local rest="${cur#dispatch-checkout/}"
+        source="${rest%/*}"
+    elif [[ -n "$checkin_n" ]]; then
+        # On source, checkin from checkout <N>
+        source=$(resolve_source "")
+        checkout_branch=$(_checkout_branch_name "$source" "$checkin_n")
+        git rev-parse --verify "refs/heads/$checkout_branch" &>/dev/null || \
+            die "Checkout branch '$checkout_branch' does not exist."
+    else
+        die "Not on a checkout branch. Use: git dispatch checkin <N> (from source)"
+    fi
 
-    # Extract source from branch name
-    local rest="${cur#dispatch-checkout/}"
-    local source="${rest%/*}"
-    [[ -n "$source" ]] || die "Cannot parse source from branch name: $cur"
+    [[ -n "$source" ]] || die "Cannot determine source branch."
 
-    local base
     base=$(git -C "$(git rev-parse --show-toplevel)" config dispatch.base 2>/dev/null || true)
-    # Try reading base from source branch config
     if [[ -z "$base" ]]; then
         local source_wt
         source_wt=$(worktree_for_branch "$source")
@@ -1868,10 +1846,18 @@ cmd_checkin() {
         if ! echo "$source_pids" | grep -Fxq "$cpid"; then
             new_hashes+=("$ch")
         fi
-    done < <(git log --reverse --format="%H" "$base..$cur")
+    done < <(git log --reverse --format="%H" "$base..$checkout_branch")
 
     if [[ ${#new_hashes[@]} -eq 0 ]]; then
         info "No new commits to pick."
+        return
+    fi
+
+    if $dry_run; then
+        echo -e "${YELLOW}[dry-run]${NC} checkin ${#new_hashes[@]} commit(s) to $source"
+        for h in "${new_hashes[@]}"; do
+            echo "  $(git log -1 --oneline "$h")"
+        done
         return
     fi
 
@@ -1884,7 +1870,7 @@ cmd_checkin() {
     fi
 
     info "Checked in $DISPATCH_LAST_PICKED commit(s) to $source"
-    echo -e "  ${CYAN}Next:${NC} git dispatch checkout source && git dispatch apply"
+    echo -e "  ${CYAN}Next:${NC} git dispatch apply"
 }
 
 # ---------- help ----------
@@ -1933,13 +1919,13 @@ COMMANDS
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
                 checkout clear     Remove test branch (--force to discard unpicked)
-  checkin     Cherry-pick new commits from checkout branch back to source.
-              Honors Dispatch-Source-Keep for auto-conflict resolution.
+  checkin     Cherry-pick new checkout commits back to source.
+              checkin           (from checkout branch)
+              checkin <N>       (from source, picks from checkout N)
   push        Push branches (push <all|source|N>)
   status      Show base, source, and all targets with sync state
-  continue    Check pending conflict resolutions, clean up completed worktrees
-  clean       List (or --force remove) leftover dispatch worktrees
-  reset       Delete all dispatch metadata and target branches
+  continue    Resume after conflict resolution
+  reset       Delete all dispatch targets and config
 
 FLAGS
   --base      Merge base into source before applying (apply only)
@@ -1980,7 +1966,6 @@ main() {
         checkout)     cmd_checkout "$@" ;;
         checkin)      cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;
-        clean)        cmd_clean "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;

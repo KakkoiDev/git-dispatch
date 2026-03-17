@@ -1827,48 +1827,6 @@ test_continue_cleans_completed_worktree() {
     teardown
 }
 
-test_clean_lists_and_removes_worktrees() {
-    echo "=== test: clean lists and force-removes worktrees ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Create conflict to leave worktree alive
-    git checkout source/feature-1 -q
-    echo "target-change" > file.txt; git add file.txt
-    git commit --no-verify -m "Target modifies file" -q
-
-    git checkout source/feature -q
-    echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    # --resolve leaves worktree alive
-    bash "$DISPATCH" apply --resolve 2>&1 || true
-
-    # clean without --force lists them
-    local list_output
-    list_output=$(bash "$DISPATCH" clean 2>&1)
-    assert_contains "$list_output" "git-dispatch-wt" "clean lists worktree"
-    assert_contains "$list_output" "--force" "clean suggests --force"
-
-    # clean --force removes them
-    local clean_output
-    clean_output=$(bash "$DISPATCH" clean --force 2>&1)
-    assert_contains "$clean_output" "Removed" "clean --force removes worktree"
-
-    # Verify it's gone
-    local verify_output
-    verify_output=$(bash "$DISPATCH" clean 2>&1)
-    assert_contains "$verify_output" "No dispatch worktrees" "no worktrees after clean"
-
-    teardown
-}
-
 test_continue_detects_pending_conflict() {
     echo "=== test: continue detects pending cherry-pick conflict ==="
     setup
@@ -1897,7 +1855,7 @@ test_continue_detects_pending_conflict() {
     assert_contains "$output" "source/feature-1" "continue shows branch name"
 
     # Clean up
-    bash "$DISPATCH" clean --force >/dev/null 2>&1
+    git worktree prune 2>/dev/null; git worktree list --porcelain | awk '/^worktree / {p=substr($0,10)} /git-dispatch-wt/ {system("git worktree remove --force " p)}' 2>/dev/null || true
 
     teardown
 }
@@ -2374,6 +2332,82 @@ test_checkin_errors_if_not_on_checkout() {
     teardown
 }
 
+test_checkin_from_source_with_n() {
+    echo "=== test: checkin <N> works from source branch ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Make a new commit on checkout
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "bugfix$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Go back to source
+    git checkout source/feature -q
+
+    # Checkin from source with <N>
+    bash "$DISPATCH" checkin 1 >/dev/null 2>&1
+
+    local source_count
+    source_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+    assert_eq "2" "$source_count" "checkin <N> from source picked commit"
+
+    teardown
+}
+
+test_checkin_dry_run() {
+    echo "=== test: checkin --dry-run shows plan ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "bugfix$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" checkin 1 --dry-run 2>&1)
+
+    assert_contains "$output" "dry-run" "shows dry-run label"
+    assert_contains "$output" "bugfix" "shows commit"
+
+    # Source should NOT have the commit (dry-run)
+    local source_count
+    source_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
+    assert_eq "1" "$source_count" "dry-run did not modify source"
+
+    teardown
+}
+
+test_checkout_dry_run() {
+    echo "=== test: checkout --dry-run shows plan ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" checkout 4 --dry-run 2>&1)
+
+    assert_contains "$output" "dry-run" "shows dry-run label"
+    assert_contains "$output" "3" "shows commit count"
+
+    # Branch should NOT exist
+    assert_branch_not_exists "dispatch-checkout/source/feature/4" "dry-run did not create branch"
+
+    teardown
+}
+
 test_checkin_skips_original_commits() {
     echo "=== test: checkin skips original commits ==="
     setup
@@ -2606,7 +2640,7 @@ test_continue_resumes_remaining_queue() {
     fi
 
     # Cleanup
-    bash "$DISPATCH" clean --force >/dev/null 2>&1
+    git worktree prune 2>/dev/null; git worktree list --porcelain | awk '/^worktree / {p=substr($0,10)} /git-dispatch-wt/ {system("git worktree remove --force " p)}' 2>/dev/null || true
 
     teardown
 }
@@ -2662,7 +2696,7 @@ test_continue_resumes_apply_queue() {
         FAIL=$((FAIL + 1))
     fi
 
-    bash "$DISPATCH" clean --force >/dev/null 2>&1
+    git worktree prune 2>/dev/null; git worktree list --porcelain | awk '/^worktree / {p=substr($0,10)} /git-dispatch-wt/ {system("git worktree remove --force " p)}' 2>/dev/null || true
 
     teardown
 }
@@ -2740,7 +2774,6 @@ test_apply_warns_base_drift
 test_status_shows_untracked_commits
 test_stash_pop_conflict_warns
 test_continue_cleans_completed_worktree
-test_clean_lists_and_removes_worktrees
 test_continue_detects_pending_conflict
 test_checkout_creates_branch
 test_checkout_includes_all_commits
@@ -2763,6 +2796,9 @@ test_checkin_no_new_commits
 test_checkin_multiple_commits_different_targets
 test_checkin_does_not_auto_apply
 test_checkin_errors_if_not_on_checkout
+test_checkin_from_source_with_n
+test_checkin_dry_run
+test_checkout_dry_run
 test_checkin_skips_original_commits
 test_checkin_source_keep_auto_resolves_conflict
 test_checkin_then_apply_lifecycle
