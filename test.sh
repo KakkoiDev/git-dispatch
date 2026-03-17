@@ -2017,6 +2017,32 @@ test_target_id_all_dry_run_display() {
 
 # ---------- Dispatch-Source-Keep ----------
 
+test_target_id_all_not_stale() {
+    echo "=== test: all commits do not cause false stale detection ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "shared" > shared.txt; git add shared.txt
+    git commit -m "shared config$(printf '\n\nDispatch-Target-Id: all')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    # Should NOT show stale or "all" as a target
+    assert_not_contains "$output" "stale" "no stale warning with all commits"
+    assert_not_contains "$output" "task-all" "no task-all target shown"
+    assert_not_contains "$output" "not created" "no uncreated all target"
+
+    teardown
+}
+
 test_source_keep_force_accepts_conflict() {
     echo "=== test: Source-Keep auto-resolves conflict with --theirs ==="
     setup
@@ -3176,6 +3202,7 @@ test_apply_skips_base_ancestor_commits
 test_target_id_all_hook_accepts
 test_target_id_all_included_in_all_targets
 test_target_id_all_dry_run_display
+test_target_id_all_not_stale
 test_source_keep_force_accepts_conflict
 test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails

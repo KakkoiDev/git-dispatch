@@ -372,7 +372,8 @@ _find_stale_commits() {
         [[ -n "$pid" ]] || continue
         local match_tid
         match_tid=$(awk -v p="$pid" '$1 == p {print $3; exit}' "$map_file")
-        [[ -n "$match_tid" && "$match_tid" != "$tid" ]] && echo "$hash $match_tid"
+        # "all" commits legitimately appear on every target - not stale
+        [[ -n "$match_tid" && "$match_tid" != "$tid" && "$match_tid" != "all" ]] && echo "$hash $match_tid"
     done <<< "$pid_output"
 }
 
@@ -833,6 +834,10 @@ cmd_apply() {
                 git branch -D "$sb" 2>/dev/null || true
                 info "  Deleted stale ${sb}"
             done
+            echo ""
+        elif [[ -n "$reset_target" ]]; then
+            # --reset specified: don't block on stale, just warn
+            warn "Stale targets exist. Continuing with --reset $reset_target only."
             echo ""
         else
             warn "Run: git dispatch apply --force  to rebuild stale targets."
@@ -1413,9 +1418,10 @@ cmd_status() {
         fi
     done < <(git log --format="%H" "$base..$source")
     _build_source_patch_id_map "$status_map_file" "$status_commit_file"
-    # Unique sorted
+    # Unique sorted, excluding "all" (not a real target)
     local -a unique_tids=()
     while IFS= read -r t; do
+        [[ "$t" == "all" ]] && continue
         unique_tids+=("$t")
     done < <(printf '%s\n' "${source_tids[@]}" | sort -t. -k1,1n -k2,2n -u)
 
@@ -1908,6 +1914,9 @@ cmd_continue() {
         else
             info "Operation complete on $branch. Cleaning up $wt"
             git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+            echo ""
+            warn "Remaining commits may not have been applied."
+            echo -e "  ${CYAN}Run:${NC} git dispatch apply  (to process any remaining commits)"
         fi
     done
     git worktree prune 2>/dev/null || true
