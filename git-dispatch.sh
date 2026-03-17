@@ -98,10 +98,51 @@ _skip_empty_pick() {
     DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
 }
 
-# Read dispatch config shorthand
+# Resolve the dispatch source branch for config lookups.
+# Caches result in DISPATCH_SOURCE for repeated calls.
+_resolve_config_branch() {
+    [[ -n "${DISPATCH_SOURCE:-}" ]] && { echo "$DISPATCH_SOURCE"; return; }
+    local cur
+    cur=$(current_branch 2>/dev/null || true)
+    [[ -z "$cur" ]] && return 1
+    # Check if current branch has dispatch config (is a source)
+    if [[ -n "$(git config "branch.${cur}.dispatchbase" 2>/dev/null || true)" ]]; then
+        DISPATCH_SOURCE="$cur"; echo "$cur"; return
+    fi
+    # Check if current branch is a target (has dispatchsource)
+    local csource
+    csource=$(git config "branch.${cur}.dispatchsource" 2>/dev/null || true)
+    if [[ -n "$csource" ]]; then
+        DISPATCH_SOURCE="$csource"; echo "$csource"; return
+    fi
+    # Check if on a checkout branch
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        local rest="${cur#dispatch-checkout/}"
+        local source="${rest%/*}"
+        DISPATCH_SOURCE="$source"; echo "$source"; return
+    fi
+    return 1
+}
+
+# Read dispatch config for current source branch
 _get_config() {
     local key="$1"
-    git config "dispatch.${key}" 2>/dev/null || true
+    local branch
+    branch=$(_resolve_config_branch 2>/dev/null || true)
+    if [[ -n "$branch" ]]; then
+        git config "branch.${branch}.dispatch${key}" 2>/dev/null || true
+    else
+        # Fallback: try old global config for backward compat during migration
+        git config "dispatch.${key}" 2>/dev/null || true
+    fi
+}
+
+# Write dispatch config for a specific source branch
+_set_config() {
+    local key="$1" value="$2" branch="${3:-}"
+    [[ -z "$branch" ]] && branch=$(_resolve_config_branch 2>/dev/null || true)
+    [[ -z "$branch" ]] && branch=$(current_branch)
+    git config "branch.${branch}.dispatch${key}" "$value"
 }
 
 # Require dispatch init has been run
@@ -674,8 +715,8 @@ cmd_init() {
         fi
     fi
 
-    git config dispatch.base "$base"
-    git config dispatch.targetPattern "$target_pattern"
+    _set_config base "$base" "$source"
+    _set_config targetPattern "$target_pattern" "$source"
 
     _install_hooks
 
@@ -1442,7 +1483,11 @@ cmd_reset() {
         fi
     done
 
-    # Delete dispatch config
+    # Delete dispatch config (branch-scoped)
+    git config --unset "branch.${source}.dispatchbase" 2>/dev/null || true
+    git config --unset "branch.${source}.dispatchtargetpattern" 2>/dev/null || true
+    git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
+    # Also clean old global config (backward compat)
     git config --unset dispatch.base 2>/dev/null || true
     git config --unset dispatch.targetPattern 2>/dev/null || true
     git config --unset dispatch.mode 2>/dev/null || true
@@ -1659,7 +1704,7 @@ _checkout_create() {
     git branch --no-track "$checkout_branch" "$base" -q
 
     # Store active checkout in config
-    git config dispatch.checkoutBranch "$checkout_branch"
+    _set_config checkoutBranch "$checkout_branch" "$source"
 
     info "Creating checkout branch: $checkout_branch (${#hashes[@]} commits)"
 
@@ -1744,6 +1789,8 @@ _checkout_clear() {
         return
     fi
 
+    DISPATCH_SOURCE="$source"  # set cache for _get_config
+
     # Check for unpicked commits
     if ! $force; then
         local base
@@ -1781,7 +1828,8 @@ _checkout_clear() {
 
     # Delete branch
     git branch -D "$checkout_branch" -q 2>/dev/null
-    git config --unset dispatch.checkoutBranch 2>/dev/null || true
+    git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
+    git config --unset dispatch.checkoutBranch 2>/dev/null || true  # backward compat
     git worktree prune 2>/dev/null || true
 
     info "Cleared: $checkout_branch"
@@ -1821,14 +1869,10 @@ cmd_checkin() {
 
     [[ -n "$source" ]] || die "Cannot determine source branch."
 
-    base=$(git -C "$(git rev-parse --show-toplevel)" config dispatch.base 2>/dev/null || true)
-    if [[ -z "$base" ]]; then
-        local source_wt
-        source_wt=$(worktree_for_branch "$source")
-        if [[ -n "$source_wt" ]]; then
-            base=$(git -C "$source_wt" config dispatch.base 2>/dev/null || true)
-        fi
-    fi
+    # Read base from branch-scoped config
+    DISPATCH_SOURCE="$source"  # set cache so _get_config resolves correctly
+    local base
+    base=$(_get_config base)
     [[ -n "$base" ]] || die "Cannot determine base branch."
 
     # Build patch-id set for source commits

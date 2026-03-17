@@ -118,8 +118,8 @@ test_init_basic() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
     local base target_pattern
-    base=$(git config dispatch.base)
-    target_pattern=$(git config dispatch.targetPattern)
+    base=$(git config branch.$(git symbolic-ref --short HEAD).dispatchbase)
+    target_pattern=$(git config branch.$(git symbolic-ref --short HEAD).dispatchtargetPattern)
 
     assert_eq "master" "$base" "dispatch.base set"
     assert_eq "source/feature-task-{id}" "$target_pattern" "dispatch.targetPattern set"
@@ -162,7 +162,7 @@ test_init_custom_pattern() {
     bash "$DISPATCH" init --base master --target-pattern "custom/path-{id}-done"
 
     local target_pattern
-    target_pattern=$(git config dispatch.targetPattern)
+    target_pattern=$(git config branch.$(git symbolic-ref --short HEAD).dispatchtargetPattern)
     assert_eq "custom/path-{id}-done" "$target_pattern" "custom target pattern set"
 
     teardown
@@ -240,7 +240,7 @@ test_init_hooks_only() {
 
     # No dispatch config should exist
     local base
-    base=$(git config dispatch.base 2>/dev/null || echo "")
+    base=$(git config branch.$(git symbolic-ref --short HEAD).dispatchbase 2>/dev/null || echo "")
     if [[ -z "$base" ]]; then
         echo -e "  ${GREEN}PASS${NC} no dispatch config created"
         PASS=$((PASS + 1))
@@ -845,7 +845,7 @@ test_reset_cleans_up() {
 
     # Config should be cleaned
     local base
-    base=$(git config dispatch.base 2>/dev/null || true)
+    base=$(git config branch.$(git symbolic-ref --short HEAD).dispatchbase 2>/dev/null || true)
     assert_eq "" "$base" "dispatch.base removed"
 
     teardown
@@ -1256,8 +1256,8 @@ test_refresh_base_warns_on_fetch_failure() {
 
     git checkout -b source/feature master -q
     # Set base to a non-existent remote
-    git config dispatch.base "nonexistent/master"
-    git config dispatch.targetPattern "source/feature-{id}"
+    git config branch.$(git symbolic-ref --short HEAD).dispatchbase "nonexistent/master"
+    git config branch.$(git symbolic-ref --short HEAD).dispatchtargetPattern "source/feature-{id}"
 
     echo "a" > file.txt; git add file.txt
     git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
