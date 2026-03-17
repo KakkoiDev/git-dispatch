@@ -28,28 +28,6 @@ get_targets() {
     git config --get-all "branch.${branch}.dispatchtargets" 2>/dev/null || true
 }
 
-# Add a target branch to the dispatch stack
-stack_add() {
-    local target_name="$1" parent="$2"
-    if get_targets "$parent" | grep -Fxq "$target_name"; then
-        return 0
-    fi
-    git config --add "branch.${parent}.dispatchtargets" "$target_name"
-}
-
-# Remove a target from the dispatch stack
-stack_remove() {
-    local target_name="$1" parent="$2"
-    local targets
-    targets=$(get_targets "$parent" | grep -Fxv "$target_name" || true)
-    git config --unset-all "branch.${parent}.dispatchtargets" 2>/dev/null || true
-    if [[ -n "$targets" ]]; then
-        while IFS= read -r c; do
-            git config --add "branch.${parent}.dispatchtargets" "$c"
-        done <<< "$targets"
-    fi
-}
-
 # Find worktree path for a branch (empty if none)
 worktree_for_branch() {
     local branch="$1"
@@ -626,64 +604,6 @@ find_dispatch_targets() {
     [[ ${#found[@]} -gt 0 ]] && printf '%s\n' "${found[@]}" || true
 }
 
-# Order targets by walking the dispatch stack hierarchy
-order_by_stack() {
-    local -a targets=()
-    while IFS= read -r t; do [[ -n "$t" ]] && targets+=("$t"); done
-    [[ ${#targets[@]} -gt 0 ]] || return 0
-
-    # Find roots: targets whose parent is not itself a target
-    local -a roots=()
-    local base=""
-    for target in "${targets[@]}"; do
-        local parent
-        parent=$(find_stack_parent "$target")
-        local parent_is_target=false
-        for c in "${targets[@]}"; do
-            [[ "$c" == "$parent" ]] && { parent_is_target=true; break; }
-        done
-        if ! $parent_is_target; then
-            base="$parent"
-            roots+=("$target")
-        fi
-    done
-
-    if [[ -z "$base" ]]; then
-        printf '%s\n' "${targets[@]}"
-        return
-    fi
-
-    # BFS walk: print roots, then their children, etc.
-    local -a queue=("${roots[@]}")
-    local -a visited=()
-    while [[ ${#queue[@]} -gt 0 ]]; do
-        local current="${queue[0]}"
-        queue=("${queue[@]:1}")
-        echo "$current"
-        visited+=("$current")
-        for c in "${targets[@]}"; do
-            # Skip already visited
-            local seen=false
-            for v in "${visited[@]}"; do [[ "$v" == "$c" ]] && { seen=true; break; }; done
-            $seen && continue
-            if get_targets "$current" | grep -Fxq "$c"; then
-                queue+=("$c")
-            fi
-        done
-    done
-}
-
-# Find the parent branch in the dispatch stack for a given branch
-find_stack_parent() {
-    local branch="$1"
-    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
-        if get_targets "$b" | grep -Fxq "$branch"; then
-            echo "$b"
-            break
-        fi
-    done
-}
-
 # Derive target branch name from configured pattern and target id
 _target_branch_name() {
     local tid="$1"
@@ -697,14 +617,14 @@ _target_branch_name() {
 # ---------- init ----------
 
 cmd_init() {
-    local base="" target_pattern="" mode="independent" hooks_only=false
+    local base="" target_pattern="" hooks_only=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --hooks)  hooks_only=true; shift ;;
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
-            --mode)   mode="$2"; shift 2 ;;
+            --mode)   shift 2 ;;  # deprecated, ignored
             --force)  shift ;;
             -*)       die "Unknown flag: $1" ;;
             *)        die "Unexpected argument: $1" ;;
@@ -715,9 +635,6 @@ cmd_init() {
         _install_hooks
         return
     fi
-
-    [[ "$mode" == "independent" || "$mode" == "stacked" ]] || \
-        die "Invalid mode '$mode'. Use: independent or stacked"
 
     local source
     source=$(current_branch)
@@ -734,14 +651,12 @@ cmd_init() {
     local existing_base
     existing_base=$(_get_config base)
     if [[ -n "$existing_base" ]]; then
-        local existing_mode existing_pattern
-        existing_mode=$(_get_config mode)
+        local existing_pattern
         existing_pattern=$(_get_config targetPattern)
         local target_count
         target_count=$(find_dispatch_targets "$source" | wc -l | tr -d ' ')
 
         warn "Warning: dispatch already configured on this branch:"
-        warn "  mode:   ${existing_mode:-independent}"
         warn "  base:   $existing_base"
         warn "  target-pattern: ${existing_pattern:-<unset>}"
         [[ "$target_count" -gt 0 ]] && warn "  targets: $target_count branches exist"
@@ -758,13 +673,11 @@ cmd_init() {
 
     git config dispatch.base "$base"
     git config dispatch.targetPattern "$target_pattern"
-    git config dispatch.mode "$mode"
 
     _install_hooks
 
     echo ""
     info "Initialized dispatch on '$source'"
-    echo -e "  ${CYAN}mode:${NC}   $mode"
     echo -e "  ${CYAN}base:${NC}   $base"
     echo -e "  ${CYAN}target-pattern:${NC} $target_pattern"
 }
@@ -788,9 +701,8 @@ cmd_apply() {
         esac
     done
 
-    local base mode source
+    local base source
     base=$(_get_config base)
-    mode=$(_get_config mode)
     source=$(resolve_source "")
     [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
 
@@ -917,9 +829,6 @@ cmd_apply() {
                     git worktree remove --force "$wt_path" 2>/dev/null || true
                     git worktree prune 2>/dev/null || true
                 fi
-                local parent
-                parent=$(find_stack_parent "$sb" 2>/dev/null || true)
-                [[ -n "$parent" ]] && stack_remove "$sb" "$parent"
                 git config --remove-section "branch.${sb}" 2>/dev/null || true
                 git branch -D "$sb" 2>/dev/null || true
                 info "  Deleted stale ${sb}"
@@ -931,12 +840,6 @@ cmd_apply() {
         fi
     fi
 
-    if $dry_run; then
-        echo -e "${CYAN}mode:${NC} $mode (targets branch from ${mode/independent/base}${mode/stacked/previous target})"
-        echo ""
-    fi
-
-    local prev_branch="$base"
     local created=0 updated=0 skipped=0 failed=0
 
     # --reset <id>: delete the target branch so apply recreates it fresh
@@ -946,8 +849,6 @@ cmd_apply() {
         if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
             # Check for target-only commits that would be lost
             if ! $force; then
-                local reset_parent
-                reset_parent=$(find_stack_parent "$reset_branch" 2>/dev/null || true)
                 local _target_only=0
                 while IFS= read -r _rh; do
                     [[ -n "$_rh" ]] || continue
@@ -957,7 +858,7 @@ cmd_apply() {
                     local _rtid
                     _rtid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
                     [[ -z "$_rtid" || "$_rtid" != "$reset_target" ]] && _target_only=$((_target_only + 1))
-                done < <(git log --format="%H" "${reset_parent:-$base}..$reset_branch" 2>/dev/null)
+                done < <(git log --format="%H" "$base..$reset_branch" 2>/dev/null)
                 if [[ $_target_only -gt 0 ]]; then
                     warn "$reset_branch has $_target_only target-only commit(s) that will be lost."
                     if [[ -t 0 ]]; then
@@ -1017,11 +918,7 @@ cmd_apply() {
             hashes+=("$h")
         done < <(awk -v t="$tid" '$2 == t || $2 == "all" {print $1}' "$commit_file")
 
-        # Determine parent branch for this target
         local parent_branch="$base"
-        if [[ "$mode" == "stacked" && "$prev_branch" != "$base" ]]; then
-            parent_branch="$prev_branch"
-        fi
 
         if $dry_run; then
             if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
@@ -1045,7 +942,6 @@ cmd_apply() {
             else
                 echo -e "  ${YELLOW}create${NC} target $tid  $branch_name  (${#hashes[@]} commits from $parent_branch)"
             fi
-            prev_branch="$branch_name"
             continue
         fi
 
@@ -1057,7 +953,6 @@ cmd_apply() {
                 warn "  $branch_name exists but is not a dispatch target (missing dispatchsource)."
                 warn "  Skipping to avoid corrupting a foreign branch. Delete it or run: git dispatch apply --reset $tid"
                 failed=$((failed + 1))
-                prev_branch="$branch_name"
                 continue
             fi
 
@@ -1087,8 +982,6 @@ cmd_apply() {
             git branch --no-track "$branch_name" "$parent_branch" 2>/dev/null || \
                 die "Could not create branch $branch_name"
 
-            # Set up stack metadata early so _cherry_pick_commits can find the branch
-            stack_add "$branch_name" "$parent_branch"
             git config "branch.${branch_name}.dispatchsource" "$source"
 
             local cherry_pick_failed=false
@@ -1103,7 +996,6 @@ cmd_apply() {
             fi
             created=$((created + 1))
         fi
-        prev_branch="$branch_name"
     done
 
     echo ""
@@ -1202,12 +1094,9 @@ cmd_cherry_pick() {
         git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
             die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
 
-        local parent
-        parent=$(find_stack_parent "$target_branch")
-
         local -a new_hashes=()
         local cherry_out
-        cherry_out=$(git cherry -v "$source" "$target_branch" ${parent:+"$parent"} 2>/dev/null) || \
+        cherry_out=$(git cherry -v "$source" "$target_branch" "$base" 2>/dev/null) || \
             die "git cherry failed"
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
@@ -1360,7 +1249,7 @@ cmd_merge() {
         branches=("$source")
         while IFS= read -r c; do
             [[ -n "$c" ]] && branches+=("$c")
-        done < <(find_dispatch_targets "$source" | order_by_stack)
+        done < <(find_dispatch_targets "$source")
         [[ ${#branches[@]} -gt 1 ]] || die "No targets found"
     else
         # Numeric target id
@@ -1456,7 +1345,7 @@ cmd_push() {
     if [[ "$target" == "all" ]]; then
         while IFS= read -r c; do
             [[ -n "$c" ]] && branches+=("$c")
-        done < <(find_dispatch_targets "$source" | order_by_stack)
+        done < <(find_dispatch_targets "$source")
         [[ ${#branches[@]} -gt 0 ]] || die "No targets found"
     elif [[ "$target" == "source" ]]; then
         branches=("$source")
@@ -1494,13 +1383,11 @@ cmd_push() {
 cmd_status() {
     _require_init
 
-    local base target_pattern mode source has_stale=false has_diverged=false has_cosmetic=false
+    local base target_pattern source has_stale=false has_diverged=false has_cosmetic=false
     base=$(_get_config base)
     target_pattern=$(_get_config targetPattern)
-    mode=$(_get_config mode)
     source=$(resolve_source "")
 
-    echo -e "${CYAN}mode:${NC}   $mode"
     echo -e "${CYAN}base:${NC}   $base"
     echo -e "${CYAN}source:${NC} $source"
     echo -e "${CYAN}target-pattern:${NC} ${target_pattern:-\"\"}"
@@ -1509,7 +1396,7 @@ cmd_status() {
     local -a ordered=()
     while IFS= read -r c; do
         [[ -n "$c" ]] && ordered+=("$c")
-    done < <(find_dispatch_targets "$source" | order_by_stack)
+    done < <(find_dispatch_targets "$source")
 
     # Also find Dispatch-Target-Ids in source that don't have branches yet
     local -a source_tids=()
@@ -1618,10 +1505,8 @@ cmd_status() {
         # 1) cheap history-based candidate detection
         # 2) semantic no-op filtering only for branches with candidates
         local target_to_source=0
-        local parent
         local -a target_to_source_candidates=()
-        parent=$(find_stack_parent "$branch_name")
-        cherry_out=$(git cherry -v "$source" "$branch_name" ${parent:+"$parent"} 2>/dev/null) || true
+        cherry_out=$(git cherry -v "$source" "$branch_name" "$base" 2>/dev/null) || true
         while IFS= read -r line; do
             [[ "$line" == +* ]] || continue
             local hash
@@ -1670,7 +1555,7 @@ cmd_status() {
             local _ctid
             _ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$thash" | tr -d '[:space:]')
             [[ -z "$_ctid" || ( "$_ctid" != "$tid" && "$_ctid" != "all" ) ]] && untracked=$((untracked + 1))
-        done < <(git log --format="%H" "${parent:-$base}..$branch_name" 2>/dev/null)
+        done < <(git log --format="%H" "$base..$branch_name" 2>/dev/null)
 
         if [[ $source_to_target -eq 0 && $target_to_source -eq 0 && $untracked -eq 0 ]]; then
             printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
@@ -1798,15 +1683,9 @@ cmd_diff() {
 cmd_verify() {
     _require_init
 
-    local base mode source
+    local base source
     base=$(_get_config base)
-    mode=$(_get_config mode)
     source=$(resolve_source "")
-
-    if [[ "$mode" == "stacked" ]]; then
-        info "Stacked mode: targets inherit parent changes. No cross-dependencies to check."
-        return
-    fi
 
     # Parse source commits (same pattern as cmd_apply)
     local commit_file
@@ -1916,9 +1795,8 @@ cmd_verify() {
         echo ""
         echo -e "${CYAN}Options:${NC}"
         echo "  1. Move commits so dependent files share a Dispatch-Target-Id"
-        echo "  2. Switch to stacked mode: git dispatch init --mode stacked ..."
-        echo "  3. Accept and resolve conflicts during apply"
-        echo "  4. Tag shared commits with Dispatch-Target-Id: all and use Dispatch-Source-Keep for auto-resolve"
+        echo "  2. Accept and resolve conflicts during apply"
+        echo "  3. Tag shared commits with Dispatch-Target-Id: all and use Dispatch-Source-Keep for auto-resolve"
     else
         info "All ${#target_ids[@]} targets are file-independent."
     fi
@@ -1965,11 +1843,7 @@ cmd_reset() {
 
     # Delete target branches and metadata
     for target in "${targets[@]}"; do
-        local parent
-        parent=$(find_stack_parent "$target")
-
         git config --unset "branch.${target}.dispatchsource" 2>/dev/null || true
-        [[ -n "$parent" ]] && stack_remove "$target" "$parent"
         git config --unset-all "branch.${target}.dispatchtargets" 2>/dev/null || true
 
         if [[ "$cur" == "$target" ]]; then
@@ -2381,11 +2255,10 @@ cmd_help() {
 git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
-  git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
+  git dispatch init --base <branch> --target-pattern <pattern>
   git dispatch init --hooks
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
-  Defaults: --mode independent.
   Required: --base (recommended: "origin/master").
   Required: --target-pattern (must include "{id}"), e.g. "user/feat/task-{id}".
 
@@ -2431,8 +2304,8 @@ COMMANDS
   rebase      Rebase source onto base (--from base --to source)
   merge       Merge base into branches (--from base --to <source|id|all>)
   push        Push branches (push <all|source|N>)
-  status      Show mode, base, source, and all targets with sync state
-  verify      Detect cross-target file dependencies (independent mode)
+  status      Show base, source, and all targets with sync state
+  verify      Detect cross-target file dependencies
   continue    Check pending conflict resolutions, clean up completed worktrees
   clean       List (or --force remove) leftover dispatch worktrees
   reset       Delete all dispatch metadata and target branches

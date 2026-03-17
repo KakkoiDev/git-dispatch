@@ -115,15 +115,13 @@ test_init_basic() {
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" --mode independent
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
-    local base mode target_pattern
+    local base target_pattern
     base=$(git config dispatch.base)
-    mode=$(git config dispatch.mode)
     target_pattern=$(git config dispatch.targetPattern)
 
     assert_eq "master" "$base" "dispatch.base set"
-    assert_eq "independent" "$mode" "dispatch.mode set"
     assert_eq "source/feature-task-{id}" "$target_pattern" "dispatch.targetPattern set"
 
     teardown
@@ -151,21 +149,6 @@ test_init_requires_target_pattern() {
     local output
     output=$(bash "$DISPATCH" init --base master 2>&1) || true
     assert_contains "$output" "Missing required flags: --base and --target-pattern" "init shows combined required-flags error"
-
-    teardown
-}
-
-test_init_stacked_mode() {
-    echo "=== test: init stacked mode ==="
-    setup
-
-    git checkout -b source/feature master -q
-
-    bash "$DISPATCH" init --base master --mode stacked --target-pattern "source/feature-task-{id}"
-
-    local mode
-    mode=$(git config dispatch.mode)
-    assert_eq "stacked" "$mode" "mode set to stacked"
 
     teardown
 }
@@ -509,8 +492,8 @@ test_apply_incremental() {
     teardown
 }
 
-test_apply_new_target_mid_stack() {
-    echo "=== test: apply creates new target mid-stack ==="
+test_apply_new_target_mid_range() {
+    echo "=== test: apply creates new target mid-range ==="
     setup
 
     git checkout -b source/feature master -q
@@ -532,7 +515,7 @@ test_apply_new_target_mid_stack() {
 
     bash "$DISPATCH" apply >/dev/null
 
-    assert_branch_exists "source/feature-2" "target-2 created (mid-stack)"
+    assert_branch_exists "source/feature-2" "target-2 created (mid-range)"
 
     teardown
 }
@@ -554,39 +537,6 @@ test_apply_idempotent() {
     assert_eq "$tip3" "$(git rev-parse source/feature-3)" "target-3 unchanged"
     assert_eq "$tip4" "$(git rev-parse source/feature-4)" "target-4 unchanged"
     assert_eq "$tip5" "$(git rev-parse source/feature-5)" "target-5 unchanged"
-
-    teardown
-}
-
-test_apply_stacked_mode() {
-    echo "=== test: apply stacked mode ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add enum$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    echo "b" > api.txt; git add api.txt
-    git commit -m "Create endpoint$(printf '\n\nDispatch-Target-Id: 2')" -q
-
-    echo "c" > validate.txt; git add validate.txt
-    git commit -m "Add validation$(printf '\n\nDispatch-Target-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
-    bash "$DISPATCH" apply
-
-    assert_branch_exists "source/feature-1" "target-1 created"
-    assert_branch_exists "source/feature-2" "target-2 created"
-    assert_branch_exists "source/feature-3" "target-3 created"
-
-    # In stacked mode: target-2 branches from target-1, so it has 1's commits + 2's commits
-    local count2
-    count2=$(git log --oneline master..source/feature-2 | wc -l | tr -d ' ')
-    assert_eq "2" "$count2" "target-2 has 2 commits (stacked on target-1)"
-
-    local count3
-    count3=$(git log --oneline master..source/feature-3 | wc -l | tr -d ' ')
-    assert_eq "3" "$count3" "target-3 has 3 commits (stacked on target-2)"
 
     teardown
 }
@@ -977,8 +927,8 @@ test_push_no_argument_errors() {
 
 # ---------- status tests ----------
 
-test_status_shows_mode() {
-    echo "=== test: status shows mode ==="
+test_status_shows_info() {
+    echo "=== test: status shows base and source ==="
     setup
     create_source
 
@@ -987,7 +937,6 @@ test_status_shows_mode() {
     local output
     output=$(bash "$DISPATCH" status 2>&1)
 
-    assert_contains "$output" "independent" "status shows mode"
     assert_contains "$output" "master" "status shows base"
     assert_contains "$output" "source/feature" "status shows source"
 
@@ -1067,10 +1016,6 @@ test_reset_cleans_up() {
     local base
     base=$(git config dispatch.base 2>/dev/null || true)
     assert_eq "" "$base" "dispatch.base removed"
-
-    local mode
-    mode=$(git config dispatch.mode 2>/dev/null || true)
-    assert_eq "" "$mode" "dispatch.mode removed"
 
     teardown
 }
@@ -1699,7 +1644,6 @@ test_refresh_base_warns_on_fetch_failure() {
     # Set base to a non-existent remote
     git config dispatch.base "nonexistent/master"
     git config dispatch.targetPattern "source/feature-{id}"
-    git config dispatch.mode "independent"
 
     echo "a" > file.txt; git add file.txt
     git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
@@ -1972,24 +1916,6 @@ test_verify_shared_file_dep() {
 
     assert_contains "$output" "shared file" "detects shared file dependency"
     assert_contains "$output" "shared.ts" "names the shared file"
-
-    teardown
-}
-
-test_verify_stacked_mode_skips() {
-    echo "=== test: verify skips in stacked mode ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" --mode stacked >/dev/null 2>&1
-
-    local output
-    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "inherit parent changes" "skips with stacked mode message"
 
     teardown
 }
@@ -3178,7 +3104,6 @@ echo ""
 test_init_basic
 test_init_requires_base
 test_init_requires_target_pattern
-test_init_stacked_mode
 test_init_custom_pattern
 test_init_reinit_warns
 test_init_installs_hooks
@@ -3193,9 +3118,8 @@ test_worktree_shares_hooks_via_hookspath
 test_apply_creates_targets
 test_apply_dry_run
 test_apply_incremental
-test_apply_new_target_mid_stack
+test_apply_new_target_mid_range
 test_apply_idempotent
-test_apply_stacked_mode
 test_apply_conflict_aborts
 test_apply_create_auto_resolves_with_theirs
 test_cherry_pick_source_to_target
@@ -3212,7 +3136,7 @@ test_push_dry_run_single
 test_push_force_dry_run
 test_push_source_dry_run
 test_push_no_argument_errors
-test_status_shows_mode
+test_status_shows_info
 test_status_in_sync
 test_status_shows_pending
 test_status_not_created
@@ -3246,7 +3170,6 @@ test_apply_stale_dry_run
 test_verify_no_deps
 test_verify_new_file_dep
 test_verify_shared_file_dep
-test_verify_stacked_mode_skips
 test_verify_before_apply
 test_apply_from_target_branch
 test_apply_skips_base_ancestor_commits
