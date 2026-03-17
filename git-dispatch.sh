@@ -692,18 +692,29 @@ cmd_apply() {
     _acquire_lock
 
     local dry_run=false resolve=false force=false reset_target="" merge_base=false
+    local -a positional=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)  dry_run=true; shift ;;
             --resolve)  resolve=true; shift ;;
             --force)    force=true; shift ;;
-            --reset)    reset_target="$2"; shift 2 ;;
             --base)     merge_base=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
+            *)          positional+=("$1"); shift ;;
         esac
     done
+
+    # Parse positional args
+    local apply_target=""
+    if [[ ${#positional[@]} -gt 0 ]]; then
+        if [[ "${positional[0]}" == "reset" ]]; then
+            [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch apply reset <id>"
+            reset_target="${positional[1]}"
+        else
+            apply_target="${positional[0]}"
+        fi
+    fi
 
     local base source
     base=$(_get_config base)
@@ -871,7 +882,7 @@ cmd_apply() {
             echo ""
         elif [[ -n "$reset_target" ]]; then
             # --reset specified: don't block on stale, just warn
-            warn "Stale targets exist. Continuing with --reset $reset_target only."
+            warn "Stale targets exist. Continuing with reset $reset_target only."
             echo ""
         else
             warn "Run: git dispatch apply --force  to rebuild stale targets."
@@ -907,7 +918,7 @@ cmd_apply() {
                             return 0
                         fi
                     else
-                        die "Use --force to confirm --reset with target-only commits."
+                        die "Use --force to confirm reset with target-only commits."
                     fi
                 fi
             fi
@@ -948,6 +959,11 @@ cmd_apply() {
     fi
 
     for tid in "${target_ids[@]}"; do
+        # If applying to a specific target, skip others
+        if [[ -n "$apply_target" && "$tid" != "$apply_target" ]]; then
+            continue
+        fi
+
         local branch_name
         branch_name=$(_target_branch_name "$tid")
 
@@ -990,7 +1006,7 @@ cmd_apply() {
             _branch_source=$(git config "branch.${branch_name}.dispatchsource" 2>/dev/null || true)
             if [[ -z "$_branch_source" ]]; then
                 warn "  $branch_name exists but is not a dispatch target (missing dispatchsource)."
-                warn "  Skipping to avoid corrupting a foreign branch. Delete it or run: git dispatch apply --reset $tid"
+                warn "  Skipping to avoid corrupting a foreign branch. Delete it or run: git dispatch apply reset $tid"
                 failed=$((failed + 1))
                 continue
             fi
@@ -1066,122 +1082,6 @@ cmd_apply() {
         fi
     fi
 }
-
-# ---------- cherry-pick ----------
-
-cmd_cherry_pick() {
-    _require_init
-    _acquire_lock
-
-    local from="" to="" dry_run=false resolve=false force=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --from)     from="$2"; shift 2 ;;
-            --to)       to="$2"; shift 2 ;;
-            --dry-run)  dry_run=true; shift ;;
-            --resolve)  resolve=true; shift ;;
-            --force)    force=true; shift ;;
-            -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
-        esac
-    done
-
-    [[ -n "$from" ]] || die "Missing --from"
-    [[ -n "$to" ]] || die "Missing --to"
-
-    local base source
-    base=$(_get_config base)
-    source=$(resolve_source "")
-
-    # --from source --to all -> delegate to apply
-    if [[ "$from" == "source" && "$to" == "all" ]]; then
-        cmd_apply "${dry_run:+--dry-run}" "${resolve:+--resolve}" "${force:+--force}"
-        return
-    fi
-
-    if [[ "$from" == "source" ]]; then
-        # Cherry-pick from source to target <id>
-        local target_branch
-        target_branch=$(_target_branch_name "$to")
-        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
-
-        local -a new_hashes=()
-        local cherry_out
-        cherry_out=$(git cherry -v "$target_branch" "$source" 2>/dev/null) || \
-            die "git cherry failed"
-        while IFS= read -r line; do
-            [[ "$line" == +* ]] || continue
-            local hash
-            hash=$(echo "$line" | awk '{print $2}')
-            local tid
-            tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-            [[ "$tid" == "$to" || "$tid" == "all" ]] && new_hashes+=("$hash")
-        done <<< "$cherry_out"
-
-        if [[ ${#new_hashes[@]} -eq 0 ]]; then
-            info "Target $to already in sync"
-            return
-        fi
-
-        if $dry_run; then
-            echo -e "${YELLOW}[dry-run]${NC} cherry-pick ${#new_hashes[@]} commit(s) from source to $target_branch"
-            return
-        fi
-
-        _cherry_pick_commits "$resolve" "$target_branch" "${new_hashes[@]}"
-        info "Cherry-picked ${#new_hashes[@]} commit(s) to $target_branch"
-
-    else
-        # Cherry-pick from target <id> to source
-        [[ "$to" == "source" ]] || die "Invalid --to '$to'. Use: source or a Dispatch-Target-Id"
-
-        local target_branch
-        target_branch=$(_target_branch_name "$from")
-        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
-
-        local -a new_hashes=()
-        local cherry_out
-        cherry_out=$(git cherry -v "$source" "$target_branch" "$base" 2>/dev/null) || \
-            die "git cherry failed"
-        while IFS= read -r line; do
-            [[ "$line" == +* ]] || continue
-            local hash
-            hash=$(echo "$line" | awk '{print $2}')
-            # Skip commits from base
-            if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
-                continue
-            fi
-            # Skip commits already integrated in source, even with different history.
-            if _commit_semantically_in_branch "$hash" "$source"; then
-                continue
-            fi
-            new_hashes+=("$hash")
-        done <<< "$cherry_out"
-
-        if [[ ${#new_hashes[@]} -eq 0 ]]; then
-            info "Source already has all commits from target $from"
-            return
-        fi
-
-        if $dry_run; then
-            echo -e "${YELLOW}[dry-run]${NC} cherry-pick ${#new_hashes[@]} commit(s) from $target_branch to source"
-            return
-        fi
-
-        # Cherry-pick with trailer addition
-        _cherry_pick_commits "$resolve" "$source" --add-trailer "$from" "${new_hashes[@]}"
-        if [[ ${DISPATCH_LAST_PICKED:-0} -eq 0 ]]; then
-            info "No new commits applied from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} empty/no-op)"
-        else
-            info "Cherry-picked ${DISPATCH_LAST_PICKED} commit(s) from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} skipped)"
-        fi
-    fi
-}
-
-# ---------- merge ----------
 
 # ---------- push ----------
 
@@ -1475,197 +1375,18 @@ cmd_status() {
     if [[ "${has_diverged:-}" == "true" ]]; then
         echo ""
         warn "Diverged targets have different file content than source."
-        warn "Run: git dispatch diff --to <id>  to inspect."
     fi
     if [[ "${has_cosmetic:-}" == "true" ]]; then
         echo ""
         echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
         echo "  conflict resolution). Safe to ignore, or fix by regenerating the target:"
-        echo "  git dispatch apply --reset <id>"
+        echo "  git dispatch apply reset <id>"
     fi
     if [[ "${has_stale:-}" == "true" ]]; then
         echo ""
         warn "Run: git dispatch apply --force  to rebuild stale targets."
     fi
 
-}
-
-# ---------- diff ----------
-
-cmd_diff() {
-    _require_init
-
-    local target=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --to) target="$2"; shift 2 ;;
-            -*)   die "Unknown flag: $1" ;;
-            *)    die "Unexpected argument: $1" ;;
-        esac
-    done
-
-    [[ -n "$target" ]] || die "Missing --to <id>"
-
-    local base source target_branch
-    base=$(_get_config base)
-    source=$(resolve_source "")
-    target_branch=$(_target_branch_name "$target")
-
-    git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
-        die "Target branch '$target_branch' does not exist locally."
-
-    local -a target_files_arr=()
-    while IFS= read -r f; do
-        [[ -n "$f" ]] && target_files_arr+=("$f")
-    done < <(_target_id_files "$base" "$target_branch" "$target" | sort -u)
-
-    if [[ ${#target_files_arr[@]} -eq 0 ]]; then
-        info "No files changed by target $target on $target_branch"
-        return
-    fi
-
-    local diff_files
-    diff_files=$(git diff --name-only "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null)
-
-    if [[ -z "$diff_files" ]]; then
-        info "No content difference between $source and $target_branch"
-    else
-        warn "Files diverged between $source and $target_branch:"
-        echo "$diff_files" | while IFS= read -r f; do echo "  $f"; done
-        echo ""
-        git diff "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null
-        echo ""
-        echo -e "${CYAN}To resolve:${NC}"
-        echo "  git dispatch cherry-pick --from $target --to source --resolve   # bring target changes to source"
-        echo "  git dispatch cherry-pick --from source --to $target              # push source version to target"
-        echo -e "${CYAN}Then sync:${NC}"
-        echo "  git dispatch apply"
-    fi
-}
-
-# ---------- verify ----------
-
-cmd_verify() {
-    _require_init
-
-    local base source
-    base=$(_get_config base)
-    source=$(resolve_source "")
-
-    # Parse source commits (same pattern as cmd_apply)
-    local commit_file
-    commit_file=$(mktemp)
-    local files_dir
-    files_dir=$(mktemp -d)
-    local base_files
-    base_files=$(mktemp)
-    local introducer_file
-    introducer_file=$(mktemp)
-    trap "rm -rf '$commit_file' '$files_dir' '$base_files' '$introducer_file'" RETURN
-
-    while IFS= read -r _h; do
-        local _pc
-        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
-        (( _pc > 2 )) && continue
-        local _t
-        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
-        echo "$_h $_t"
-    done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
-
-    [[ -s "$commit_file" ]] || die "No commits found between $base and $source"
-
-    # Ordered unique target ids
-    local -a target_ids=()
-    while IFS= read -r tid; do
-        target_ids+=("$tid")
-    done < <(awk '!seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
-
-    # Phase 1: Build per-target file sets + track introducers
-    git ls-tree -r --name-only "$base" > "$base_files" 2>/dev/null || true
-
-    while read -r hash tid; do
-        [[ -n "$hash" ]] || continue
-        while IFS= read -r file; do
-            [[ -n "$file" ]] || continue
-            echo "$file" >> "$files_dir/$tid"
-            # Track first introducer for new files
-            if ! grep -Fxq "$file" "$base_files" 2>/dev/null; then
-                if ! grep -q "^${file} " "$introducer_file" 2>/dev/null; then
-                    echo "$file $tid" >> "$introducer_file"
-                fi
-            fi
-        done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
-    done < "$commit_file"
-
-    # Deduplicate per-target file lists
-    for tid in "${target_ids[@]}"; do
-        [[ -f "$files_dir/$tid" ]] && sort -u "$files_dir/$tid" -o "$files_dir/$tid"
-    done
-
-    # Phase 2: Detect cross-dependencies
-    local has_deps=false
-    local clean_count=0
-
-    echo -e "${CYAN}Cross-dependency analysis (independent mode):${NC}"
-    echo ""
-
-    for tid_a in "${target_ids[@]}"; do
-        [[ -f "$files_dir/$tid_a" ]] || { clean_count=$((clean_count + 1)); continue; }
-        local -a deps=()
-
-        while IFS= read -r file; do
-            [[ -n "$file" ]] || continue
-            if ! grep -Fxq "$file" "$base_files" 2>/dev/null; then
-                # New file - check introducer
-                local intro_tid
-                intro_tid=$(awk -v f="$file" '$0 ~ "^"f" " {print $NF; exit}' "$introducer_file")
-                [[ -n "$intro_tid" && "$intro_tid" != "$tid_a" ]] && \
-                    deps+=("${intro_tid}|new|${file}")
-            else
-                # Shared file - check other targets
-                for tid_b in "${target_ids[@]}"; do
-                    [[ "$tid_b" == "$tid_a" ]] && continue
-                    if [[ -f "$files_dir/$tid_b" ]] && grep -Fxq "$file" "$files_dir/$tid_b" 2>/dev/null; then
-                        deps+=("${tid_b}|shared|${file}")
-                    fi
-                done
-            fi
-        done < "$files_dir/$tid_a"
-
-        if [[ ${#deps[@]} -gt 0 ]]; then
-            has_deps=true
-            local branch_name
-            branch_name=$(_target_branch_name "$tid_a")
-            printf "  ${YELLOW}%-6s${NC}  %s  depends on:\n" "$tid_a" "$branch_name"
-            for dep in "${deps[@]}"; do
-                IFS='|' read -r dtid dtype dfile <<< "$dep"
-                if [[ "$dtype" == "new" ]]; then
-                    printf "    target %-4s  ${RED}new file${NC}: %s\n" "$dtid" "$dfile"
-                else
-                    printf "    target %-4s  ${CYAN}shared file${NC}: %s\n" "$dtid" "$dfile"
-                fi
-            done
-        else
-            clean_count=$((clean_count + 1))
-        fi
-    done
-
-    echo ""
-    if $has_deps; then
-        local dep_count=$(( ${#target_ids[@]} - clean_count ))
-        echo -e "${CYAN}Summary:${NC} $dep_count target(s) with cross-dependencies, $clean_count clean"
-        echo ""
-        echo "New file dependencies will cause cherry-pick failures on apply."
-        echo "Shared file modifications may cause CI failures on targets."
-        echo ""
-        echo -e "${CYAN}Options:${NC}"
-        echo "  1. Move commits so dependent files share a Dispatch-Target-Id"
-        echo "  2. Accept and resolve conflicts during apply"
-        echo "  3. Tag shared commits with Dispatch-Target-Id: all and use Dispatch-Source-Keep for auto-resolve"
-    else
-        info "All ${#target_ids[@]} targets are file-independent."
-    fi
 }
 
 # ---------- reset ----------
@@ -2198,28 +1919,24 @@ WORKFLOW
        git dispatch apply                               # propagate to targets
        git dispatch checkout clear                      # clean up test branch
 
-  4. Propagate changes:
-       git dispatch apply                               # source to all targets
-       git dispatch cherry-pick --from source --to 2    # source to one target
-       git dispatch cherry-pick --from 2 --to source    # target back to source
+  4. Apply to specific target:
+       git dispatch apply 3                             # apply to target 3 only
 
   5. Update with base changes:
        git dispatch apply --base                        # merge base into source, then apply
 
 COMMANDS
   init        Configure dispatch on current source branch
-  apply       Make all targets match source (create/update). --base merges base
-              into source first. --reset <id> to regenerate a target.
+  apply       Make all targets match source. apply <N> for one target. apply --base
+              to merge base first. apply reset <N> to regenerate.
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
                 checkout clear     Remove test branch (--force to discard unpicked)
   checkin     Cherry-pick new commits from checkout branch back to source.
               Honors Dispatch-Source-Keep for auto-conflict resolution.
-  cherry-pick Move commits between source and target (--from/--to)
   push        Push branches (push <all|source|N>)
   status      Show base, source, and all targets with sync state
-  verify      Detect cross-target file dependencies
   continue    Check pending conflict resolutions, clean up completed worktrees
   clean       List (or --force remove) leftover dispatch worktrees
   reset       Delete all dispatch metadata and target branches
@@ -2258,11 +1975,8 @@ main() {
     case "$cmd" in
         init)         cmd_init "$@" ;;
         apply)        cmd_apply "$@" ;;
-        cherry-pick)  cmd_cherry_pick "$@" ;;
         push)         cmd_push "$@" ;;
         status)       cmd_status "$@" ;;
-        diff)         cmd_diff "$@" ;;
-        verify)       cmd_verify "$@" ;;
         checkout)     cmd_checkout "$@" ;;
         checkin)      cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;

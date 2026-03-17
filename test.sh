@@ -620,135 +620,6 @@ test_apply_create_auto_resolves_with_theirs() {
     teardown
 }
 
-# ---------- cherry-pick tests ----------
-
-test_cherry_pick_source_to_target() {
-    echo "=== test: cherry-pick --from source --to <id> ==="
-    setup
-    create_source
-
-    bash "$DISPATCH" apply >/dev/null
-
-    # Add new commit for target 4
-    echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix endpoint$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    local before
-    before=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
-
-    bash "$DISPATCH" cherry-pick --from source --to 4
-
-    local after
-    after=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
-
-    assert_eq "$((before + 1))" "$after" "commit cherry-picked from source to target"
-
-    teardown
-}
-
-test_cherry_pick_target_to_source() {
-    echo "=== test: cherry-pick --from <id> --to source ==="
-    setup
-    create_source
-
-    bash "$DISPATCH" apply >/dev/null
-
-    # Add commit directly on target branch
-    git checkout source/feature-3 -q
-    echo "hotfix" > hotfix.txt; git add hotfix.txt
-    git commit --no-verify -m "Hotfix on target" -q
-    git checkout source/feature -q
-
-    local before
-    before=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
-
-    bash "$DISPATCH" cherry-pick --from 3 --to source
-
-    local after
-    after=$(git log --oneline master..source/feature | wc -l | tr -d ' ')
-
-    assert_eq "$((before + 1))" "$after" "commit cherry-picked from target to source"
-
-    teardown
-}
-
-test_cherry_pick_adds_trailer() {
-    echo "=== test: cherry-pick --from <id> --to source adds Dispatch-Target-Id ==="
-    setup
-    create_source
-
-    bash "$DISPATCH" apply >/dev/null
-
-    # Commit on target without proper Dispatch-Target-Id
-    git checkout source/feature-3 -q
-    echo "fix" > fix.txt; git add fix.txt
-    git commit --no-verify -m "Fix without trailer" -q
-    git checkout source/feature -q
-
-    bash "$DISPATCH" cherry-pick --from 3 --to source
-
-    local source_trailer
-    source_trailer=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" source/feature | tr -d '[:space:]')
-    assert_eq "3" "$source_trailer" "Dispatch-Target-Id trailer added on cherry-pick to source"
-
-    teardown
-}
-
-test_cherry_pick_dry_run() {
-    echo "=== test: cherry-pick --dry-run ==="
-    setup
-    create_source
-
-    bash "$DISPATCH" apply >/dev/null
-
-    echo "fix" > fix.txt; git add fix.txt
-    git commit -m "Fix$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 4 --dry-run)
-
-    assert_contains "$output" "dry-run" "dry-run label shown"
-
-    teardown
-}
-
-test_cherry_pick_target_to_source_noop_semantic_sync() {
-    echo "=== test: cherry-pick --from <id> --to source skips no-op semantic commit ==="
-    setup
-    create_source
-
-    bash "$DISPATCH" apply >/dev/null
-
-    # Target-only commit (Dispatch-Target-Id 3): add "hotfix" line.
-    git checkout source/feature-3 -q
-    printf "a\nhotfix\n" > file.txt; git add file.txt
-    git commit --no-verify -m "Target hotfix" -q
-
-    # Source independently contains the same hotfix already, plus extra change in same commit.
-    # Patch-id differs, but cherry-picking target commit to source is a semantic no-op.
-    git checkout source/feature -q
-    printf "a\nhotfix\n" > file.txt
-    echo "extra" > extra.txt
-    git add file.txt extra.txt
-    git commit -m "Broader source change$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    local before after cp_output status_output target3_line
-    before=$(git rev-list --count master..source/feature)
-
-    cp_output=$(bash "$DISPATCH" cherry-pick --from 3 --to source 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-    after=$(git rev-list --count master..source/feature)
-
-    assert_eq "$before" "$after" "no new source commit created for no-op semantic cherry-pick"
-    assert_contains "$cp_output" "Source already has all commits from target 3" "reports semantic no-op target->source sync"
-
-    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-    target3_line=$(echo "$status_output" | grep "source/feature-3" || true)
-    assert_contains "$target3_line" "in sync" "target-3 treated as semantically in sync"
-    assert_not_contains "$target3_line" "ahead" "target-3 no longer shown ahead on no-op semantic commit"
-
-    teardown
-}
-
 # ---------- rebase tests ----------
 
 # ---------- merge tests ----------
@@ -1050,124 +921,6 @@ test_apply_decimal_target_id() {
 
 # ---------- conflict handling tests ----------
 
-test_cherry_pick_conflict_shows_details() {
-    echo "=== test: cherry-pick conflict shows file details ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Create conflict: modify file.txt on target, then add conflicting source commit
-    git checkout source/feature-1 -q
-    echo "target-change" > file.txt; git add file.txt
-    git commit --no-verify -m "Target modifies file" -q
-
-    git checkout source/feature -q
-    echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
-
-    assert_contains "$output" "Conflict on commit" "shows conflict position"
-    assert_contains "$output" "Conflicted files" "shows conflicted files header"
-    assert_contains "$output" "file.txt" "shows conflicted filename"
-    assert_contains "$output" "Aborted" "shows abort message"
-    assert_contains "$output" "--resolve" "suggests --resolve flag"
-
-    teardown
-}
-
-test_cherry_pick_conflict_resolve_leaves_active() {
-    echo "=== test: cherry-pick --resolve leaves conflict active ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "d" > d.txt; git add d.txt
-    git commit -m "Add d$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "e" > e.txt; git add e.txt
-    git commit -m "Add e$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Create conflict on file.txt
-    git checkout source/feature-1 -q
-    echo "target-change" > file.txt; git add file.txt
-    git commit --no-verify -m "Target modifies file" -q
-
-    git checkout source/feature -q
-    echo "source-change" > file.txt; git add file.txt
-    git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "f" > f.txt; git add f.txt
-    git commit -m "Add f$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
-
-    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
-    assert_contains "$output" "cherry-pick --continue" "shows continue command"
-    assert_contains "$output" "Remaining commits" "shows remaining commits"
-
-    # Verify worktree path is printed for conflict resolution
-    if echo "$output" | grep -q "Worktree left at:"; then
-        echo -e "  ${GREEN}PASS${NC} worktree path printed for resolution"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} worktree path not printed"
-        FAIL=$((FAIL + 1))
-    fi
-
-    # Clean up any leftover worktrees
-    git worktree prune 2>/dev/null || true
-
-    teardown
-}
-
-test_cherry_pick_conflict_batch_reporting() {
-    echo "=== test: cherry-pick conflict shows batch progress ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Create conflict on a.txt
-    git checkout source/feature-1 -q
-    echo "conflict" > a.txt; git add a.txt
-    git commit --no-verify -m "Target modifies a" -q
-
-    # Add 3 new source commits for target 1 - first will conflict
-    git checkout source/feature -q
-    echo "source-a" > a.txt; git add a.txt
-    git commit -m "Source modifies a$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "c" > c.txt; git add c.txt
-    git commit -m "Add c$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
-
-    assert_contains "$output" "Conflict on commit 1/3" "shows batch position"
-    assert_contains "$output" "Remaining commits" "lists remaining commits"
-
-    # Clean up
-    git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
-    git checkout source/feature -q 2>/dev/null || true
-
-    teardown
-}
-
 test_apply_base_conflict_shows_details() {
     echo "=== test: apply --base conflict shows details ==="
     setup
@@ -1219,58 +972,7 @@ test_status_shows_diverged() {
     output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     assert_contains "$output" "DIVERGED" "status shows DIVERGED tag"
-    assert_contains "$output" "git dispatch diff" "status shows diff hint"
-
-    teardown
-}
-
-test_diff_shows_diverged_files() {
-    echo "=== test: diff shows diverged files and resolution hints ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Create divergence
-    git checkout source/feature-1 -q
-    echo "target-version" > file.txt; git add file.txt
-    git commit --no-verify -m "Target modification" -q
-
-    git checkout source/feature -q
-    echo "source-version" > file.txt; git add file.txt
-    git commit -m "Source modification$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    local output
-    output=$(bash "$DISPATCH" diff --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "Files diverged" "diff shows diverged header"
-    assert_contains "$output" "file.txt" "diff shows diverged filename"
-    assert_contains "$output" "cherry-pick --from 1 --to source" "diff shows target-to-source resolution"
-    assert_contains "$output" "cherry-pick --from source --to 1" "diff shows source-to-target resolution"
-    assert_contains "$output" "git dispatch apply" "diff shows apply sync hint"
-
-    teardown
-}
-
-test_diff_no_difference() {
-    echo "=== test: diff reports no difference when in sync ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    local output
-    output=$(bash "$DISPATCH" diff --to 1 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "No content difference" "diff reports no difference"
+    assert_contains "$output" "Diverged targets have different file content" "status shows diverged hint"
 
     teardown
 }
@@ -1303,7 +1005,7 @@ test_status_semantic_source_to_target() {
 # ---------- end-to-end lifecycle ----------
 
 test_apply_reset_regenerates_target() {
-    echo "=== test: apply --reset regenerates target branch ==="
+    echo "=== test: apply reset regenerates target branch ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1324,7 +1026,7 @@ test_apply_reset_regenerates_target() {
 
     # Reset target 1 - should delete and recreate
     local reset_output
-    reset_output=$(bash "$DISPATCH" apply --reset 1 2>&1)
+    reset_output=$(bash "$DISPATCH" apply reset 1 2>&1)
     assert_contains "$reset_output" "Deleted source/feature-task-1" "reports branch deletion"
     assert_contains "$reset_output" "Created source/feature-task-1" "reports branch recreation"
 
@@ -1338,6 +1040,45 @@ test_apply_reset_regenerates_target() {
     local count2
     count2=$(git log --oneline master..source/feature-task-2 | wc -l | tr -d ' ')
     assert_eq "1" "$count2" "target-2 unaffected by reset of target-1"
+
+    teardown
+}
+
+test_apply_single_target() {
+    echo "=== test: apply <N> applies to single target ==="
+    setup
+    create_source  # commits: tid=3, tid=4(x2), tid=5
+
+    bash "$DISPATCH" apply 4 >/dev/null 2>&1
+
+    # Only target-4 should exist
+    assert_branch_exists "source/feature-4" "target-4 created"
+    assert_branch_not_exists "source/feature-3" "target-3 not created"
+    assert_branch_not_exists "source/feature-5" "target-5 not created"
+
+    teardown
+}
+
+test_apply_reset_subcommand() {
+    echo "=== test: apply reset <N> regenerates target ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Count commits on target-4 before reset
+    local before
+    before=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
+    assert_eq "2" "$before" "target-4 has 2 commits before reset"
+
+    # Reset and regenerate
+    bash "$DISPATCH" apply reset 4 >/dev/null 2>&1
+
+    assert_branch_exists "source/feature-4" "target-4 recreated"
+
+    local after
+    after=$(git log --oneline master..source/feature-4 | wc -l | tr -d ' ')
+    assert_eq "2" "$after" "target-4 has 2 commits after reset"
 
     teardown
 }
@@ -1686,99 +1427,6 @@ test_apply_stale_dry_run() {
     teardown
 }
 
-# ---------- verify ----------
-
-test_verify_no_deps() {
-    echo "=== test: verify reports no deps when targets touch different files ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "schema" > schema.ts; git add schema.ts
-    git commit -m "Add schema$(printf '\n\nDispatch-Target-Id: 3')" -q
-    echo "endpoint" > endpoint.ts; git add endpoint.ts
-    git commit -m "Add endpoint$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    local output
-    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "file-independent" "reports all targets independent"
-
-    teardown
-}
-
-test_verify_new_file_dep() {
-    echo "=== test: verify detects new file dependency ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "export const auth = true" > auth.ts; git add auth.ts
-    git commit -m "Add auth$(printf '\n\nDispatch-Target-Id: 3')" -q
-    echo "import auth" > api.ts; git add api.ts
-    echo "// updated" >> auth.ts; git add auth.ts
-    git commit -m "Add API using auth$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    local output
-    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "new file" "detects new file dependency"
-    assert_contains "$output" "auth.ts" "names the dependent file"
-    assert_contains "$output" "target 3" "names the introducing target"
-
-    teardown
-}
-
-test_verify_shared_file_dep() {
-    echo "=== test: verify detects shared file dependency ==="
-    setup
-
-    # Create a file on base
-    echo "base content" > shared.ts; git add shared.ts
-    git commit -m "Add shared file" -q
-
-    git checkout -b source/feature master -q
-    echo "change A" >> shared.ts; git add shared.ts
-    git commit -m "Modify shared A$(printf '\n\nDispatch-Target-Id: 3')" -q
-    echo "change B" >> shared.ts; git add shared.ts
-    git commit -m "Modify shared B$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    local output
-    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "shared file" "detects shared file dependency"
-    assert_contains "$output" "shared.ts" "names the shared file"
-
-    teardown
-}
-
-test_verify_before_apply() {
-    echo "=== test: verify works before apply (no target branches needed) ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 3')" -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 4')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    # Do NOT run apply - verify should still work
-    local output
-    output=$(bash "$DISPATCH" verify 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
-
-    assert_contains "$output" "file-independent" "works without apply"
-
-    teardown
-}
-
-
-
 
 
 
@@ -2047,11 +1695,11 @@ test_resolve_warns_about_dangling_stash() {
     git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1) || true
+    output=$(bash "$DISPATCH" apply --resolve 2>&1) || true
 
     # Untracked file should still exist (no stashing happened)
     if [[ -f "untracked.txt" ]]; then
-        echo -e "  ${GREEN}PASS${NC} untracked file not disturbed by worktree cherry-pick"
+        echo -e "  ${GREEN}PASS${NC} untracked file not disturbed by worktree apply"
         PASS=$((PASS + 1))
     else
         echo -e "  ${RED}FAIL${NC} untracked file was removed"
@@ -2060,42 +1708,6 @@ test_resolve_warns_about_dangling_stash() {
 
     # Clean up any leftover worktrees
     git worktree prune 2>/dev/null || true
-
-    teardown
-}
-
-test_cherry_pick_stash_before_checkout() {
-    echo "=== test: cherry-pick stashes with --include-untracked before checkout ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null
-
-    # Add new source commit to cherry-pick
-    echo "b" > b.txt; git add b.txt
-    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    # Create untracked file that would block checkout
-    echo "untracked" > untracked.txt
-
-    local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
-
-    # Should succeed (stash handled untracked file)
-    assert_not_contains "$output" "error" "cherry-pick succeeds with untracked files"
-
-    # Untracked file should still be present after stash pop
-    if [[ -f "untracked.txt" ]]; then
-        echo -e "  ${GREEN}PASS${NC} untracked file restored after cherry-pick"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} untracked file not restored after cherry-pick"
-        FAIL=$((FAIL + 1))
-    fi
 
     teardown
 }
@@ -2158,7 +1770,7 @@ test_status_shows_untracked_commits() {
 }
 
 test_stash_pop_conflict_warns() {
-    echo "=== test: staged changes survive worktree cherry-pick ==="
+    echo "=== test: staged changes survive worktree apply ==="
     setup
 
     git checkout -b source/feature master -q
@@ -2175,17 +1787,17 @@ test_stash_pop_conflict_warns() {
     echo "b" > b.txt; git add b.txt
     git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
-    # Cherry-pick via worktree should not touch staged changes
+    # Apply via worktree should not touch staged changes
     local output
-    output=$(bash "$DISPATCH" cherry-pick --from source --to 1 2>&1) || true
+    output=$(bash "$DISPATCH" apply 2>&1) || true
 
     # Should not crash
-    assert_not_contains "$output" "fatal" "no fatal error from worktree cherry-pick"
+    assert_not_contains "$output" "fatal" "no fatal error from worktree apply"
 
     # Staged file.txt changes should still be present
     local staged_content
     staged_content=$(git show :file.txt 2>/dev/null || true)
-    assert_eq "staged-change" "$staged_content" "staged changes survive cherry-pick operation"
+    assert_eq "staged-change" "$staged_content" "staged changes survive apply operation"
 
     teardown
 }
@@ -2201,11 +1813,11 @@ test_continue_cleans_completed_worktree() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     bash "$DISPATCH" apply >/dev/null
 
-    # Add a new commit and cherry-pick (non-conflicting)
+    # Add a new commit and apply (non-conflicting)
     echo "b" > b.txt; git add b.txt
     git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
-    bash "$DISPATCH" cherry-pick --from source --to 1 >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
 
     # No leftover worktrees should exist
     local output
@@ -2236,7 +1848,7 @@ test_clean_lists_and_removes_worktrees() {
     git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     # --resolve leaves worktree alive
-    bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
+    bash "$DISPATCH" apply --resolve 2>&1 || true
 
     # clean without --force lists them
     local list_output
@@ -2277,7 +1889,7 @@ test_continue_detects_pending_conflict() {
     echo "source-change" > file.txt; git add file.txt
     git commit -m "Source modifies file$(printf '\n\nDispatch-Target-Id: 1')" -q
 
-    bash "$DISPATCH" cherry-pick --from source --to 1 --resolve 2>&1 || true
+    bash "$DISPATCH" apply --resolve 2>&1 || true
 
     local output
     output=$(bash "$DISPATCH" continue 2>&1)
@@ -3082,11 +2694,6 @@ test_apply_new_target_mid_range
 test_apply_idempotent
 test_apply_conflict_aborts
 test_apply_create_auto_resolves_with_theirs
-test_cherry_pick_source_to_target
-test_cherry_pick_target_to_source
-test_cherry_pick_adds_trailer
-test_cherry_pick_dry_run
-test_cherry_pick_target_to_source_noop_semantic_sync
 test_apply_base_merges_and_applies
 test_apply_base_up_to_date
 test_apply_base_dry_run
@@ -3103,15 +2710,12 @@ test_reset_cleans_up
 test_help
 test_install_chmod
 test_apply_decimal_target_id
-test_cherry_pick_conflict_shows_details
-test_cherry_pick_conflict_resolve_leaves_active
-test_cherry_pick_conflict_batch_reporting
 test_apply_base_conflict_shows_details
 test_status_shows_diverged
-test_diff_shows_diverged_files
-test_diff_no_difference
 test_status_semantic_source_to_target
 test_apply_reset_regenerates_target
+test_apply_single_target
+test_apply_reset_subcommand
 test_full_lifecycle
 test_refresh_base_fetches_remote
 test_refresh_base_noop_when_up_to_date
@@ -3122,10 +2726,6 @@ test_apply_force_rebuilds_stale
 test_status_shows_stale
 test_apply_stale_warns_target_only_commits
 test_apply_stale_dry_run
-test_verify_no_deps
-test_verify_new_file_dep
-test_verify_shared_file_dep
-test_verify_before_apply
 test_apply_from_target_branch
 test_apply_skips_base_ancestor_commits
 test_target_id_all_hook_accepts
@@ -3136,7 +2736,6 @@ test_source_keep_force_accepts_conflict
 test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails
 test_resolve_warns_about_dangling_stash
-test_cherry_pick_stash_before_checkout
 test_apply_warns_base_drift
 test_status_shows_untracked_commits
 test_stash_pop_conflict_warns
