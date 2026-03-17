@@ -1,16 +1,22 @@
 # git-dispatch
 
-Multi-commit stacked PRs. Code on one source branch, group commits by `Dispatch-Target-Id`, apply into target branches for focused PRs. Integration test with checkout/checkin.
+**Stacked PRs without the stack.**
+
+Multi-commit grouped PRs. Code on one source branch, group commits by `Dispatch-Target-Id`, apply into independent target branches for focused PRs. Integration test with `checkout`. No force-push. No restack. No cascade. Ever.
 
 Unlike ghstack/spr (1 commit = 1 PR), git-dispatch supports N commits = 1 PR.
 
 ## Problem
 
-You code the whole feature on one branch, then need focused PRs for review. Manually cherry-picking and keeping branches in sync is tedious. Stacked PR tools force 1:1 commit-to-PR mapping.
+You code the whole feature on one branch, then need focused PRs for review. Every stacked PR tool today (Graphite, ghstack, spr) stacks branches on top of each other. When a parent PR merges, all children must be rebased and force-pushed. Review context is destroyed.
 
 ## Solution
 
-Tag commits with `Dispatch-Target-Id` trailers to group them. `apply` creates target branches. `checkout` creates integration test branches. `checkin` brings fixes back. Two modes: independent (no force-push) or stacked (CI always passes).
+Don't stack. Each target branches independently from base, carrying only its own commits. When any PR merges, sibling targets are unaffected. No rebase. No force-push.
+
+"But CI needs the combined code to pass." That's what `checkout <N>` is for. It creates an ephemeral integration branch combining targets 1..N for testing, without permanently stacking the branches.
+
+Tag commits with `Dispatch-Target-Id` trailers to group them. `apply` creates target branches. `checkout` tests them together. `checkin` brings fixes back.
 
 ## Quick Start
 
@@ -35,16 +41,6 @@ git dispatch push all
 # feature/auth-2  (2 commits)
 # feature/auth-3  (1 commit)
 ```
-
-## Two Modes
-
-| | Independent (default) | Stacked |
-|--|----------------------|---------|
-| Target branches from | base | previous target |
-| After parent PR merges | Nothing to do | Rebase + force-push |
-| Force-push needed | Never | After every parent merge |
-| CI on targets | May fail if depends on parent | Always passes |
-| Best for | Isolated tasks, different files | Sequential dependent work |
 
 ## Commands
 
@@ -223,7 +219,6 @@ git dispatch apply --force      # rebuilds them
 |-----|-------------|
 | `dispatch.base` | Base branch |
 | `dispatch.targetPattern` | Target branch pattern (must include `{id}`) |
-| `dispatch.mode` | independent or stacked |
 | `dispatch.checkoutBranch` | Active checkout branch |
 | `branch.<name>.dispatchtargets` | Target branches |
 | `branch.<name>.dispatchsource` | Source branch reference |

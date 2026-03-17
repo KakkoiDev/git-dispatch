@@ -8,15 +8,13 @@ AI generates a complete, working feature on a single branch in minutes. Code rev
 
 Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by `Dispatch-Target-Id` into multi-commit PRs. N commits = 1 PR.
 
-## The stacked PRs force-push problem
+## Stacked PRs without the stack
 
 Every stacked PR tool today (Graphite, ghstack, spr, Phabricator) uses the same model: child branches stacked on parent branches. When a parent PR merges (especially via squash-merge), the child must be rebased, requiring a force-push. This destroys PR review context.
 
-git-dispatch offers two modes:
+git-dispatch solves this by not stacking at all. Each target branches independently from base, carrying only its own commits. When any PR merges, sibling targets are unaffected. No rebase. No force-push. No cascade. Ever.
 
-- **Independent mode** eliminates this entirely. Each target branches from base, carrying only its own commits. When a parent PR merges, sibling targets are unaffected. No rebase. No force-push. The trade-off: CI may fail on targets that depend on parent changes. This works well when targets touch different files.
-
-- **Stacked mode** preserves the traditional approach. Targets branch from previous target. CI always passes. Force-push required when parent merges.
+"But CI needs the combined code to pass." That's what `checkout <N>` is for. It creates an ephemeral integration branch combining targets 1..N for testing, without permanently stacking branches. You get the CI guarantee of stacked mode without any of the downsides.
 
 ## Concepts
 
@@ -45,7 +43,7 @@ Source is the single point of truth. Targets never touch base directly. Checkout
 ## Commands
 
 ```
-git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent|stacked>]
+git dispatch init --base <branch> --target-pattern <pattern>
 git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]
 git dispatch checkout <N>
 git dispatch checkout source
@@ -73,7 +71,7 @@ git dispatch reset [--force]
 
 ### Command Reference
 
-**init** - Configure dispatch on current source branch. Stores config in git config. Installs hooks (Dispatch-Target-Id enforcement + auto-carry).
+**init** - Configure dispatch on current source branch. Stores config in git config. Installs hooks.
 
 **apply** - Create or update target branches from source commits grouped by Dispatch-Target-Id. Idempotent. Detects stale targets via patch-id matching after Dispatch-Target-Id reassignment.
 
@@ -109,24 +107,12 @@ Rules:
 - Hook auto-carries from previous commit
 - `Dispatch-Source-Keep: true`: auto-resolve conflicts with incoming version (--strategy-option theirs). Works in both apply (source->target) and checkin (checkout->source).
 
-## Modes
-
-| | independent (default) | stacked |
-|--|----------------------|---------|
-| Target branches from | base | previous target |
-| PR base on GitHub | base | previous target |
-| CI on targets | May fail if depends on parent | Always passes |
-| After parent PR merge | Nothing to do | Rebase + force-push |
-| Force-push needed | Never | After parent merge |
-| Best for | Isolated tasks | Sequential dependent work |
-
 ## Config
 
 | Key | Set by | Description |
 |-----|--------|-------------|
 | `dispatch.base` | init | Base branch |
 | `dispatch.targetPattern` | init | Target branch pattern (must include `{id}`) |
-| `dispatch.mode` | init | independent or stacked |
 | `dispatch.checkoutBranch` | checkout | Active checkout branch |
 | `branch.<name>.dispatchtargets` | apply | Target branches (multi-value) |
 | `branch.<name>.dispatchsource` | apply | Source branch reference |
@@ -325,12 +311,5 @@ git dispatch apply
 git dispatch push all
 ```
 
-### After parent PR merged (independent mode)
-Nothing. Other targets unaffected.
-
-### After parent PR merged (stacked mode)
-```bash
-git dispatch merge --from base --to source
-git dispatch apply
-git dispatch push all --force
-```
+### After parent PR merged
+Nothing. Other targets are unaffected. That's the point.

@@ -1,11 +1,13 @@
 ---
 name: git-dispatch
-description: Stacked PR tool for multi-commit PRs. Code on source branch with Dispatch-Target-Id trailers, apply into read-only target branches, integration test with checkout, sync with checkin. Use when preparing grouped PRs from a source branch.
+description: Stacked PRs without the stack. Multi-commit grouped PRs with no force-push. Code on source, apply into independent target branches, integration test with checkout, sync with checkin. Use when preparing grouped PRs from a source branch.
 ---
 
-# git-dispatch - Multi-Commit Stacked PRs
+# git-dispatch - Stacked PRs Without the Stack
 
-Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Target-Id into multi-commit PRs.
+Multi-commit grouped PRs. No force-push. No restack. No cascade.
+
+Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Target-Id into multi-commit PRs. Each target branches independently from base. `checkout <N>` provides the combined view for integration testing.
 
 **Source** = where all edits happen. **Targets** = read-only PR branches. **Checkout** = integration testing.
 
@@ -13,7 +15,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL target branches from source |
 | `git dispatch checkout <N>` | Create integration branch with targets 1..N + "all" commits |
 | `git dispatch checkout source` | Return to source branch |
@@ -25,7 +27,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
 | `git dispatch diff --to <id>` | Show file-level diff between source and target |
-| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
+| `git dispatch verify` | Detect cross-target file dependencies |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch clean [--force]` | Remove leftover worktrees |
 | `git dispatch reset [--force]` | Delete target branches and config |
@@ -115,16 +117,10 @@ git dispatch push all
 | Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
 | Regenerate one target from scratch | `git dispatch apply --reset <id>` |
 
-## Two Modes
-
-- **Independent** (default): targets branch from base. No force-push needed when parent merges.
-- **Stacked**: targets branch from previous target. CI always passes. Force-push required on merge.
-
 ## Config
 
 - `dispatch.base` - Base branch (recommended: origin/master)
 - `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
-- `dispatch.mode` - independent or stacked
 - `dispatch.checkoutBranch` - Active checkout branch (set by checkout command)
 - `branch.<name>.dispatchtargets` - Target branches
 - `branch.<name>.dispatchsource` - Source branch

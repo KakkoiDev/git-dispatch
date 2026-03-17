@@ -52,7 +52,7 @@ else
     echo "  - Run with --ai to install Claude/Codex skill + agent files"
     echo ""
     echo "Usage:"
-    echo "  git dispatch init --base <branch> --target-pattern <pattern>"
+    echo "  git dispatch init --base <branch> --target-pattern <pattern>  # stacked PRs without the stack"
     echo "  git dispatch apply [--dry-run]"
     echo "  git dispatch checkout <N|source|clear>"
     echo "  git dispatch checkin"

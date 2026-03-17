@@ -1,6 +1,6 @@
 ---
 name: git-dispatch
-description: Stacked PR workflow agent. Groups commits into multi-commit PRs via Dispatch-Target-Id trailers. Helps create target branches from source, integration test with checkout/checkin, sync bidirectionally, and manage PR lifecycle. Use when working with source branches that need to become grouped PRs, when applying source commits to target branches, when integration testing with checkout, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User wants to test targets together. user: 'I need to test targets 1 through 3 together' assistant: 'I'll use git-dispatch checkout 3 to create an integration branch.' </example> <example>Context: User fixed something on a checkout branch. user: 'Pick my fixes back to source' assistant: 'I'll use git-dispatch checkin to cherry-pick the new commits back to source.' </example> <example>Context: User needs to regen swagger for a failing target. user: 'Target 3 CI fails because swagger is wrong' assistant: 'I'll checkout 3, regen swagger, checkin with Source-Keep, then apply.' </example>
+description: Stacked PRs without the stack. Groups commits into multi-commit PRs via Dispatch-Target-Id trailers. Independent target branches, no force-push, integration test with checkout/checkin. Use when working with source branches that need to become grouped PRs, when applying source commits to target branches, when integration testing with checkout, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User wants to test targets together. user: 'I need to test targets 1 through 3 together' assistant: 'I'll use git-dispatch checkout 3 to create an integration branch.' </example> <example>Context: User fixed something on a checkout branch. user: 'Pick my fixes back to source' assistant: 'I'll use git-dispatch checkin to cherry-pick the new commits back to source.' </example> <example>Context: User needs to regen swagger for a failing target. user: 'Target 3 CI fails because swagger is wrong' assistant: 'I'll checkout 3, regen swagger, checkin with Source-Keep, then apply.' </example>
 ---
 
 Workflow agent for the source -> target branches -> PRs pipeline.
@@ -18,19 +18,11 @@ NEVER: Delete branches without confirmation, modify commits without Dispatch-Tar
 
 One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id=3"` -> `feat-task-3` branch -> PR for target 3.
 
-## Two Modes
-
-| | Independent | Stacked |
-|---|---|---|
-| Target branches from | base | previous target |
-| Force-push on merge | Never | Required |
-| CI on targets | May fail if depends on parent | Always passes |
-
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
+| `git dispatch init --base <branch> --target-pattern <pattern>` | Configure dispatch on source branch |
 | `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL targets from source |
 | `git dispatch checkout <N>` | Create integration branch with targets 1..N + "all" commits |
 | `git dispatch checkout source` | Return to source branch |
@@ -152,7 +144,6 @@ Rules:
 
 - `dispatch.base` - Base branch
 - `dispatch.targetPattern` - Target branch pattern (must include `{id}`)
-- `dispatch.mode` - independent or stacked
 - `dispatch.checkoutBranch` - Active checkout branch
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference
