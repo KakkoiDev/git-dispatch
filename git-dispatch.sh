@@ -2395,33 +2395,47 @@ WORKFLOW
   1. Tag every commit with a Dispatch-Target-Id trailer:
        git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
 
-  2. Create target branches:
+  2. Create target branches and push:
        git dispatch apply
+       git dispatch push all
 
-  3. Propagate changes:
-       git dispatch apply                              # source to all targets
-       git dispatch cherry-pick --from source --to 2   # source to one target
-       git dispatch cherry-pick --from 2 --to source   # target back to source
+  3. Integration testing:
+       git dispatch checkout 3                          # branch with targets 1..3
+       # run tests, fix bugs, commit with Dispatch-Target-Id
+       git dispatch checkin                             # pick fixes back to source
+       git dispatch checkout source                     # return to source
+       git dispatch apply                               # propagate to targets
+       git dispatch checkout clear                      # clean up test branch
 
-  4. Update with base changes:
-       git dispatch merge --from base --to source      # source only, safe
-       git dispatch merge --from base --to all         # source + all targets
-       git dispatch merge --from base --to 8           # one target
-       git dispatch rebase --from base --to source     # rewrites history
+  4. Propagate changes:
+       git dispatch apply                               # source to all targets
+       git dispatch cherry-pick --from source --to 2    # source to one target
+       git dispatch cherry-pick --from 2 --to source    # target back to source
+
+  5. Update with base changes:
+       git dispatch merge --from base --to source       # source only, safe
+       git dispatch merge --from base --to all          # source + all targets
+       git dispatch rebase --from base --to source      # rewrites history
 
 COMMANDS
-  init      Configure dispatch on current source branch
-  apply     Make all targets match source (create/update). Detects stale targets
-            after Dispatch-Target-Id reassignment. --reset <id> to regenerate.
-  cherry-pick  Move commits between source and target (--from/--to)
-  rebase    Rebase source onto base (--from base --to source)
-  merge     Merge base into branches (--from base --to <source|id|all>)
-  push      Push branches (push <all|source|N>)
-  status    Show mode, base, source, and all targets with sync state
-  verify    Detect cross-target file dependencies (independent mode)
-  continue  Check pending conflict resolutions, clean up completed worktrees
-  clean     List (or --force remove) leftover dispatch worktrees
-  reset     Delete all dispatch metadata and target branches
+  init        Configure dispatch on current source branch
+  apply       Make all targets match source (create/update). Detects stale targets
+              after Dispatch-Target-Id reassignment. --reset <id> to regenerate.
+  checkout    Integration testing and navigation:
+                checkout <N>       Create test branch with targets 1..N
+                checkout source    Return to source branch
+                checkout clear     Remove test branch (--force to discard unpicked)
+  checkin     Cherry-pick new commits from checkout branch back to source.
+              Honors Dispatch-Source-Keep for auto-conflict resolution.
+  cherry-pick Move commits between source and target (--from/--to)
+  rebase      Rebase source onto base (--from base --to source)
+  merge       Merge base into branches (--from base --to <source|id|all>)
+  push        Push branches (push <all|source|N>)
+  status      Show mode, base, source, and all targets with sync state
+  verify      Detect cross-target file dependencies (independent mode)
+  continue    Check pending conflict resolutions, clean up completed worktrees
+  clean       List (or --force remove) leftover dispatch worktrees
+  reset       Delete all dispatch metadata and target branches
 
 FLAGS (on propagation commands)
   --dry-run   Show plan, make no changes
