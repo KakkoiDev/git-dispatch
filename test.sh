@@ -901,14 +901,14 @@ test_merge_dry_run() {
 # ---------- push tests ----------
 
 test_push_dry_run_all() {
-    echo "=== test: push --from all --dry-run ==="
+    echo "=== test: push all --dry-run ==="
     setup
     create_source
 
     bash "$DISPATCH" apply >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" push --from all --dry-run)
+    output=$(bash "$DISPATCH" push all --dry-run)
 
     assert_contains "$output" "source/feature-3" "push shows target-3"
     assert_contains "$output" "source/feature-4" "push shows target-4"
@@ -918,14 +918,14 @@ test_push_dry_run_all() {
 }
 
 test_push_dry_run_single() {
-    echo "=== test: push --from <id> --dry-run ==="
+    echo "=== test: push <N> --dry-run ==="
     setup
     create_source
 
     bash "$DISPATCH" apply >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" push --from 4 --dry-run)
+    output=$(bash "$DISPATCH" push 4 --dry-run)
 
     assert_contains "$output" "source/feature-4" "push shows target-4"
     assert_not_contains "$output" "source/feature-3" "push excludes target-3"
@@ -942,7 +942,7 @@ test_push_force_dry_run() {
     bash "$DISPATCH" apply >/dev/null
 
     local output
-    output=$(bash "$DISPATCH" push --from all --force --dry-run)
+    output=$(bash "$DISPATCH" push all --force --dry-run)
 
     assert_contains "$output" "--force-with-lease" "force uses --force-with-lease"
 
@@ -950,14 +950,27 @@ test_push_force_dry_run() {
 }
 
 test_push_source_dry_run() {
-    echo "=== test: push --from source --dry-run ==="
+    echo "=== test: push source --dry-run ==="
     setup
     create_source
 
     local output
-    output=$(bash "$DISPATCH" push --from source --dry-run)
+    output=$(bash "$DISPATCH" push source --dry-run)
 
     assert_contains "$output" "source/feature" "push shows source branch"
+
+    teardown
+}
+
+test_push_no_argument_errors() {
+    echo "=== test: push no argument errors ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" push 2>&1) || true
+
+    assert_contains "$output" "Usage" "push with no args shows usage"
 
     teardown
 }
@@ -2557,6 +2570,7 @@ test_push_dry_run_all
 test_push_dry_run_single
 test_push_force_dry_run
 test_push_source_dry_run
+test_push_no_argument_errors
 test_status_shows_mode
 test_status_in_sync
 test_status_shows_pending

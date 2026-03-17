@@ -1434,19 +1434,18 @@ cmd_merge() {
 cmd_push() {
     _require_init
 
-    local from="" dry_run=false force=false
+    local target="" dry_run=false force=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from)     from="$2"; shift 2 ;;
             --dry-run)  dry_run=true; shift ;;
             --force)    force=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
+            *)          [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
         esac
     done
 
-    [[ -n "$from" ]] || die "Missing --from"
+    [[ -n "$target" ]] || die "Usage: git dispatch push <all|source|N> [--dry-run] [--force]"
 
     local base source
     base=$(_get_config base)
@@ -1454,17 +1453,17 @@ cmd_push() {
 
     local -a branches=()
 
-    if [[ "$from" == "all" ]]; then
+    if [[ "$target" == "all" ]]; then
         while IFS= read -r c; do
             [[ -n "$c" ]] && branches+=("$c")
         done < <(find_dispatch_targets "$source" | order_by_stack)
         [[ ${#branches[@]} -gt 0 ]] || die "No targets found"
-    elif [[ "$from" == "source" ]]; then
+    elif [[ "$target" == "source" ]]; then
         branches=("$source")
     else
         # Numeric target id
         local target_branch
-        target_branch=$(_target_branch_name "$from")
+        target_branch=$(_target_branch_name "$target")
         git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
             die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
         branches=("$target_branch")
@@ -2122,7 +2121,7 @@ COMMANDS
   cherry-pick  Move commits between source and target (--from/--to)
   rebase    Rebase source onto base (--from base --to source)
   merge     Merge base into branches (--from base --to <source|id|all>)
-  push      Push branches (--from <id|all|source>)
+  push      Push branches (push <all|source|N>)
   status    Show mode, base, source, and all targets with sync state
   verify    Detect cross-target file dependencies (independent mode)
   continue  Check pending conflict resolutions, clean up completed worktrees
