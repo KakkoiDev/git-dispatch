@@ -751,54 +751,6 @@ test_cherry_pick_target_to_source_noop_semantic_sync() {
 
 # ---------- rebase tests ----------
 
-test_rebase_base_to_source() {
-    echo "=== test: rebase --from base --to source ==="
-    setup
-    create_source
-
-    # Advance master
-    git checkout master -q
-    echo "new" > new.txt; git add new.txt
-    git commit --no-verify -m "advance master" -q
-    git checkout source/feature -q
-
-    bash "$DISPATCH" rebase --from base --to source
-
-    # Source should have linear history (no merges)
-    local merge_count
-    merge_count=$(git rev-list --merges master..source/feature | wc -l | tr -d ' ')
-    assert_eq "0" "$merge_count" "linear history after rebase"
-
-    # new.txt should be accessible
-    if git show source/feature:new.txt >/dev/null 2>&1; then
-        echo -e "  ${GREEN}PASS${NC} base content available after rebase"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} base content not available"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
-test_rebase_dry_run() {
-    echo "=== test: rebase --dry-run ==="
-    setup
-    create_source
-
-    git checkout master -q
-    echo "new" > new.txt; git add new.txt
-    git commit --no-verify -m "advance" -q
-    git checkout source/feature -q
-
-    local output
-    output=$(bash "$DISPATCH" rebase --from base --to source --dry-run)
-
-    assert_contains "$output" "dry-run" "dry-run label shown"
-
-    teardown
-}
-
 # ---------- merge tests ----------
 
 test_merge_base_to_source() {
@@ -1208,63 +1160,6 @@ test_cherry_pick_conflict_batch_reporting() {
     teardown
 }
 
-test_rebase_conflict_shows_details() {
-    echo "=== test: rebase conflict shows details ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    # Advance master with conflicting content
-    git checkout master -q
-    echo "conflict" > file.txt; git add file.txt
-    git commit --no-verify -m "Master changes file" -q
-
-    git checkout source/feature -q
-
-    local output
-    output=$(bash "$DISPATCH" rebase --from base --to source 2>&1) || true
-
-    assert_contains "$output" "Rebase conflict" "shows rebase conflict header"
-    assert_contains "$output" "Conflicted files" "shows conflicted files"
-    assert_contains "$output" "file.txt" "shows conflicted filename"
-    assert_contains "$output" "Aborted" "shows abort message"
-
-    teardown
-}
-
-test_rebase_conflict_resolve() {
-    echo "=== test: rebase --resolve leaves conflict active ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add file$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    git checkout master -q
-    echo "conflict" > file.txt; git add file.txt
-    git commit --no-verify -m "Master changes file" -q
-
-    git checkout source/feature -q
-
-    local output
-    output=$(bash "$DISPATCH" rebase --from base --to source --resolve 2>&1) || true
-
-    assert_contains "$output" "Resolve conflicts" "shows resolve instructions"
-    assert_contains "$output" "rebase --continue" "shows rebase continue command"
-    assert_contains "$output" "Worktree left at:" "shows worktree path"
-
-    # Clean up any leftover worktrees
-    git worktree prune 2>/dev/null || true
-
-    teardown
-}
-
 test_merge_conflict_shows_details() {
     echo "=== test: merge conflict shows details ==="
     setup
@@ -1655,43 +1550,6 @@ test_refresh_base_warns_on_fetch_failure() {
     assert_contains "$output" "does not resolve" "warns about unresolvable base ref"
 
     teardown
-}
-
-test_rebase_refreshes_base() {
-    echo "=== test: rebase fetches origin/master before rebasing ==="
-    setup_with_remote
-
-    git checkout -b source/feature -q
-    bash "$DISPATCH" init --base origin/master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-
-    echo "a" > file.txt; git add file.txt
-    git commit -m "Add feature$(printf '\n\nDispatch-Target-Id: 1')" -q
-
-    # Push upstream commit from another clone
-    local other_clone="$TMPDIR/other"
-    git clone -q "$TMPDIR/bare.git" "$other_clone"
-    cd "$other_clone"
-    echo "upstream" > upstream.txt; git add upstream.txt
-    git commit -m "upstream commit" -q
-    git push -q origin master 2>/dev/null
-    cd "$TMPDIR/repo"
-
-    local stale_sha
-    stale_sha=$(git rev-parse origin/master)
-
-    # Rebase should fetch first
-    bash "$DISPATCH" rebase --from base --to source --force >/dev/null 2>&1
-
-    local fresh_sha
-    fresh_sha=$(git rev-parse origin/master)
-    assert_eq "false" "$([ "$stale_sha" = "$fresh_sha" ] && echo true || echo false)" "origin/master updated by rebase"
-
-    # Source should now contain the upstream commit
-    local has_upstream_file
-    has_upstream_file=$(git log --oneline source/feature | grep -c "upstream commit" || true)
-    assert_eq "1" "$has_upstream_file" "source includes upstream commit after rebase"
-
-    teardown_with_remote
 }
 
 test_apply_detects_stale_after_reassignment() {
@@ -3277,8 +3135,6 @@ test_cherry_pick_target_to_source
 test_cherry_pick_adds_trailer
 test_cherry_pick_dry_run
 test_cherry_pick_target_to_source_noop_semantic_sync
-test_rebase_base_to_source
-test_rebase_dry_run
 test_merge_base_to_source
 test_merge_dry_run
 test_push_dry_run_all
@@ -3297,8 +3153,6 @@ test_apply_decimal_target_id
 test_cherry_pick_conflict_shows_details
 test_cherry_pick_conflict_resolve_leaves_active
 test_cherry_pick_conflict_batch_reporting
-test_rebase_conflict_shows_details
-test_rebase_conflict_resolve
 test_merge_conflict_shows_details
 test_merge_conflict_resolve
 test_status_shows_diverged
@@ -3311,7 +3165,6 @@ test_refresh_base_fetches_remote
 test_refresh_base_noop_when_up_to_date
 test_refresh_base_local_branch_with_remote
 test_refresh_base_warns_on_fetch_failure
-test_rebase_refreshes_base
 test_apply_detects_stale_after_reassignment
 test_apply_force_rebuilds_stale
 test_status_shows_stale

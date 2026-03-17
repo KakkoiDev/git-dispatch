@@ -22,7 +22,6 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
-| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into branches |
 | `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |

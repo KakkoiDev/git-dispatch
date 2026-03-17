@@ -54,7 +54,6 @@ git dispatch push all
 | `git dispatch checkin` | Cherry-pick checkout commits back to source |
 | `git dispatch cherry-pick --from <x> --to <y>` | Move commits between source and targets |
 | `git dispatch merge --from base --to <source\|id\|all>` | Merge base into branches |
-| `git dispatch rebase --from base --to source` | Rebase source onto base |
 | `git dispatch push <all\|source\|N>` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence |
 | `git dispatch diff --to <id>` | File-level diff between source and target |
@@ -206,7 +205,7 @@ Fix: `git dispatch diff --to <id>` then cherry-pick in correct direction.
 
 ## Stale Target Detection
 
-When a commit's `Dispatch-Target-Id` is changed on source (e.g., during rebase), `apply` detects stale targets via patch-id matching:
+When a commit's `Dispatch-Target-Id` is changed on source (e.g., during interactive rebase), `apply` detects stale targets via patch-id matching:
 
 ```bash
 git dispatch apply              # reports stale targets

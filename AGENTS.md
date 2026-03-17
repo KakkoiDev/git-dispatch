@@ -29,7 +29,6 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
 | `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
-| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
 | `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into branches |
 | `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence, stale targets |

@@ -983,9 +983,8 @@ cmd_apply() {
                 _target_count=$(git rev-list --count "$base..$branch_name" 2>/dev/null || echo 0)
                 if [[ ${#new_hashes[@]} -gt 1 && $_target_count -gt 0 && ${#new_hashes[@]} -ge $_target_count ]]; then
                     warn "  $branch_name: ${#new_hashes[@]} new commits detected (target has $_target_count)."
-                    warn "  Source may have been rebased. Cherry-picking may conflict or duplicate."
+                    warn "  Source may have been rebased externally. Cherry-picking may conflict or duplicate."
                     warn "  If push fails (non-fast-forward), use: git dispatch push $tid --force"
-                    warn "  To avoid this: use merge instead of rebase on source."
                 fi
                 _cherry_pick_commits "$resolve" "$branch_name" "${new_hashes[@]}"
                 info "  Updated $branch_name ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
@@ -1148,83 +1147,6 @@ cmd_cherry_pick() {
             info "Cherry-picked ${DISPATCH_LAST_PICKED} commit(s) from $target_branch to source (${DISPATCH_LAST_SKIPPED:-0} skipped)"
         fi
     fi
-}
-
-# ---------- rebase ----------
-
-cmd_rebase() {
-    _require_init
-    _acquire_lock
-
-    local from="" to="" dry_run=false resolve=false force=false
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --from)     from="$2"; shift 2 ;;
-            --to)       to="$2"; shift 2 ;;
-            --dry-run)  dry_run=true; shift ;;
-            --resolve)  resolve=true; shift ;;
-            --force)    force=true; shift ;;
-            -*)         die "Unknown flag: $1" ;;
-            *)          die "Unexpected argument: $1" ;;
-        esac
-    done
-
-    [[ -n "$from" ]] || die "Missing --from"
-    [[ -n "$to" ]] || die "Missing --to"
-    [[ "$from" == "base" && "$to" == "source" ]] || \
-        die "Only --from base --to source is supported"
-
-    local base source
-    base=$(_get_config base)
-    source=$(resolve_source "")
-
-    # Ensure base ref is up-to-date before rebasing (best-effort)
-    _refresh_base "$base" || true
-
-    # Check for open PRs on downstream targets
-    if ! $force; then
-        local pr_info
-        if pr_info=$(_get_open_prs "$source" 2>/dev/null) && [[ -n "$pr_info" ]]; then
-            local pr_branches
-            pr_branches=$(echo "$pr_info" | awk '{print $1 " (PR #" $2 ")"}')
-            warn "Rebase rewrites history on source."
-            warn "Targets with open PRs:"
-            echo "$pr_branches" | while IFS= read -r line; do warn "  $line"; done
-            die "Downstream force-push required. Use --force to override."
-        fi
-    fi
-
-    if $dry_run; then
-        local count
-        count=$(git rev-list --count "$base..$source" 2>/dev/null || echo 0)
-        echo -e "${YELLOW}[dry-run]${NC} rebase $source ($count commits) onto $base"
-        return
-    fi
-
-    _enter_branch "$source" || die "Cannot access branch $source (worktree conflict?)"
-    local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
-
-    if ! "${gcmd[@]}" rebase "$base"; then
-        echo ""
-        warn "Rebase conflict on $source onto $base"
-        _show_conflict_diff "$_DISPATCH_WT_PATH"
-        if $resolve; then
-            echo ""
-            warn "Resolve conflicts, then run: git -C $_DISPATCH_WT_PATH rebase --continue"
-            warn "Worktree left at: $_DISPATCH_WT_PATH"
-            _DISPATCH_WT_CREATED=false  # prevent cleanup
-            exit 1
-        fi
-        "${gcmd[@]}" rebase --abort 2>/dev/null || true
-        _leave_branch
-        echo ""
-        warn "Aborted. Re-run with --resolve to keep conflict active for manual resolution."
-        exit 1
-    fi
-
-    _leave_branch
-    info "Rebased $source onto $base"
 }
 
 # ---------- merge ----------
@@ -1919,10 +1841,6 @@ cmd_continue() {
             warn "Merge conflict pending on $branch"
             warn "  Resolve in: $wt"
             warn "  Then run:   git -C $wt commit"
-        elif [[ -d "$git_dir/rebase-merge" || -d "$git_dir/rebase-apply" ]]; then
-            warn "Rebase conflict pending on $branch"
-            warn "  Resolve in: $wt"
-            warn "  Then run:   git -C $wt rebase --continue"
         else
             # Cherry-pick resolved. Check for remaining queue.
             if [[ -f "$wt/.dispatch-queue" ]]; then
@@ -2359,10 +2277,9 @@ WORKFLOW
        git dispatch cherry-pick --from source --to 2    # source to one target
        git dispatch cherry-pick --from 2 --to source    # target back to source
 
-  5. Update with base changes (prefer merge over rebase):
-       git dispatch merge --from base --to source       # safe, no force-push needed
+  5. Update with base changes:
+       git dispatch merge --from base --to source       # source only
        git dispatch merge --from base --to all          # source + all targets
-       git dispatch rebase --from base --to source      # rewrites history, may need force-push
 
 COMMANDS
   init        Configure dispatch on current source branch
@@ -2375,7 +2292,6 @@ COMMANDS
   checkin     Cherry-pick new commits from checkout branch back to source.
               Honors Dispatch-Source-Keep for auto-conflict resolution.
   cherry-pick Move commits between source and target (--from/--to)
-  rebase      Rebase source onto base (--from base --to source)
   merge       Merge base into branches (--from base --to <source|id|all>)
   push        Push branches (push <all|source|N>)
   status      Show base, source, and all targets with sync state
@@ -2418,7 +2334,6 @@ main() {
         init)         cmd_init "$@" ;;
         apply)        cmd_apply "$@" ;;
         cherry-pick)  cmd_cherry_pick "$@" ;;
-        rebase)       cmd_rebase "$@" ;;
         merge)        cmd_merge "$@" ;;
         push)         cmd_push "$@" ;;
         status)       cmd_status "$@" ;;

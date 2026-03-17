@@ -50,7 +50,6 @@ git dispatch checkout source
 git dispatch checkout clear [--force]
 git dispatch checkin [--resolve]
 git dispatch cherry-pick --from <x> --to <y> [--dry-run] [--resolve]
-git dispatch rebase --from base --to source [--force] [--resolve]
 git dispatch merge --from base --to <source|id|all> [--resolve]
 git dispatch push <all|source|N> [--force] [--dry-run]
 git dispatch status
@@ -136,7 +135,7 @@ Every command supports `--dry-run`.
 ```
 init --> apply --> push
      \-> checkout <N> --> checkin --> checkout source --> apply --> push
-     \-> cherry-pick / merge / rebase --> apply --> push
+     \-> cherry-pick / merge --> apply --> push
      \-> reset
 ```
 
@@ -224,11 +223,6 @@ git dispatch push 2
 git dispatch merge --from base --to source
 git dispatch apply
 git dispatch push all
-
-# Linear history (requires force-push)
-git dispatch rebase --from base --to source --force
-git dispatch apply
-git dispatch push all --force
 ```
 
 ## 9. Iterate
