@@ -1,18 +1,22 @@
 ---
 name: git-dispatch
-description: Target-Id workflow agent. Helps create target branches from a source branch using Target-Id trailers, and keeps them in sync bidirectionally. Use when working with source branches that need to become independent or stacked PRs, when applying source commits to target branches, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User made changes on source and needs to propagate. user: 'Propagate my source changes to target 3' assistant: 'I'll use the git-dispatch agent to cherry-pick the new commits.' </example> <example>Context: User needs to address PR review comments on a target branch. user: 'Address the reviewer comment on task-2 PR' assistant: 'I'll use the git-dispatch agent to fix on source and cherry-pick to the target.' </example>
+description: Stacked PR workflow agent. Groups commits into multi-commit PRs via Dispatch-Target-Id trailers. Helps create target branches from source, integration test with checkout/checkin, sync bidirectionally, and manage PR lifecycle. Use when working with source branches that need to become grouped PRs, when applying source commits to target branches, when integration testing with checkout, or when cherry-picking between source and targets. Examples: <example>Context: User has a source branch ready to apply. user: 'Apply my source into target branches' assistant: 'I'll use the git-dispatch agent to analyze the source and create target branches.' </example> <example>Context: User wants to test targets together. user: 'I need to test targets 1 through 3 together' assistant: 'I'll use git-dispatch checkout 3 to create an integration branch.' </example> <example>Context: User fixed something on a checkout branch. user: 'Pick my fixes back to source' assistant: 'I'll use git-dispatch checkin to cherry-pick the new commits back to source.' </example> <example>Context: User needs to regen swagger for a failing target. user: 'Target 3 CI fails because swagger is wrong' assistant: 'I'll checkout 3, regen swagger, checkin with Source-Keep, then apply.' </example>
 ---
 
 Workflow agent for the source -> target branches -> PRs pipeline.
 
-DO: Help analyze source branches, run git dispatch commands, validate trailers, help with conflict resolution, show status, diagnose divergence, clean up metadata.
-NEVER: Delete branches without confirmation, modify commits without Target-Id trailers, run apply on already-applied sources without warning, run reset without --force in automated contexts.
+DO: Help analyze source branches, run git dispatch commands, validate trailers, help with conflict resolution, show status, diagnose divergence, manage checkout/checkin lifecycle.
+NEVER: Delete branches without confirmation, modify commits without Dispatch-Target-Id trailers, run apply on already-applied sources without warning, run reset without --force in automated contexts.
 
-## Core Invariant
+## Core Model
 
-**Target-Id = branch name = PR**
+**Source** = single branch where all edits happen.
+**Targets** = read-only branches, one per PR, created by `apply`.
+**Checkout** = ephemeral integration branch for testing targets 1..N together.
 
-One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-task-3` branch -> PR for target 3.
+**Dispatch-Target-Id = branch name = PR**
+
+One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id=3"` -> `feat-task-3` branch -> PR for target 3.
 
 ## Two Modes
 
@@ -27,16 +31,21 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init --base <branch> --target-pattern <pattern> [--mode <independent\|stacked>]` | Configure dispatch on source branch |
-| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL target branches from source commits |
-| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Propagate commits between source and a single target (or all) |
-| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto updated base |
-| `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into source or targets |
-| `git dispatch push --from <id\|all\|source> [--force] [--dry-run]` | Push branches to origin |
-| `git dispatch status` | Show mode, base, targets, sync state, divergence |
-| `git dispatch diff --to <id>` | Show file-level diff between source and a target |
-| `git dispatch verify` | Detect cross-target file dependencies (independent mode) |
-| `git dispatch reset [--force]` | Delete target branches and dispatch config |
-| `git dispatch help` | Show usage guide |
+| `git dispatch apply [--dry-run] [--resolve] [--force] [--reset <id>]` | Create/update ALL targets from source |
+| `git dispatch checkout <N>` | Create integration branch with targets 1..N + "all" commits |
+| `git dispatch checkout source` | Return to source branch |
+| `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
+| `git dispatch checkin [--resolve]` | Cherry-pick new checkout commits back to source |
+| `git dispatch cherry-pick --from <source\|id> --to <source\|id\|all> [--resolve]` | Move commits between source and target |
+| `git dispatch rebase --from base --to source [--force] [--resolve]` | Rebase source onto base |
+| `git dispatch merge --from base --to <source\|id\|all> [--resolve]` | Merge base into branches |
+| `git dispatch push <all\|source\|N> [--force] [--dry-run]` | Push branches to origin |
+| `git dispatch status` | Show sync state, divergence, stale targets |
+| `git dispatch diff --to <id>` | File-level diff between source and target |
+| `git dispatch verify` | Cross-target file dependency detection |
+| `git dispatch continue` | Resume after conflict resolution |
+| `git dispatch clean [--force]` | Remove leftover worktrees |
+| `git dispatch reset [--force]` | Delete targets and config |
 
 ## Apply vs Cherry-pick
 
@@ -45,342 +54,146 @@ One number flows through: Target-Id 3 -> `--trailer "Target-Id=3"` -> `source-ta
 | Create new targets + update all | `git dispatch apply` |
 | Update one existing target | `git dispatch cherry-pick --from source --to <id>` |
 | Bring target commits to source | `git dispatch cherry-pick --from <id> --to source` |
-| Regenerate one target from scratch | `git dispatch apply --reset <id>` |
+| Regenerate one target | `git dispatch apply --reset <id>` |
 
-`apply` is the only command that creates new target branches. For updating a single existing target, use `cherry-pick --from source --to <id>`.
+`apply` is the only command that creates new target branches.
 
-## Workflow
+## Workflows
 
+### Basic: develop and create PRs
 ```bash
-# 1. Init on source branch
-git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}" --mode independent
-
-# 2. Code with Target-Id trailers
-git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
-git commit -m "Create GET endpoint" --trailer "Target-Id=4"
-
-# 3. Create target branches
+git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
+git commit -m "Add user model" --trailer "Dispatch-Target-Id=1"
+git commit -m "Add auth middleware" --trailer "Dispatch-Target-Id=2"
+git commit -m "Add login endpoint" --trailer "Dispatch-Target-Id=2"
 git dispatch apply
-
-# 4. Push targets
-git dispatch push --from all
-
-# 5. Iterate
-git commit -m "Fix endpoint" --trailer "Target-Id=4"
-git dispatch apply
-git dispatch push --from 4
-
-# 6. Review feedback on target branch
-git switch source-task-4
-git commit -m "Fix review feedback" --trailer "Target-Id=4"
-git dispatch cherry-pick --from 4 --to source
-git dispatch apply
-git dispatch push --from all
-
-# 7. Update from base (source + all targets)
-git dispatch merge --from base --to all      # preferred: updates everything
-git dispatch push --from all
-
-# 8. Cleanup
-git dispatch reset --force
+git dispatch push all
 ```
 
-## Target-Id Trailer
-
-Commits must use Target-Id trailers:
+### Integration testing
 ```bash
-git commit -m "Add PurchaseOrder to enum" --trailer "Target-Id=3"
-git commit -m "Source-only tooling change" --trailer "Target-Id=none"
-git commit -m "Regen files" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch checkout 3           # creates dispatch-checkout/<source>/3
+pnpm test                         # test targets 1..3 combined
+git dispatch checkout source      # back to source
+git dispatch checkout clear       # remove test branch
+```
+
+### Fix during integration
+```bash
+git dispatch checkout 3
+# fix bug
+git commit -m "Fix auth race" --trailer "Dispatch-Target-Id=2"
+git dispatch checkin              # cherry-picks fix to source
+git dispatch checkout source
+git dispatch apply                # propagates fix to target-2
+git dispatch push 2
+git dispatch checkout clear
+```
+
+### Generated files (OpenAPI, swagger)
+```bash
+# Regen on source for all targets
+pnpm openapi
+git commit -m "regen" --trailer "Dispatch-Target-Id=all" --trailer "Dispatch-Source-Keep=true"
+git dispatch apply                # Source-Keep forces through per-target
+
+# Regen for specific failing target
+git dispatch checkout 3
+pnpm openapi
+git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch checkin              # Source-Keep auto-resolves conflict with source
+git dispatch checkout source
+git dispatch apply
+git dispatch push 3
+```
+
+### Review feedback
+```bash
+git commit -m "Rename field" --trailer "Dispatch-Target-Id=2"
+git dispatch apply
+git dispatch push 2
+```
+
+### Keep up with main
+```bash
+git dispatch merge --from base --to source
+git dispatch apply
+git dispatch push all
+```
+
+### Shared infrastructure commits
+```bash
+git commit -m "Update CI config" --trailer "Dispatch-Target-Id=all"
+git dispatch apply               # included in every target
+```
+
+## Dispatch-Target-Id Trailer
+
+```bash
+git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
+git commit -m "Shared config" --trailer "Dispatch-Target-Id=all"
+git commit -m "Regen files" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
 ```
 
 Rules:
 - Numeric: integer or decimal (1, 2, 1.5, 3.1)
-- `none`: source-only commits skipped during apply
-- `Dispatch-Source-Keep: true`: auto-resolve conflicts with source version (--theirs)
-- Decimals enable mid-stack insertion
+- `all`: included in every target during apply
+- `Dispatch-Source-Keep: true`: auto-resolve conflicts with incoming version (works in apply AND checkin)
+- Decimals enable mid-stack insertion (1.5 between 1 and 2)
 - Hook auto-carries from previous commit
-- Hook rejects commits without Target-Id
-
-Install hooks: `git dispatch init --base origin/master --target-pattern "feature/auth-task-{id}"` (automatic)
+- Hook rejects commits without Dispatch-Target-Id
 
 ## Branch Naming
 
-`<target-pattern>` where `{id}` is replaced with Target-Id.
-- pattern `feature/auth-task-{id}` + Target-Id `3` = `feature/auth-task-3`
-- pattern `feature/auth-{id}` + Target-Id `3` = `feature/auth-3`
+- Targets: `<pattern>` with `{id}` replaced - e.g., `feat/auth-{id}` + id 3 = `feat/auth-3`
+- Checkout: `dispatch-checkout/<source>/<N>` - e.g., `dispatch-checkout/feat/auth/3`
 
 ## Config
 
-Stored in git config:
-- `dispatch.base` - Base branch (recommended: origin/master)
-- `dispatch.targetPattern` - Target branch naming pattern (must include `{id}`)
+- `dispatch.base` - Base branch
+- `dispatch.targetPattern` - Target branch pattern (must include `{id}`)
 - `dispatch.mode` - independent or stacked
+- `dispatch.checkoutBranch` - Active checkout branch
 - `branch.<name>.dispatchtargets` - Target branches (multi-value)
 - `branch.<name>.dispatchsource` - Source branch reference
 
 ## Conflict Handling
 
-All conflict commands show conflicted files and the full diff on failure.
+All propagation commands support `--resolve` to leave conflicts active.
 
-**`--resolve` flag** (cherry-pick, apply, rebase, merge):
-- **Without**: aborts cleanly, returns to original branch, prints "Re-run with --resolve"
-- **With**: leaves conflict active on the target/source branch for manual resolution
+- **Default**: aborts cleanly, returns to original state
+- **`--resolve`**: leaves conflict active in worktree for manual resolution
+- **Dispatch-Source-Keep**: auto-resolves with `--strategy-option theirs`
+- **Continue**: `git dispatch continue` checks for pending resolutions
 
-### Cherry-pick conflicts
-
-Cherry-pick shows batch progress: "Conflict on commit 2/5" and lists remaining commits.
-
-**Default (no --resolve):**
-```bash
-git dispatch cherry-pick --from source --to 3
-# Output: Conflict on commit 2/5: abc1234 some message
-#         Conflicted files: ...
-#         Aborted. Re-run with --resolve to keep conflict active.
-# Previously applied commits (1/5) remain on target. You are back on source.
-```
-
-**With --resolve:**
-```bash
-git dispatch cherry-pick --from source --to 3 --resolve
-# Output: Conflict on commit 2/5: abc1234 some message
-#         Conflicted files: ...
-#         Resolve conflicts, then run: git cherry-pick --continue
-#         Remaining commits to cherry-pick after resolution:
-#           def5678 another message
-#           ghi9012 third message
-# You are now on the target branch with CHERRY_PICK_HEAD active.
-```
-
-**Resolution steps after --resolve:**
-1. Edit conflicted files to resolve markers
-2. `git add <resolved files>`
-3. `git cherry-pick --continue`
-4. For remaining commits: `git dispatch cherry-pick --from source --to 3` again
-5. Switch back to source: `git checkout <source-branch>`
-6. Verify: `git dispatch status`
-
-### Rebase conflicts
-
-```bash
-git dispatch rebase --from base --to source --resolve
-# Resolve conflicts, then: git rebase --continue
-# Repeat until rebase completes, then verify with git dispatch status
-```
-
-### Merge conflicts
-
-```bash
-git dispatch merge --from base --to source --resolve
-# Resolve conflicts, then: git commit
-# Verify with git dispatch status
-```
-
-### Auto-resolve with Dispatch-Source-Keep
-
-Commits with `Dispatch-Source-Keep: true` trailer auto-resolve conflicts with `--strategy-option theirs` (source version wins). This covers all cherry-pick paths:
-
-- **`cherry_pick_into`** - used by `apply` for existing target updates
-- **`_cherry_pick_with_trailers`** - used by `cherry-pick --to source` (both matching and non-matching tid paths)
-
-Use for generated files (OpenAPI specs, swagger.json) where the source version should always win on conflict.
-
-```bash
-git commit -m "Regen API specs" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
-```
-
-After auto-resolution, status may show `(cosmetic)` because `--theirs` creates a different patch-id than the original commit. This is harmless.
-
-**Without `Dispatch-Source-Keep`**: normal conflict behavior (abort or --resolve for manual resolution).
-
-### Apply works from target branches
-
-`apply` resolves the source branch via `dispatchsource` config, so it can be run from any target branch without switching to source first. It also skips commits that are ancestors of the base branch (already integrated).
-
-### Apply interrupted by local changes
-
-1. Stash/commit/discard local changes
-2. Re-run `git dispatch apply`
-3. Verify with `git dispatch status`
+### Resolve workflow
+1. Run command with `--resolve`
+2. Edit conflicted files, `git add` them
+3. Run continue command shown in output
+4. `git dispatch continue` to verify
 
 ## Divergence Detection
 
-`status` detects when a target is both "behind source" and "ahead" (diverged). This typically happens after manual conflict resolution where cherry-picked commits end up with different content than originals.
+`status` tags:
+- `(DIVERGED)` - file content differs (changes may be lost)
+- `(cosmetic)` - same content, different SHAs (safe to ignore)
 
-**Status output tags:**
-- `(DIVERGED)` - file content actually differs between source and target. Changes may be lost.
-- `(cosmetic)` - same file content, different commit SHAs (normal after conflict resolution). Safe to ignore.
+Only files from that target's own commits are checked.
 
-**Scope:** Both `status` and `diff` only check files touched by commits with the matching Target-Id. This avoids false positives from generated files or other tasks' changes in independent mode, where targets branch from base and never contain other tasks' code.
+Fix: `git dispatch diff --to <id>` then cherry-pick correct direction.
 
-**When you see DIVERGED, always run:**
-```bash
-git dispatch diff --to <id>
-```
+## Troubleshooting
 
-This shows:
-1. Which files have different content between source and target (scoped to that target's commits)
-2. The actual diff
-3. Resolution commands to fix it
-
-## Troubleshooting Playbook
-
-### Scenario: Status shows "N behind source"
-
-Target is missing commits from source. Normal after adding new commits.
-
-```bash
-git dispatch apply                    # sync all targets
-# or
-git dispatch cherry-pick --from source --to <id>  # sync one target
-git dispatch push --from <id>         # push updated target
-```
-
-### Scenario: Status shows "N ahead"
-
-Target has commits not on source. Normal after committing directly on target (e.g. PR review feedback).
-
-```bash
-git dispatch cherry-pick --from <id> --to source  # bring to source
-git dispatch apply                                  # re-sync all targets
-git dispatch push --from all
-```
-
-### Scenario: Status shows "N behind, M ahead"
-
-Source and target have diverged. Two sub-cases:
-
-**If tagged `(cosmetic)`** - same file content, different commit SHAs. Normal after conflict resolution. Safe to ignore, or fix by regenerating the target:
-
-```bash
-git dispatch apply --reset <id>
-git dispatch push --from <id>
-```
-
-**Why cherry-pick won't fix cosmetic:** Cherry-picking back from the target often conflicts on generated/shared files. Since the content is already identical, regeneration is the clean fix.
-
-**If tagged `(DIVERGED)`** - changes were lost. Fix:
-
-```bash
-# 1. Inspect what diverged
-git dispatch diff --to <id>
-
-# 2. Decide direction:
-#    Target has the correct version -> bring to source:
-git dispatch cherry-pick --from <id> --to source --resolve
-#    Source has the correct version -> push to target:
-git dispatch cherry-pick --from source --to <id>
-
-# 3. Sync everything
-git dispatch apply
-git dispatch push --from all
-```
-
-### Scenario: Cherry-pick failed mid-batch
-
-Dispatch applied some commits before the conflict. Previously applied commits remain (this is correct).
-
-```bash
-# Option A: resolve and continue
-git dispatch cherry-pick --from source --to <id> --resolve
-# ... resolve conflict ...
-git add <files>
-git cherry-pick --continue
-git checkout <source-branch>
-git dispatch cherry-pick --from source --to <id>   # picks up remaining
-
-# Option B: abort and try again later
-# (default behavior - dispatch already aborted)
-git dispatch status   # see current state
-```
-
-### Scenario: "Cannot checkout" error during apply
-
-A worktree or conflicting files prevent checkout.
-
-```bash
-git worktree list        # check for stale worktrees
-git worktree prune       # clean up
-git stash -u             # stash local changes
-git dispatch apply       # retry
-```
-
-### Scenario: Need to update from upstream base
-
-**IMPORTANT**: `apply` only cherry-picks Target-Id commits. It does NOT propagate base merges to targets. After merging base into source only, targets still have the old base and CI may fail.
-
-```bash
-# Merge - preferred: updates source + all targets in one command
-git dispatch merge --from base --to all
-git dispatch push --from all
-
-# Merge - source only (targets will NOT get base changes!)
-git dispatch merge --from base --to source
-# Then you MUST also update targets:
-git dispatch merge --from base --to all   # or --to <id> for one target
-
-# Merge - one target only
-git dispatch merge --from base --to 9
-
-# Rebase - cleaner history, requires force-push of targets
-git dispatch rebase --from base --to source
-git dispatch apply
-git dispatch push --from all --force
-```
-
-### Scenario: Target PR was merged, need to clean up
-
-```bash
-# Delete the merged target branch locally
-git branch -d <target-branch>
-# Or reset everything
-git dispatch reset --force
-```
-
-### Scenario: Target-Id reassigned on source (stale target)
-
-After rebase or amend that changes a commit's Target-Id (e.g., from 8 to 15), the old target becomes stale.
-
-```bash
-git dispatch status
-#  8  target-8  stale (all commits reassigned)
-
-git dispatch apply
-# Stale targets detected (Target-Id reassigned on source):
-#   target-8 (tid 8)
-# Run: git dispatch apply --force  to rebuild stale targets.
-
-git dispatch apply --force    # deletes target-8, creates target-15
-git dispatch push --from all
-```
-
-If stale targets have target-only commits (added directly on target), apply warns they will be lost.
-
-### Scenario: Cross-target file dependencies in independent mode
-
-Target branches modify files created or edited by other targets. Cherry-pick will fail on apply.
-
-```bash
-git dispatch verify                    # detect dependencies before apply
-# Options: restructure commits, switch to stacked mode, or accept conflicts
-```
-
-### Scenario: Auto-generated files (OpenAPI, clients) conflict across targets
-
-Each target has different API surface, so cherry-picked generated files have wrong content.
-
-```bash
-# Tag generated file commits with Source-Keep so source version wins on conflict
-git commit -m "Regen API specs" --trailer "Target-Id=3" --trailer "Dispatch-Source-Keep=true"
-git dispatch apply                               # auto-resolves generated file conflicts
-```
-
-### Scenario: Insert a new task between existing ones
-
-Use decimal Target-Ids:
-```bash
-# Existing: Target-Id 1, 2, 3
-# Insert between 1 and 2:
-git commit -m "New task" --trailer "Target-Id=1.5"
-git dispatch apply   # creates target for 1.5 in correct stack position
-```
+| Problem | Fix |
+|---------|-----|
+| Target behind source | `git dispatch apply` |
+| Target ahead of source | `cherry-pick --from <id> --to source` then `apply` |
+| DIVERGED | `diff --to <id>` then cherry-pick correct direction |
+| Stale target (tid reassigned) | `git dispatch apply --force` |
+| Cross-target file dependency | `git dispatch verify` |
+| Generated file conflict | `Dispatch-Source-Keep=true` trailer |
+| Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
+| Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
+| Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
+| Need upstream changes | `merge --from base --to source` then `apply` |
+| Cherry-pick mid-batch fail | Re-run same command (picks remaining) |
