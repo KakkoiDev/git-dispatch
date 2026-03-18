@@ -43,18 +43,19 @@ Source is the single point of truth. Targets never touch base directly. Checkout
 ## Commands
 
 ```
-git dispatch init --base <branch> --target-pattern <pattern>
+git dispatch init [--base <branch>] [--target-pattern <pattern>]
 git dispatch init --hooks
-git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force]
-git dispatch apply reset <N> [--force]
-git dispatch checkout <N> [--dry-run] [--resolve]
+git dispatch apply [<N>] [--base] [--dry-run] [--resolve|--continue] [--force] [-y|--yes]
+git dispatch apply reset <N|all> [--force] [-y|--yes]
+git dispatch checkout <N> [--dry-run] [--resolve|--continue]
 git dispatch checkout source
 git dispatch checkout clear [--force]
-git dispatch checkin [<N>] [--dry-run] [--resolve]
+git dispatch checkin [<N>] [--dry-run] [--resolve|--continue]
 git dispatch push <all|source|N> [--dry-run] [--force]
 git dispatch status
 git dispatch continue
-git dispatch reset [--force]
+git dispatch abort
+git dispatch reset [--force] [-y|--yes]
 ```
 
 ### Flags (unified across propagation commands)
@@ -62,14 +63,17 @@ git dispatch reset [--force]
 | Flag | Meaning |
 |------|---------|
 | `--dry-run` | Show plan, make no changes |
-| `--resolve` | Leave conflict active for manual resolution |
+| `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--force` | Override safety checks |
+| `-y`, `--yes` | Auto-confirm prompts (for scripting) |
 
 ### Command Reference
 
-**init** - Configure dispatch on current source branch. Stores config in git config. Installs hooks.
+**init** - Configure dispatch on current source branch. Stores config in branch-scoped git config. Installs hooks. Prompts interactively when `--base` or `--target-pattern` are omitted.
 
-**apply** - Create or update target branches from source commits grouped by Dispatch-Target-Id. Idempotent. Detects stale targets via patch-id matching after Dispatch-Target-Id reassignment.
+**apply** - Create or update target branches from source commits grouped by Dispatch-Target-Id. Idempotent. Detects stale targets via patch-id matching after Dispatch-Target-Id reassignment. With `--base`, merges base into source AND existing targets (no force-push needed).
+
+**apply reset <N|all>** - Delete and regenerate one target (`reset <N>`) or all targets (`reset all`). `reset all` also finds orphaned branches matching the target pattern.
 
 **checkout <N>** - Create integration branch `dispatch-checkout/<source>/<N>` with all source commits having Dispatch-Target-Id <= N or "all". Cherry-picks from source in source order. For testing combined targets.
 
@@ -84,6 +88,10 @@ git dispatch reset [--force]
 **status** - Show mode, base, source, all targets with sync state, divergence, stale detection.
 
 **continue** - Resume after conflict resolution.
+
+**abort** - Cancel in-progress operation. Aborts cherry-pick/merge in dispatch worktrees, removes temp worktrees, cleans up checkout branches, returns to source.
+
+**reset** - Delete all targets and config. Prompts for confirmation (skip with `--force` or `--yes`). Preserves hooks when other dispatch sessions are active.
 
 ## Dispatch-Target-Id Trailer
 
@@ -105,13 +113,21 @@ Rules:
 
 ## Config
 
+Config is branch-scoped (per-source-branch) to avoid collisions across worktrees:
+
 | Key | Set by | Description |
 |-----|--------|-------------|
-| `dispatch.base` | init | Base branch |
-| `dispatch.targetPattern` | init | Target branch pattern (must include `{id}`) |
-| `dispatch.checkoutBranch` | checkout | Active checkout branch |
-| `branch.<name>.dispatchtargets` | apply | Target branches (multi-value) |
-| `branch.<name>.dispatchsource` | apply | Source branch reference |
+| `branch.<source>.dispatchbase` | init | Base branch |
+| `branch.<source>.dispatchtargetpattern` | init | Target branch pattern (must include `{id}`) |
+| `branch.<source>.dispatchcheckoutbranch` | checkout | Active checkout branch |
+| `branch.<target>.dispatchsource` | apply | Source branch reference |
+
+### Worktree Support
+
+When multiple worktrees are detected:
+- `extensions.worktreeConfig` is enabled automatically
+- `core.hooksPath` is scoped per-worktree (avoids collision)
+- `reset` preserves hooks and global config when other dispatch sessions are active
 
 ## Safety System
 
@@ -127,11 +143,18 @@ Every command supports `--dry-run`.
 ### Layer 4: Checkout unpicked commit detection
 `checkout clear` warns when checkout has commits not yet cherry-picked to source.
 
+### Layer 5: Abort
+`git dispatch abort` cancels any in-progress operation and returns to a clean state.
+
+### Layer 6: Base merge into targets
+`apply --base` merges base into existing targets (no recreate, no force-push) preserving PR history.
+
 ## Lifecycle
 
 ```
 init --> apply --> push
      \-> checkout <N> --> checkin --> checkout source --> apply --> push
+     \-> abort (from any stuck state)
      \-> reset
 ```
 
@@ -143,6 +166,11 @@ init --> apply --> push
 
 ```bash
 git checkout -b feat/auth master
+git dispatch init
+# Prompts: Base branch [origin/master]: <enter>
+# Prompts: Target pattern (must include {id}): feat/auth-{id}
+
+# Or non-interactive:
 git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
 ```
 
@@ -215,9 +243,8 @@ git dispatch push 2
 ## 8. Base moved forward
 
 ```bash
-# Safe (no force-push)
+# Merges base into source AND existing targets (no force-push)
 git dispatch apply --base
-git dispatch apply
 git dispatch push all
 ```
 
@@ -232,7 +259,7 @@ git dispatch push 2
 ## 10. Cleanup
 
 ```bash
-git dispatch reset --force
+git dispatch reset --yes          # or --force
 ```
 
 ## 11. Insert task mid-stack
@@ -242,6 +269,18 @@ git commit -m "Add migration" --trailer "Dispatch-Target-Id=1.5"
 git dispatch apply    # creates target between 1 and 2
 ```
 
+## 12. Regenerate all targets
+
+```bash
+git dispatch apply reset all --yes
+```
+
+## 13. Abort a stuck operation
+
+```bash
+git dispatch abort
+```
+
 ---
 
 # Recipes
@@ -249,10 +288,15 @@ git dispatch apply    # creates target between 1 and 2
 ### Initial setup
 ```bash
 git checkout -b feat/auth master
-git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
+git dispatch init     # interactive prompts
 # code with Dispatch-Target-Id trailers
 git dispatch apply
 git dispatch push all
+```
+
+### Scripted setup
+```bash
+git dispatch init --base origin/master --target-pattern "feat/auth-{id}" --yes
 ```
 
 ### Daily iteration
@@ -297,8 +341,12 @@ git dispatch checkout clear
 ### Base update
 ```bash
 git dispatch apply --base
-git dispatch apply
 git dispatch push all
+```
+
+### Reset all targets
+```bash
+git dispatch apply reset all --yes
 ```
 
 ### After parent PR merged
