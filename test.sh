@@ -128,27 +128,29 @@ test_init_basic() {
 }
 
 test_init_requires_base() {
-    echo "=== test: init requires --base ==="
+    echo "=== test: init requires --base (non-interactive uses default) ==="
     setup
 
     git checkout -b source/feature master -q
 
+    # Non-interactive: --base defaults to origin/master, which doesn't exist
     local output
     output=$(bash "$DISPATCH" init --target-pattern "source/feature-task-{id}" 2>&1) || true
-    assert_contains "$output" "Missing required flags: --base and --target-pattern" "init shows combined required-flags error"
+    assert_contains "$output" "does not exist" "init rejects missing base ref"
 
     teardown
 }
 
 test_init_requires_target_pattern() {
-    echo "=== test: init requires --target-pattern ==="
+    echo "=== test: init requires --target-pattern (non-interactive) ==="
     setup
 
     git checkout -b source/feature master -q
 
+    # Non-interactive: --target-pattern has no default, fails
     local output
     output=$(bash "$DISPATCH" init --base master 2>&1) || true
-    assert_contains "$output" "Missing required flags: --base and --target-pattern" "init shows combined required-flags error"
+    assert_contains "$output" "Missing input in non-interactive mode" "init requires target-pattern in non-interactive mode"
 
     teardown
 }
@@ -2701,6 +2703,205 @@ test_continue_resumes_apply_queue() {
     teardown
 }
 
+# ---------- --yes and interactive tests ----------
+
+test_init_yes_skips_overwrite_prompt() {
+    echo "=== test: init --yes skips overwrite prompt ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    # Re-init with --yes should not prompt
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" --yes
+
+    local base
+    base=$(git config branch.source/feature.dispatchbase)
+    assert_eq "master" "$base" "config updated with --yes"
+
+    teardown
+}
+
+test_init_y_short_flag() {
+    echo "=== test: init -y short flag ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    # Re-init with -y should not prompt
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" -y
+
+    local base
+    base=$(git config branch.source/feature.dispatchbase)
+    assert_eq "master" "$base" "config updated with -y"
+
+    teardown
+}
+
+test_reset_yes_skips_prompt() {
+    echo "=== test: reset --yes skips prompt ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    # Reset with --yes should not prompt (piped stdin)
+    bash "$DISPATCH" reset --yes
+
+    local base
+    base=$(git config branch.source/feature.dispatchbase 2>/dev/null || true)
+    assert_eq "" "$base" "config cleared with --yes"
+
+    teardown
+}
+
+test_apply_reset_yes_skips_prompt() {
+    echo "=== test: apply reset --yes skips prompt ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Add target-only commit
+    local wt_path
+    wt_path=$(mktemp -d)
+    git worktree add -q "$wt_path" "source/feature-task-1"
+    git -C "$wt_path" commit --allow-empty -m "target-only" -q
+    git worktree remove --force "$wt_path"
+    git worktree prune
+
+    # apply reset with --yes should not prompt about target-only commits
+    bash "$DISPATCH" apply reset 1 --yes
+
+    teardown
+}
+
+test_init_interactive_missing_target_pattern() {
+    echo "=== test: init fails non-interactive without target-pattern ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    local output
+    output=$(bash "$DISPATCH" init --base master 2>&1) || true
+    assert_contains "$output" "Missing input" "non-interactive init requires --target-pattern"
+
+    teardown
+}
+
+test_worktree_config_isolation() {
+    echo "=== test: worktree config does not collide ==="
+    setup
+
+    git checkout -b source/feature-a master -q
+    bash "$DISPATCH" init --base master --target-pattern "feature-a/task-{id}"
+
+    local base_a
+    base_a=$(git config branch.source/feature-a.dispatchbase)
+    assert_eq "master" "$base_a" "feature-a config set"
+
+    git checkout -b source/feature-b master -q
+    bash "$DISPATCH" init --base master --target-pattern "feature-b/task-{id}"
+
+    local base_b
+    base_b=$(git config branch.source/feature-b.dispatchbase)
+    assert_eq "master" "$base_b" "feature-b config set"
+
+    # feature-a config should still be intact
+    local base_a_after
+    base_a_after=$(git config branch.source/feature-a.dispatchbase)
+    assert_eq "master" "$base_a_after" "feature-a config not collided"
+
+    local pattern_a
+    pattern_a=$(git config branch.source/feature-a.dispatchtargetPattern)
+    assert_eq "feature-a/task-{id}" "$pattern_a" "feature-a pattern preserved"
+
+    local pattern_b
+    pattern_b=$(git config branch.source/feature-b.dispatchtargetPattern)
+    assert_eq "feature-b/task-{id}" "$pattern_b" "feature-b pattern set"
+
+    teardown
+}
+
+test_reset_preserves_other_session_hooks() {
+    echo "=== test: reset preserves hooks when other sessions exist ==="
+    setup
+
+    git checkout -b source/feature-a master -q
+    bash "$DISPATCH" init --base master --target-pattern "feature-a/task-{id}"
+
+    git checkout -b source/feature-b master -q
+    bash "$DISPATCH" init --base master --target-pattern "feature-b/task-{id}"
+
+    # Reset feature-b
+    bash "$DISPATCH" reset --yes
+
+    # Hooks should still exist (feature-a still active)
+    local hook_dir
+    hook_dir="$(git rev-parse --git-dir)/hooks"
+    if [[ -f "$hook_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hooks preserved after partial reset"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hooks deleted despite other active session"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_reset_removes_hooks_when_last_session() {
+    echo "=== test: reset removes hooks when last session ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    # Reset the only session
+    bash "$DISPATCH" reset --yes
+
+    # Hooks should be deleted
+    local hook_dir
+    hook_dir="$(git rev-parse --git-dir)/hooks"
+    if [[ ! -f "$hook_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} hooks removed after last session reset"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} hooks not removed after last session reset"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_no_legacy_fallback() {
+    echo "=== test: no legacy global config fallback ==="
+    setup
+
+    git checkout -b source/feature master -q
+
+    # Set legacy global config (should be ignored)
+    git config dispatch.base "stale-base"
+    git config dispatch.targetPattern "stale/pattern-{id}"
+
+    # _get_config should NOT return legacy values
+    local output
+    output=$(bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" 2>&1)
+    # No "already configured" warning since legacy config is ignored
+    assert_not_contains "$output" "already configured" "legacy global config ignored"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -2806,6 +3007,15 @@ test_checkout_full_lifecycle
 test_checkout_does_not_affect_targets
 test_continue_resumes_remaining_queue
 test_continue_resumes_apply_queue
+test_init_yes_skips_overwrite_prompt
+test_init_y_short_flag
+test_reset_yes_skips_prompt
+test_apply_reset_yes_skips_prompt
+test_init_interactive_missing_target_pattern
+test_worktree_config_isolation
+test_reset_preserves_other_session_hooks
+test_reset_removes_hooks_when_last_session
+test_no_legacy_fallback
 
 echo ""
 echo "======================="

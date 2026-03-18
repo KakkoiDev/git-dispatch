@@ -20,6 +20,30 @@ die() { echo -e "${RED}Error: $*${NC}" >&2; exit 1; }
 info() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}$*${NC}"; }
 
+DISPATCH_YES=false
+
+_confirm() {
+    local prompt="${1:-Proceed?}"
+    $DISPATCH_YES && return 0
+    if [[ ! -t 0 ]]; then
+        return 1
+    fi
+    local confirm
+    read -p "$prompt [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]]
+}
+
+_prompt_input() {
+    local prompt="$1" default="${2:-}"
+    if [[ ! -t 0 ]]; then
+        [[ -n "$default" ]] && { echo "$default"; return; }
+        die "Missing input in non-interactive mode. Provide flags explicitly."
+    fi
+    local value
+    read -p "$prompt" value
+    echo "${value:-$default}"
+}
+
 current_branch() { git symbolic-ref --short HEAD 2>/dev/null; }
 
 # Get targets of a branch from git config
@@ -35,6 +59,35 @@ worktree_for_branch() {
         /^worktree / { wt = substr($0, 10) }
         /^branch /   { if (substr($0, 8) == b) print wt }
     '
+}
+
+# Detect multiple worktrees (for config scoping)
+_has_worktrees() {
+    local count
+    count=$(git worktree list --porcelain 2>/dev/null | grep -c '^worktree ' || true)
+    [[ "$count" -gt 1 ]]
+}
+
+# Enable extensions.worktreeConfig when worktrees are present
+_ensure_worktree_config() {
+    if _has_worktrees; then
+        local enabled
+        enabled=$(git config extensions.worktreeConfig 2>/dev/null || true)
+        if [[ "$enabled" != "true" ]]; then
+            git config extensions.worktreeConfig true
+        fi
+    fi
+}
+
+# Find other active dispatch sessions (source branches with dispatchbase set)
+_other_dispatch_sessions() {
+    local exclude="${1:-}"
+    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+        [[ "$b" == "$exclude" ]] && continue
+        local db
+        db=$(git config "branch.${b}.dispatchbase" 2>/dev/null || true)
+        [[ -n "$db" ]] && echo "$b"
+    done
 }
 
 _DISPATCH_WT_PATH=""
@@ -131,9 +184,6 @@ _get_config() {
     branch=$(_resolve_config_branch 2>/dev/null || true)
     if [[ -n "$branch" ]]; then
         git config "branch.${branch}.dispatch${key}" 2>/dev/null || true
-    else
-        # Fallback: try old global config for backward compat during migration
-        git config "dispatch.${key}" 2>/dev/null || true
     fi
 }
 
@@ -254,7 +304,15 @@ _install_hooks() {
     cp "$SCRIPT_DIR/hooks/commit-msg" "$common_dir/commit-msg"
     chmod +x "$common_dir/commit-msg"
     # core.hooksPath ensures worktrees use the main repo's hooks
-    git config core.hooksPath "$common_dir"
+    # Use --worktree scope when available to avoid cross-worktree collision
+    _ensure_worktree_config
+    local wt_enabled
+    wt_enabled=$(git config extensions.worktreeConfig 2>/dev/null || true)
+    if [[ "$wt_enabled" == "true" ]]; then
+        git config --worktree core.hooksPath "$common_dir"
+    else
+        git config core.hooksPath "$common_dir"
+    fi
     info "Installed hooks to $common_dir"
 }
 
@@ -669,7 +727,7 @@ cmd_init() {
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   shift 2 ;;  # deprecated, ignored
-            --force)  shift ;;
+            --force|-y|--yes) DISPATCH_YES=true; shift ;;
             -*)       die "Unknown flag: $1" ;;
             *)        die "Unexpected argument: $1" ;;
         esac
@@ -684,9 +742,16 @@ cmd_init() {
     source=$(current_branch)
     [[ -n "$source" ]] || die "Not on a branch (detached HEAD)"
 
-    if [[ -z "$base" || -z "$target_pattern" ]]; then
-        die "Missing required flags: --base and --target-pattern. Example: --base origin/master --target-pattern \"user/feat/task-{id}\""
+    # Interactive mode: prompt for missing args
+    if [[ -z "$base" ]]; then
+        base=$(_prompt_input "Base branch [origin/master]: " "origin/master")
     fi
+    if [[ -z "$target_pattern" ]]; then
+        target_pattern=$(_prompt_input "Target pattern (must include {id}): " "")
+    fi
+
+    [[ -n "$base" ]] || die "Missing --base"
+    [[ -n "$target_pattern" ]] || die "Missing --target-pattern"
     [[ "$target_pattern" == *"{id}"* ]] || die "Invalid --target-pattern. Must include {id}"
 
     git rev-parse --verify "$base" &>/dev/null || die "Base branch '$base' does not exist"
@@ -707,13 +772,10 @@ cmd_init() {
         echo ""
         warn "Overwriting config will orphan existing target branches."
 
-        if [[ -t 0 ]]; then
-            read -p "Proceed? [y/N] " confirm
-            [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
-        else
-            die "Dispatch already configured. Use --force to overwrite in non-interactive mode."
-        fi
+        _confirm "Proceed?" || { echo "Aborted."; exit 0; }
     fi
+
+    _ensure_worktree_config
 
     _set_config base "$base" "$source"
     _set_config targetPattern "$target_pattern" "$source"
@@ -741,6 +803,7 @@ cmd_apply() {
             --resolve)  resolve=true; shift ;;
             --force)    force=true; shift ;;
             --base)     merge_base=true; shift ;;
+            -y|--yes)   DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          positional+=("$1"); shift ;;
         esac
@@ -952,15 +1015,7 @@ cmd_apply() {
                 done < <(git log --format="%H" "$base..$reset_branch" 2>/dev/null)
                 if [[ $_target_only -gt 0 ]]; then
                     warn "$reset_branch has $_target_only target-only commit(s) that will be lost."
-                    if [[ -t 0 ]]; then
-                        read -p "Proceed? [y/N] " confirm
-                        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-                            echo "Aborted."
-                            return 0
-                        fi
-                    else
-                        die "Use --force to confirm reset with target-only commits."
-                    fi
+                    _confirm "Proceed?" || { echo "Aborted."; return 0; }
                 fi
             fi
             # Remove worktree if branch is checked out in one
@@ -1441,6 +1496,7 @@ cmd_reset() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) force=true; shift ;;
+            -y|--yes) DISPATCH_YES=true; shift ;;
             -*)      die "Unknown flag: $1" ;;
             *)       die "Unexpected argument: $1" ;;
         esac
@@ -1463,15 +1519,14 @@ cmd_reset() {
 
     if ! $force; then
         echo ""
-        read -p "Proceed? [y/N] " confirm
-        [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        _confirm "Proceed?" || { echo "Aborted."; exit 0; }
     fi
 
     local cur
     cur=$(current_branch)
 
     # Delete target branches and metadata
-    for target in "${targets[@]}"; do
+    for target in ${targets[@]+"${targets[@]}"}; do
         git config --unset "branch.${target}.dispatchsource" 2>/dev/null || true
         git config --unset-all "branch.${target}.dispatchtargets" 2>/dev/null || true
 
@@ -1487,15 +1542,28 @@ cmd_reset() {
     git config --unset "branch.${source}.dispatchbase" 2>/dev/null || true
     git config --unset "branch.${source}.dispatchtargetpattern" 2>/dev/null || true
     git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
-    # Also clean old global config (backward compat)
-    git config --unset dispatch.base 2>/dev/null || true
-    git config --unset dispatch.targetPattern 2>/dev/null || true
-    git config --unset dispatch.mode 2>/dev/null || true
+    # Clean old global config only if no other dispatch sessions are active
+    local other_sessions
+    other_sessions=$(_other_dispatch_sessions "$source")
+    if [[ -z "$other_sessions" ]]; then
+        git config --unset dispatch.base 2>/dev/null || true
+        git config --unset dispatch.targetPattern 2>/dev/null || true
+        git config --unset dispatch.mode 2>/dev/null || true
+    fi
 
     # Remove hooks and core.hooksPath
     local common_hooks
     common_hooks="$(cd "$(git rev-parse --git-common-dir)" && pwd)/hooks"
-    rm -f "$common_hooks/commit-msg" "$common_hooks/prepare-commit-msg"
+    # Only delete hook files if no other dispatch sessions are active
+    if [[ -z "$other_sessions" ]]; then
+        rm -f "$common_hooks/commit-msg" "$common_hooks/prepare-commit-msg"
+    fi
+    # Unset core.hooksPath from worktree scope if available, then local
+    local wt_enabled
+    wt_enabled=$(git config extensions.worktreeConfig 2>/dev/null || true)
+    if [[ "$wt_enabled" == "true" ]]; then
+        git config --worktree --unset core.hooksPath 2>/dev/null || true
+    fi
     git config --unset core.hooksPath 2>/dev/null || true
 
     echo ""
@@ -1829,7 +1897,6 @@ _checkout_clear() {
     # Delete branch
     git branch -D "$checkout_branch" -q 2>/dev/null
     git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
-    git config --unset dispatch.checkoutBranch 2>/dev/null || true  # backward compat
     git worktree prune 2>/dev/null || true
 
     info "Cleared: $checkout_branch"
@@ -1925,12 +1992,12 @@ cmd_help() {
 git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
-  git dispatch init --base <branch> --target-pattern <pattern>
+  git dispatch init [--base <branch>] [--target-pattern <pattern>]
   git dispatch init --hooks
 
   Initialize dispatch on the current branch. Stores config, installs hooks.
-  Required: --base (recommended: "origin/master").
-  Required: --target-pattern (must include "{id}"), e.g. "user/feat/task-{id}".
+  When --base or --target-pattern are omitted, prompts interactively.
+  Recommended: --base "origin/master", --target-pattern "user/feat/task-{id}".
 
   --hooks installs only the commit hooks (useful in worktrees).
 
@@ -1979,6 +2046,9 @@ FLAGS
               The worktree path is printed. After resolving, run the shown
               git command, then: git dispatch continue
   --force     Override safety checks (apply: rebuild stale targets)
+  -y, --yes   Auto-confirm prompts (for scripting). Applies to: init, apply,
+              reset. In non-interactive mode (piped stdin), prompts fail
+              unless --yes is passed.
 
 TRAILERS
   Dispatch-Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "all"
