@@ -857,6 +857,68 @@ cmd_apply() {
             info "Merged $base into $source ($base_count commits)"
             _leave_branch
         fi
+
+        # Merge base into existing targets (avoids recreate + force-push)
+        local -a existing_targets=()
+        while IFS= read -r _et; do
+            [[ -n "$_et" ]] && existing_targets+=("$_et")
+        done < <(find_dispatch_targets "$source")
+
+        if [[ ${#existing_targets[@]} -gt 0 ]]; then
+            local merged_targets=0 target_merge_skipped=0
+
+            for _et_branch in "${existing_targets[@]}"; do
+                # Skip if applying to a specific target that isn't this one
+                if [[ -n "${apply_target:-}" ]]; then
+                    local _et_tid
+                    _et_tid=$(_extract_tid_from_branch "$_et_branch") || true
+                    [[ -n "$_et_tid" && "$_et_tid" != "$apply_target" ]] && continue
+                fi
+
+                local _et_behind
+                _et_behind=$(git rev-list --count "$_et_branch..$base" 2>/dev/null || echo 0)
+                if [[ "$_et_behind" -eq 0 ]]; then
+                    target_merge_skipped=$((target_merge_skipped + 1))
+                    continue
+                fi
+
+                if $dry_run; then
+                    echo -e "  ${YELLOW}merge${NC} $base ($_et_behind commits) into $_et_branch"
+                    merged_targets=$((merged_targets + 1))
+                    continue
+                fi
+
+                _enter_branch "$_et_branch" || {
+                    warn "  Cannot access $_et_branch for base merge (worktree conflict?)"
+                    continue
+                }
+                local -a _et_gcmd=(git -C "$_DISPATCH_WT_PATH")
+                if ! "${_et_gcmd[@]}" merge "$base" --no-edit 2>/dev/null; then
+                    if $resolve; then
+                        echo ""
+                        warn "Merge conflict on $_et_branch from $base"
+                        _show_conflict_diff "$_DISPATCH_WT_PATH"
+                        echo ""
+                        warn "Resolve conflicts in worktree: $_DISPATCH_WT_PATH"
+                        warn "Then run: git -C $_DISPATCH_WT_PATH commit"
+                        warn "Then run: git dispatch continue && git dispatch apply --base"
+                        _DISPATCH_WT_CREATED=false
+                        _DISPATCH_WT_STASHED=false
+                        exit 1
+                    fi
+                    "${_et_gcmd[@]}" merge --abort 2>/dev/null || true
+                    _leave_branch
+                    die "Merge conflict on $_et_branch from $base. Re-run with --resolve to resolve manually."
+                fi
+                info "  Merged $base into $_et_branch ($_et_behind commits)"
+                _leave_branch
+                merged_targets=$((merged_targets + 1))
+            done
+
+            if [[ $merged_targets -gt 0 && ! $dry_run ]]; then
+                info "Merged base into $merged_targets target(s)"
+            fi
+        fi
     fi
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line

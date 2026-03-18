@@ -2902,6 +2902,219 @@ test_no_legacy_fallback() {
     teardown
 }
 
+# ---------- merge-base-into-targets tests ----------
+
+test_apply_base_merges_into_existing_targets() {
+    echo "=== test: apply --base merges base into existing targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    echo "b" > b.txt
+    git add b.txt
+    git commit -m "add b" --trailer "Dispatch-Target-Id=2" -q
+
+    bash "$DISPATCH" apply
+
+    # Advance master with a non-conflicting change (disable hooks for non-dispatch commit)
+    git checkout master -q
+    echo "master-change" > master.txt
+    git add master.txt
+    git -c core.hooksPath= commit -m "master: add master.txt" -q
+
+    git checkout source/feature -q
+
+    # Apply with --base should merge master into source AND targets
+    bash "$DISPATCH" apply --base
+
+    # Verify targets have master's change (via merge, not recreate)
+    local t1_master t2_master
+    t1_master=$(git show "source/feature-task-1:master.txt" 2>/dev/null || echo "MISSING")
+    t2_master=$(git show "source/feature-task-2:master.txt" 2>/dev/null || echo "MISSING")
+
+    assert_eq "master-change" "$t1_master" "target-1 has master change via merge"
+    assert_eq "master-change" "$t2_master" "target-2 has master change via merge"
+
+    # Verify targets still have their original content
+    local t1_a t2_b
+    t1_a=$(git show "source/feature-task-1:a.txt" 2>/dev/null || echo "MISSING")
+    t2_b=$(git show "source/feature-task-2:b.txt" 2>/dev/null || echo "MISSING")
+
+    assert_eq "a" "$t1_a" "target-1 still has a.txt"
+    assert_eq "b" "$t2_b" "target-2 still has b.txt"
+
+    teardown
+}
+
+test_apply_base_no_force_push_needed() {
+    echo "=== test: apply --base produces fast-forward-compatible targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Record target SHA before
+    local sha_before
+    sha_before=$(git rev-parse "source/feature-task-1")
+
+    # Advance master
+    git checkout master -q
+    echo "master-file" > m.txt
+    git add m.txt
+    git -c core.hooksPath= commit -m "master: add m.txt" -q
+
+    git checkout source/feature -q
+    bash "$DISPATCH" apply --base
+
+    # Target should be a descendant of the old SHA (no force push needed)
+    if git merge-base --is-ancestor "$sha_before" "source/feature-task-1"; then
+        echo -e "  ${GREEN}PASS${NC} target is fast-forward from previous SHA"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} target not fast-forward (would need force push)"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_apply_base_target_merge_dry_run() {
+    echo "=== test: apply --base --dry-run shows merge plan ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Advance master
+    git checkout master -q
+    echo "m" > m.txt
+    git add m.txt
+    git -c core.hooksPath= commit -m "master change" -q
+
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --base --dry-run 2>&1)
+
+    assert_contains "$output" "merge" "dry-run shows merge plan for targets"
+
+    teardown
+}
+
+test_apply_base_skips_up_to_date_targets() {
+    echo "=== test: apply --base skips targets already up to date ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Apply --base with no base changes (source already up to date)
+    local output
+    output=$(bash "$DISPATCH" apply --base 2>&1)
+
+    assert_contains "$output" "already up to date" "no merge when base unchanged"
+
+    teardown
+}
+
+test_apply_base_conflict_on_target_merge() {
+    echo "=== test: apply --base conflict on target merge ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "source-a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Master changes same file
+    git checkout master -q
+    echo "master-a" > a.txt
+    git add a.txt
+    git -c core.hooksPath= commit -m "master: change a.txt" -q
+
+    # Source merges master (resolve conflict)
+    git checkout source/feature -q
+    git -c core.hooksPath= merge master --no-edit 2>/dev/null || {
+        echo "source-merged" > a.txt
+        git add a.txt
+        git -c core.hooksPath= commit --no-edit -q
+    }
+
+    # Now apply --base should try to merge master into target
+    # Target has "source-a", master has "master-a" - conflict
+    local output
+    output=$(bash "$DISPATCH" apply --base 2>&1) || true
+
+    assert_contains "$output" "Merge conflict" "detects conflict merging base into target"
+
+    teardown
+}
+
+test_apply_base_new_target_created_normally() {
+    echo "=== test: apply --base creates new targets from base ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Advance master
+    git checkout master -q
+    echo "m" > m.txt
+    git add m.txt
+    git -c core.hooksPath= commit -m "master change" -q
+
+    # Add new target on source
+    git checkout source/feature -q
+    echo "c" > c.txt
+    git add c.txt
+    git commit -m "add c" --trailer "Dispatch-Target-Id=2" -q
+
+    bash "$DISPATCH" apply --base
+
+    # New target should be created from updated base
+    local t2_m t2_c
+    t2_m=$(git show "source/feature-task-2:m.txt" 2>/dev/null || echo "MISSING")
+    t2_c=$(git show "source/feature-task-2:c.txt" 2>/dev/null || echo "MISSING")
+
+    assert_eq "m" "$t2_m" "new target has master content"
+    assert_eq "c" "$t2_c" "new target has source content"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -3016,6 +3229,12 @@ test_worktree_config_isolation
 test_reset_preserves_other_session_hooks
 test_reset_removes_hooks_when_last_session
 test_no_legacy_fallback
+test_apply_base_merges_into_existing_targets
+test_apply_base_no_force_push_needed
+test_apply_base_target_merge_dry_run
+test_apply_base_skips_up_to_date_targets
+test_apply_base_conflict_on_target_merge
+test_apply_base_new_target_created_normally
 
 echo ""
 echo "======================="
