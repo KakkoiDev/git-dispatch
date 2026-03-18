@@ -3115,7 +3115,38 @@ test_apply_base_new_target_created_normally() {
     teardown
 }
 
-# ---------- apply reset all / abort / --continue tests ----------
+# ---------- apply reset scoping / abort / --continue tests ----------
+
+test_apply_reset_does_not_cascade() {
+    echo "=== test: apply reset N does not cascade to other targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    echo "b" > b.txt
+    git add b.txt
+    git commit -m "add b" --trailer "Dispatch-Target-Id=2" -q
+
+    bash "$DISPATCH" apply
+
+    local sha2_before
+    sha2_before=$(git rev-parse "source/feature-task-2")
+
+    # Reset only target 1 - target 2 should be untouched
+    bash "$DISPATCH" apply reset 1 --yes
+
+    local sha2_after
+    sha2_after=$(git rev-parse "source/feature-task-2")
+
+    assert_eq "$sha2_before" "$sha2_after" "target-2 SHA unchanged after reset 1"
+
+    teardown
+}
 
 test_apply_reset_all() {
     echo "=== test: apply reset all regenerates all targets ==="
@@ -3390,6 +3421,7 @@ test_apply_base_target_merge_dry_run
 test_apply_base_skips_up_to_date_targets
 test_apply_base_conflict_on_target_merge
 test_apply_base_new_target_created_normally
+test_apply_reset_does_not_cascade
 test_apply_reset_all
 test_apply_reset_all_includes_orphaned
 test_abort_cleans_cherry_pick_worktree

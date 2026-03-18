@@ -815,6 +815,8 @@ cmd_apply() {
         if [[ "${positional[0]}" == "reset" ]]; then
             [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch apply reset <id|all>"
             reset_target="${positional[1]}"
+            # Scope apply to just this target (don't cascade to others)
+            [[ "$reset_target" != "all" ]] && apply_target="$reset_target"
         else
             apply_target="${positional[0]}"
         fi
