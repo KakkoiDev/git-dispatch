@@ -1731,6 +1731,50 @@ cmd_continue() {
             warn "  Resolve in: $wt"
             warn "  Then run:   git -C $wt commit"
         else
+            # Merge-queue resolved (from merge-based checkout). Check for remaining merges.
+            if [[ -f "$wt/.dispatch-merge-queue" ]]; then
+                local -a mq_tids=() mq_branches=()
+                while IFS=' ' read -r _mqtid _mqbranch; do
+                    [[ -n "$_mqtid" ]] && mq_tids+=("$_mqtid") && mq_branches+=("$_mqbranch")
+                done < "$wt/.dispatch-merge-queue"
+                rm -f "$wt/.dispatch-merge-queue"
+
+                if [[ ${#mq_branches[@]} -gt 0 ]]; then
+                    info "Resuming merge on $branch (${#mq_branches[@]} remaining targets)"
+                    local -a gcmd=(git -C "$wt")
+                    local _mq_merged=0
+
+                    for _mqi in "${!mq_branches[@]}"; do
+                        local _mqb="${mq_branches[$_mqi]}"
+                        local _mqt="${mq_tids[$_mqi]}"
+
+                        if ! "${gcmd[@]}" merge "$_mqb" --no-edit 2>/dev/null; then
+                            # Conflict - save remaining queue and pause
+                            local -a mq_new_branches=("${mq_branches[@]:$((_mqi+1))}")
+                            local -a mq_new_tids=("${mq_tids[@]:$((_mqi+1))}")
+                            if [[ ${#mq_new_branches[@]} -gt 0 ]]; then
+                                for _ri in "${!mq_new_branches[@]}"; do
+                                    echo "${mq_new_tids[$_ri]} ${mq_new_branches[$_ri]}"
+                                done > "$wt/.dispatch-merge-queue"
+                            fi
+                            echo ""
+                            warn "Conflict merging target $_mqt ($_mqb) into checkout"
+                            _show_conflict_diff "$wt"
+                            echo ""
+                            warn "Resolve conflicts, then run: ${gcmd[*]} commit"
+                            warn "Then run: git dispatch continue"
+                            if [[ ${#mq_new_branches[@]} -gt 0 ]]; then
+                                warn "${#mq_new_branches[@]} target(s) remaining after this one."
+                            fi
+                            info "Resumed: $_mq_merged merged before conflict"
+                            git worktree prune 2>/dev/null || true
+                            return 1
+                        fi
+                        _mq_merged=$((_mq_merged + 1))
+                    done
+                    info "Resumed: $_mq_merged target(s) merged"
+                fi
+            fi
             # Cherry-pick resolved. Check for remaining queue.
             if [[ -f "$wt/.dispatch-queue" ]]; then
                 local -a remaining=()
@@ -1861,37 +1905,44 @@ _checkout_create() {
         die "Checkout branch '$checkout_branch' already exists. Run: git dispatch checkout clear"
     fi
 
-    # Parse source commits
-    local commit_file
-    commit_file=$(mktemp)
-    trap "rm -f '$commit_file'" RETURN
-
+    # Collect target IDs <= N from source commits (sorted)
+    local -a target_tids=()
     while IFS= read -r hash; do
         local tid
         tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-        [[ -n "$tid" ]] && echo "$hash $tid"
-    done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
-
-    # Filter: tid <= N (numeric) or tid == "all"
-    local -a hashes=()
-    while read -r hash tid; do
-        if [[ "$tid" == "all" ]]; then
-            hashes+=("$hash")
-        elif echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+        [[ -z "$tid" || "$tid" == "all" ]] && continue
+        if echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
             if awk "BEGIN {exit !($tid <= $n)}"; then
-                hashes+=("$hash")
+                target_tids+=("$tid")
             fi
         fi
-    done < "$commit_file"
+    done < <(git log --reverse --format="%H" "$base..$source")
 
-    if [[ ${#hashes[@]} -eq 0 ]]; then
+    # Deduplicate and sort
+    local -a unique_tids=()
+    while IFS= read -r t; do
+        [[ -n "$t" ]] && unique_tids+=("$t")
+    done < <(printf '%s\n' ${target_tids[@]+"${target_tids[@]}"} | sort -t. -k1,1n -k2,2n -u)
+
+    if [[ ${#unique_tids[@]} -eq 0 ]]; then
         die "No commits with Dispatch-Target-Id <= $n"
     fi
 
+    # Verify all target branches exist
+    local -a merge_branches=()
+    for tid in "${unique_tids[@]}"; do
+        local target_branch
+        target_branch=$(_target_branch_name "$tid")
+        if ! git rev-parse --verify "refs/heads/$target_branch" &>/dev/null; then
+            die "Target $tid ($target_branch) not created. Run: git dispatch apply"
+        fi
+        merge_branches+=("$target_branch")
+    done
+
     if $dry_run; then
-        echo -e "${YELLOW}[dry-run]${NC} checkout $n: ${#hashes[@]} commits from $base"
-        for h in "${hashes[@]}"; do
-            echo "  $(git log -1 --oneline "$h")"
+        echo -e "${YELLOW}[dry-run]${NC} checkout $n: merge ${#merge_branches[@]} targets from $base"
+        for i in "${!unique_tids[@]}"; do
+            echo "  merge target ${unique_tids[$i]}  ${merge_branches[$i]}"
         done
         return
     fi
@@ -1902,15 +1953,54 @@ _checkout_create() {
     # Store active checkout in config
     _set_config checkoutBranch "$checkout_branch" "$source"
 
-    info "Creating checkout branch: $checkout_branch (${#hashes[@]} commits)"
+    info "Creating checkout branch: $checkout_branch (merging ${#merge_branches[@]} targets)"
 
-    # Cherry-pick all filtered commits
-    if ! _cherry_pick_commits "$resolve" "$checkout_branch" "${hashes[@]}"; then
-        warn "Conflict during checkout. Resolve and run: git dispatch continue"
-        return 1
-    fi
+    # Merge each target branch sequentially
+    _enter_branch "$checkout_branch" || die "Cannot access checkout branch (worktree conflict?)"
+    local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
+    local merged=0
 
-    info "Checkout ready: $checkout_branch ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
+    for i in "${!merge_branches[@]}"; do
+        local tb="${merge_branches[$i]}"
+        local ttid="${unique_tids[$i]}"
+
+        if ! "${gcmd[@]}" merge "$tb" --no-edit 2>/dev/null; then
+            if $resolve; then
+                echo ""
+                warn "Conflict merging target $ttid ($tb) into checkout"
+                _show_conflict_diff "$_DISPATCH_WT_PATH"
+                echo ""
+                warn "Resolve conflicts in worktree: $_DISPATCH_WT_PATH"
+                warn "Then run: git -C $_DISPATCH_WT_PATH commit"
+
+                # Save remaining targets for continue
+                local -a remaining_branches=("${merge_branches[@]:$((i+1))}")
+                local -a remaining_tids=("${unique_tids[@]:$((i+1))}")
+                if [[ ${#remaining_branches[@]} -gt 0 ]]; then
+                    # Store as "tid branch" lines
+                    for ri in "${!remaining_branches[@]}"; do
+                        echo "${remaining_tids[$ri]} ${remaining_branches[$ri]}"
+                    done > "$_DISPATCH_WT_PATH/.dispatch-merge-queue"
+                    warn "${#remaining_branches[@]} target(s) remaining after this one."
+                fi
+                warn "Then run: git dispatch continue"
+                _DISPATCH_WT_CREATED=false
+                _DISPATCH_WT_STASHED=false
+                return 1
+            fi
+            "${gcmd[@]}" merge --abort 2>/dev/null || true
+            _leave_branch
+            # Clean up the checkout branch
+            git branch -D "$checkout_branch" -q 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
+            die "Conflict merging target $ttid ($tb). Re-run with --resolve to resolve manually."
+        fi
+        merged=$((merged + 1))
+    done
+
+    _leave_branch
+
+    info "Checkout ready: $checkout_branch ($merged targets merged)"
 
     # Print worktree path if one was created, or show how to use it
     local wt_path

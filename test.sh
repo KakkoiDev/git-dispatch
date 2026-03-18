@@ -1869,15 +1869,19 @@ test_checkout_creates_branch() {
     setup
     create_source  # commits: tid=3, tid=4(x2), tid=5
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
     local output
     output=$(bash "$DISPATCH" checkout 4 2>&1)
 
     assert_branch_exists "dispatch-checkout/source/feature/4" "checkout branch created"
 
-    # Should have tid=3 and tid=4 commits (3 total), not tid=5
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/4" | wc -l | tr -d ' ')
-    assert_eq "3" "$count" "checkout has 3 commits (tid=3 + tid=4 x2)"
+    # Should have content from tid=3 and tid=4, not tid=5
+    local file_exists validate_exists
+    file_exists=$(git show "dispatch-checkout/source/feature/4:file.txt" 2>/dev/null || echo "MISSING")
+    validate_exists=$(git show "dispatch-checkout/source/feature/4:validate.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "a" "$file_exists" "tid=3 content present"
+    assert_eq "MISSING" "$validate_exists" "tid=5 content excluded"
 
     assert_contains "$output" "dispatch-checkout/source/feature/4" "output shows branch name"
 
@@ -1899,15 +1903,11 @@ test_checkout_includes_all_commits() {
     git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
 
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
 
-    # Should have tid=1, tid=all, tid=2 (3 commits), not tid=3
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
-    assert_eq "3" "$count" "checkout has 3 commits (tid=1 + all + tid=2)"
-
-    # shared.txt should exist (from tid=all commit)
+    # shared.txt should exist (from tid=all, applied to both targets)
     local shared_exists
     shared_exists=$(git show "dispatch-checkout/source/feature/2:shared.txt" 2>/dev/null || echo "MISSING")
     assert_eq "shared" "$shared_exists" "all commit content present"
@@ -1920,8 +1920,8 @@ test_checkout_includes_all_commits() {
     teardown
 }
 
-test_checkout_preserves_source_order() {
-    echo "=== test: checkout preserves source commit order ==="
+test_checkout_merges_targets_in_order() {
+    echo "=== test: checkout merges targets in numeric order ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1935,17 +1935,19 @@ test_checkout_preserves_source_order() {
     git commit -m "D-tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
 
-    # All 4 commits should be present
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
-    assert_eq "4" "$count" "all 4 commits included"
-
-    # Check order: first commit should be A (tid=2), not grouped
-    local first_msg
-    first_msg=$(git log --reverse --oneline "master..dispatch-checkout/source/feature/2" | head -1)
-    assert_contains "$first_msg" "A-tid2" "first commit is A (source order preserved)"
+    # All content should be present (merged from target-1 and target-2)
+    local a_exists b_exists c_exists d_exists
+    a_exists=$(git show "dispatch-checkout/source/feature/2:a.txt" 2>/dev/null || echo "MISSING")
+    b_exists=$(git show "dispatch-checkout/source/feature/2:b.txt" 2>/dev/null || echo "MISSING")
+    c_exists=$(git show "dispatch-checkout/source/feature/2:c.txt" 2>/dev/null || echo "MISSING")
+    d_exists=$(git show "dispatch-checkout/source/feature/2:d.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "a" "$a_exists" "a.txt from tid=2 present"
+    assert_eq "b" "$b_exists" "b.txt from tid=1 present"
+    assert_eq "c" "$c_exists" "c.txt from tid=2 present"
+    assert_eq "d" "$d_exists" "d.txt from tid=1 present"
 
     teardown
 }
@@ -1965,11 +1967,8 @@ test_checkout_decimal_targets() {
     git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
-
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
-    assert_eq "3" "$count" "includes tid=1, 1.5, 2 (excludes tid=3)"
 
     # b.txt from tid=1.5 should exist
     local b_exists
@@ -1984,8 +1983,8 @@ test_checkout_decimal_targets() {
     teardown
 }
 
-test_checkout_works_without_apply() {
-    echo "=== test: checkout works without prior apply ==="
+test_checkout_requires_apply() {
+    echo "=== test: checkout requires apply first ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1997,13 +1996,10 @@ test_checkout_works_without_apply() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
     # Do NOT apply
 
-    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+    local output
+    output=$(bash "$DISPATCH" checkout 2 2>&1) || true
 
-    assert_branch_exists "dispatch-checkout/source/feature/2" "checkout works without apply"
-
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/2" | wc -l | tr -d ' ')
-    assert_eq "2" "$count" "both commits present"
+    assert_contains "$output" "not created" "checkout errors without apply"
 
     teardown
 }
@@ -2013,6 +2009,7 @@ test_checkout_errors_if_exists() {
     setup
     create_source
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 4 >/dev/null 2>&1
 
     local output
@@ -2048,6 +2045,7 @@ test_checkout_empty_range() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     local output
+    bash "$DISPATCH" apply >/dev/null 2>&1
     output=$(bash "$DISPATCH" checkout 3 2>&1) || true
     assert_contains "$output" "No commits" "errors when no matching commits"
 
@@ -2055,15 +2053,19 @@ test_checkout_empty_range() {
 }
 
 test_checkout_large_N_includes_all() {
-    echo "=== test: checkout with large N includes all commits ==="
+    echo "=== test: checkout with large N includes all content ==="
     setup
     create_source  # commits: tid=3, tid=4(x2), tid=5
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 999 >/dev/null 2>&1
 
-    local count
-    count=$(git log --oneline "master..dispatch-checkout/source/feature/999" | wc -l | tr -d ' ')
-    assert_eq "4" "$count" "all 4 commits included with N=999"
+    # All content from all targets should be present
+    local file_exists api_exists dto_exists validate_exists
+    file_exists=$(git show "dispatch-checkout/source/feature/999:file.txt" 2>/dev/null || echo "MISSING")
+    validate_exists=$(git show "dispatch-checkout/source/feature/999:validate.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "a" "$file_exists" "tid=3 content present with N=999"
+    assert_eq "d" "$validate_exists" "tid=5 content present with N=999"
 
     teardown
 }
@@ -2075,6 +2077,7 @@ test_checkout_source_returns_to_source() {
     setup
     create_source
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 4 >/dev/null 2>&1
 
     # Switch to checkout branch
@@ -2111,6 +2114,7 @@ test_checkout_clear_removes_branch() {
     setup
     create_source
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 4 >/dev/null 2>&1
 
     bash "$DISPATCH" checkout clear >/dev/null 2>&1
@@ -2133,6 +2137,7 @@ test_checkout_clear_warns_unpicked_commits() {
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     # Make a new commit on checkout branch
@@ -2160,6 +2165,7 @@ test_checkout_clear_force_with_unpicked() {
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     # Make a new commit on checkout branch
@@ -2192,6 +2198,7 @@ test_checkout_clear_from_checkout_branch() {
     setup
     create_source
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 4 >/dev/null 2>&1
 
     # Switch to checkout branch
@@ -2221,6 +2228,7 @@ test_checkin_picks_new_commits_to_source() {
     git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
 
     # Make a new commit on checkout
@@ -2252,6 +2260,7 @@ test_checkin_no_new_commits() {
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     git checkout "dispatch-checkout/source/feature/1" -q
@@ -2276,6 +2285,7 @@ test_checkin_multiple_commits_different_targets() {
     git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 3 >/dev/null 2>&1
 
     git checkout "dispatch-checkout/source/feature/3" -q
@@ -2343,6 +2353,7 @@ test_checkin_from_source_with_n() {
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     # Make a new commit on checkout
@@ -2372,6 +2383,7 @@ test_checkin_dry_run() {
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     git checkout "dispatch-checkout/source/feature/1" -q
@@ -2399,10 +2411,11 @@ test_checkout_dry_run() {
     create_source
 
     local output
+    bash "$DISPATCH" apply >/dev/null 2>&1
     output=$(bash "$DISPATCH" checkout 4 --dry-run 2>&1)
 
     assert_contains "$output" "dry-run" "shows dry-run label"
-    assert_contains "$output" "3" "shows commit count"
+    assert_contains "$output" "merge" "shows merge plan"
 
     # Branch should NOT exist
     assert_branch_not_exists "dispatch-checkout/source/feature/4" "dry-run did not create branch"
@@ -2425,6 +2438,7 @@ test_checkin_skips_original_commits() {
     local before_count
     before_count=$(git log --oneline "master..source/feature" | wc -l | tr -d ' ')
 
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
 
     git checkout "dispatch-checkout/source/feature/2" -q
@@ -2449,6 +2463,7 @@ test_checkin_source_keep_auto_resolves_conflict() {
     git commit -m "add swagger$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 1 >/dev/null 2>&1
 
     # Modify swagger on source (creates conflict)
@@ -2527,6 +2542,7 @@ test_checkout_full_lifecycle() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     # Checkout 2
+    bash "$DISPATCH" apply >/dev/null 2>&1
     bash "$DISPATCH" checkout 2 >/dev/null 2>&1
     assert_branch_exists "dispatch-checkout/source/feature/2" "checkout created"
 
@@ -2580,62 +2596,65 @@ test_checkout_does_not_affect_targets() {
 }
 
 test_continue_resumes_remaining_queue() {
-    echo "=== test: continue resumes remaining commits after conflict ==="
+    echo "=== test: continue resumes remaining merges after conflict ==="
     setup
 
     git checkout -b source/feature master -q
 
-    # Commit 1: clean
+    # Target 1 creates shared.txt
     echo "a" > a.txt; git add a.txt
+    echo "version-1" > shared.txt; git add shared.txt
     git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
 
-    # Commit 2: will conflict with base version of file.txt
-    echo "source-version" > file.txt; git add file.txt
-    git commit -m "tid1-conflict$(printf '\n\nDispatch-Target-Id: 1')" -q
+    # Target 2 also creates shared.txt (different content) + its own file
+    # This will conflict during checkout merge since both add shared.txt
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2-b$(printf '\n\nDispatch-Target-Id: 2')" -q
 
-    # Commit 3: clean, should land after conflict resolution
+    # Target 3 is clean
     echo "c" > c.txt; git add c.txt
-    git commit -m "tid1-after$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git commit -m "tid3$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
 
-    # Create conflict on base: add file.txt to master so cherry-pick conflicts
-    git checkout master -q
-    echo "base-version" > file.txt; git add file.txt
-    git commit --no-verify -m "base adds file.txt" -q
-    git checkout source/feature -q
+    # Manually create a conflict: modify shared.txt on target-2 branch
+    local wt_t2
+    wt_t2=$(mktemp -d)
+    git worktree add -q "$wt_t2" "source/feature-2"
+    echo "target2-version" > "$wt_t2/shared.txt"
+    git -C "$wt_t2" add shared.txt
+    git -C "$wt_t2" -c core.hooksPath= commit -m "target-2 modifies shared.txt" -q
+    git worktree remove --force "$wt_t2"
+    git worktree prune
 
-    # Checkout with --resolve (will conflict on commit 2)
+    # Checkout 3 with --resolve: merge target-1 (has shared.txt=version-1),
+    # then target-2 (has shared.txt=target2-version) - CONFLICT
     local output
-    output=$(bash "$DISPATCH" checkout 1 --resolve 2>&1) || true
+    output=$(bash "$DISPATCH" checkout 3 --resolve 2>&1) || true
 
     # Find the worktree
     local wt
     wt=$(git worktree list --porcelain | awk '/^worktree / {path=substr($0, 10)} /^branch / {if (path ~ /git-dispatch-wt\./) print path}' | head -1)
 
     if [[ -n "$wt" ]]; then
-        # Queue file should exist with remaining commits
-        assert_eq "true" "$(test -f "$wt/.dispatch-queue" && echo true || echo false)" "queue file created"
+        # Merge queue should exist with remaining targets
+        assert_eq "true" "$(test -f "$wt/.dispatch-merge-queue" && echo true || echo false)" "merge queue file created"
 
-        # Resolve the conflict
-        git -C "$wt" checkout --theirs file.txt 2>/dev/null
-        git -C "$wt" add file.txt 2>/dev/null
-        git -C "$wt" cherry-pick --continue --no-edit 2>/dev/null
+        # Resolve the merge conflict
+        echo "resolved" > "$wt/shared.txt"
+        git -C "$wt" add shared.txt 2>/dev/null
+        git -C "$wt" -c core.hooksPath= commit --no-edit -q 2>/dev/null
 
-        # Continue should resume remaining commits
+        # Continue should resume remaining merges
         local cont_output
         cont_output=$(bash "$DISPATCH" continue 2>&1)
-        assert_contains "$cont_output" "Resuming" "continue resumes remaining commits"
+        assert_contains "$cont_output" "merged" "continue resumes remaining merges"
 
-        # Check all 3 commits landed
-        local count
-        count=$(git log --oneline "master..dispatch-checkout/source/feature/1" | wc -l | tr -d ' ')
-        assert_eq "3" "$count" "all 3 commits landed after continue"
-
-        # c.txt should exist (from commit 3, the one that was in queue)
+        # c.txt should exist (from target-3, merged after conflict resolution)
         local c_exists
-        c_exists=$(git show "dispatch-checkout/source/feature/1:c.txt" 2>/dev/null || echo "MISSING")
-        assert_eq "c" "$c_exists" "queued commit content present"
+        c_exists=$(git show "dispatch-checkout/source/feature/3:c.txt" 2>/dev/null || echo "MISSING")
+        assert_eq "c" "$c_exists" "target-3 content present after continue"
     else
         echo -e "  ${RED}FAIL${NC} no worktree found for conflict resolution"
         FAIL=$((FAIL + 1))
@@ -3377,9 +3396,9 @@ test_continue_cleans_completed_worktree
 test_continue_detects_pending_conflict
 test_checkout_creates_branch
 test_checkout_includes_all_commits
-test_checkout_preserves_source_order
+test_checkout_merges_targets_in_order
 test_checkout_decimal_targets
-test_checkout_works_without_apply
+test_checkout_requires_apply
 test_checkout_errors_if_exists
 test_checkout_errors_if_not_initialized
 test_checkout_empty_range
