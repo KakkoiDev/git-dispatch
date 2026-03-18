@@ -3115,6 +3115,161 @@ test_apply_base_new_target_created_normally() {
     teardown
 }
 
+# ---------- apply reset all / abort / --continue tests ----------
+
+test_apply_reset_all() {
+    echo "=== test: apply reset all regenerates all targets ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    echo "b" > b.txt
+    git add b.txt
+    git commit -m "add b" --trailer "Dispatch-Target-Id=2" -q
+
+    bash "$DISPATCH" apply
+
+    # Record SHAs before reset
+    local sha1_before sha2_before
+    sha1_before=$(git rev-parse "source/feature-task-1")
+    sha2_before=$(git rev-parse "source/feature-task-2")
+
+    # reset all regenerates (deletes + recreates in same apply run)
+    local output
+    output=$(bash "$DISPATCH" apply reset all --yes 2>&1)
+
+    assert_contains "$output" "Deleted source/feature-task-1" "target-1 was deleted"
+    assert_contains "$output" "Deleted source/feature-task-2" "target-2 was deleted"
+    assert_contains "$output" "Created source/feature-task-1" "target-1 was recreated"
+    assert_contains "$output" "Created source/feature-task-2" "target-2 was recreated"
+
+    # SHAs should differ (regenerated)
+    local sha1_after sha2_after
+    sha1_after=$(git rev-parse "source/feature-task-1")
+    sha2_after=$(git rev-parse "source/feature-task-2")
+
+    if [[ "$sha1_before" != "$sha1_after" ]]; then
+        echo -e "  ${GREEN}PASS${NC} target-1 SHA changed after reset all"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} target-1 SHA unchanged after reset all"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_apply_reset_all_includes_orphaned() {
+    echo "=== test: apply reset all includes orphaned branches ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Orphan the target by removing dispatchsource config
+    git config --unset "branch.source/feature-task-1.dispatchsource"
+
+    # apply reset all should find orphaned branch via pattern matching and recreate it
+    local output
+    output=$(bash "$DISPATCH" apply reset all --force 2>&1)
+
+    assert_contains "$output" "Deleted source/feature-task-1" "orphaned target found and deleted by reset all"
+
+    teardown
+}
+
+test_abort_cleans_cherry_pick_worktree() {
+    echo "=== test: abort cleans up cherry-pick conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Create conflict: modify a.txt on target directly
+    local wt_path
+    wt_path=$(mktemp -d)
+    git worktree add -q "$wt_path" "source/feature-task-1"
+    echo "target-change" > "$wt_path/a.txt"
+    git -C "$wt_path" add a.txt
+    git -C "$wt_path" -c core.hooksPath= commit -m "target modifies a" -q
+    git worktree remove --force "$wt_path"
+    git worktree prune
+
+    # Modify same file on source
+    echo "source-change" > a.txt
+    git add a.txt
+    git commit -m "source modifies a" --trailer "Dispatch-Target-Id=1" -q
+
+    # Apply with --resolve to leave conflict active
+    bash "$DISPATCH" apply --resolve 2>/dev/null || true
+
+    # Abort should clean everything up
+    local output
+    output=$(bash "$DISPATCH" abort 2>&1)
+
+    assert_contains "$output" "Abort complete" "abort completes"
+
+    # No dispatch worktrees should remain
+    local remaining
+    remaining=$(git worktree list --porcelain | grep -c "git-dispatch-wt" || true)
+    assert_eq "0" "$remaining" "no dispatch worktrees remain after abort"
+
+    teardown
+}
+
+test_abort_nothing_to_abort() {
+    echo "=== test: abort with nothing pending ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    local output
+    output=$(bash "$DISPATCH" abort 2>&1)
+
+    assert_contains "$output" "Nothing to abort" "nothing to abort when clean"
+
+    teardown
+}
+
+test_continue_alias_for_resolve() {
+    echo "=== test: --continue alias for --resolve ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    # --continue should be accepted as a flag (same as --resolve)
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run --continue 2>&1)
+
+    # Should not error with "Unknown flag: --continue"
+    assert_not_contains "$output" "Unknown flag" "--continue accepted as flag"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -3235,6 +3390,11 @@ test_apply_base_target_merge_dry_run
 test_apply_base_skips_up_to_date_targets
 test_apply_base_conflict_on_target_merge
 test_apply_base_new_target_created_normally
+test_apply_reset_all
+test_apply_reset_all_includes_orphaned
+test_abort_cleans_cherry_pick_worktree
+test_abort_nothing_to_abort
+test_continue_alias_for_resolve
 
 echo ""
 echo "======================="

@@ -800,7 +800,7 @@ cmd_apply() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)  dry_run=true; shift ;;
-            --resolve)  resolve=true; shift ;;
+            --resolve|--continue) resolve=true; shift ;;
             --force)    force=true; shift ;;
             --base)     merge_base=true; shift ;;
             -y|--yes)   DISPATCH_YES=true; shift ;;
@@ -813,7 +813,7 @@ cmd_apply() {
     local apply_target=""
     if [[ ${#positional[@]} -gt 0 ]]; then
         if [[ "${positional[0]}" == "reset" ]]; then
-            [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch apply reset <id>"
+            [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch apply reset <id|all>"
             reset_target="${positional[1]}"
         else
             apply_target="${positional[0]}"
@@ -1058,13 +1058,75 @@ cmd_apply() {
 
     local created=0 updated=0 skipped=0 failed=0
 
-    # --reset <id>: delete the target branch so apply recreates it fresh
+    # --reset <id|all>: delete target branch(es) so apply recreates them fresh
     if [[ -n "$reset_target" ]]; then
-        local reset_branch
-        reset_branch=$(_target_branch_name "$reset_target")
-        if git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
-            # Check for target-only commits that would be lost
+        local -a reset_branches=() reset_tids=()
+
+        if [[ "$reset_target" == "all" ]]; then
+            # Collect all existing targets
+            while IFS= read -r _rb; do
+                [[ -n "$_rb" ]] || continue
+                local _rtid
+                _rtid=$(_extract_tid_from_branch "$_rb") || true
+                if [[ -n "$_rtid" ]]; then
+                    reset_branches+=("$_rb")
+                    reset_tids+=("$_rtid")
+                fi
+            done < <(find_dispatch_targets "$source")
+
+            # Also find "foreign" branches matching pattern but missing dispatchsource
+            local _pattern
+            _pattern=$(_get_config targetPattern)
+            if [[ -n "$_pattern" ]]; then
+                local _prefix="${_pattern%%\{id\}*}"
+                local _suffix="${_pattern#*\{id\}}"
+                while IFS= read -r _ref; do
+                    local _bname="${_ref#refs/heads/}"
+                    # Already in list?
+                    local _already=false
+                    for _rb in ${reset_branches[@]+"${reset_branches[@]}"}; do
+                        [[ "$_rb" == "$_bname" ]] && { _already=true; break; }
+                    done
+                    $_already && continue
+                    # Matches pattern?
+                    if [[ "$_bname" == "${_prefix}"*"${_suffix}" ]]; then
+                        local _ftid="${_bname#"$_prefix"}"
+                        [[ -n "$_suffix" ]] && _ftid="${_ftid%"$_suffix"}"
+                        if echo "$_ftid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+                            reset_branches+=("$_bname")
+                            reset_tids+=("$_ftid")
+                        fi
+                    fi
+                done < <(git for-each-ref --format='%(refname)' refs/heads/)
+            fi
+
+            [[ ${#reset_branches[@]} -gt 0 ]] || die "No target branches found to reset"
+
             if ! $force; then
+                echo -e "${CYAN}Will reset ${#reset_branches[@]} target(s):${NC}"
+                for _rb in "${reset_branches[@]}"; do
+                    echo "  $_rb"
+                done
+                _confirm "Proceed?" || { echo "Aborted."; return 0; }
+            fi
+        else
+            local _rb
+            _rb=$(_target_branch_name "$reset_target")
+            git rev-parse --verify "refs/heads/$_rb" &>/dev/null || die "Branch $_rb does not exist"
+            reset_branches=("$_rb")
+            reset_tids=("$reset_target")
+        fi
+
+        for _ri in "${!reset_branches[@]}"; do
+            local reset_branch="${reset_branches[$_ri]}"
+            local reset_tid="${reset_tids[$_ri]}"
+
+            if ! git rev-parse --verify "refs/heads/$reset_branch" &>/dev/null; then
+                continue
+            fi
+
+            # Check for target-only commits that would be lost
+            if ! $force && [[ "$reset_target" != "all" ]]; then
                 local _target_only=0
                 while IFS= read -r _rh; do
                     [[ -n "$_rh" ]] || continue
@@ -1073,13 +1135,14 @@ cmd_apply() {
                     (( _rpc > 2 )) && continue
                     local _rtid
                     _rtid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
-                    [[ -z "$_rtid" || "$_rtid" != "$reset_target" ]] && _target_only=$((_target_only + 1))
+                    [[ -z "$_rtid" || "$_rtid" != "$reset_tid" ]] && _target_only=$((_target_only + 1))
                 done < <(git log --format="%H" "$base..$reset_branch" 2>/dev/null)
                 if [[ $_target_only -gt 0 ]]; then
                     warn "$reset_branch has $_target_only target-only commit(s) that will be lost."
                     _confirm "Proceed?" || { echo "Aborted."; return 0; }
                 fi
             fi
+
             # Remove worktree if branch is checked out in one
             local wt_path
             wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$reset_branch" '
@@ -1087,7 +1150,6 @@ cmd_apply() {
                 /^branch refs\/heads\// { if ($2 == "refs/heads/" b) print path }
             ')
             if [[ -n "$wt_path" ]]; then
-                # Stash uncommitted changes before removing worktree
                 if ! git -C "$wt_path" diff --quiet 2>/dev/null || ! git -C "$wt_path" diff --cached --quiet 2>/dev/null; then
                     warn "Worktree $wt_path has uncommitted changes. Stashing."
                     git -C "$wt_path" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before worktree removal" 2>/dev/null || true
@@ -1096,15 +1158,17 @@ cmd_apply() {
                 git worktree prune 2>/dev/null || true
                 info "Removed worktree $wt_path"
             fi
+
+            # Clean dispatchsource config
+            git config --unset "branch.${reset_branch}.dispatchsource" 2>/dev/null || true
+
             local delete_err
             if delete_err=$(git branch -D "$reset_branch" 2>&1); then
                 info "Deleted $reset_branch (will regenerate)"
             else
-                die "Could not delete $reset_branch: $delete_err"
+                warn "Could not delete $reset_branch: $delete_err"
             fi
-        else
-            die "Branch $reset_branch does not exist"
-        fi
+        done
     fi
 
     # Display all-target commits in dry-run
@@ -1737,7 +1801,7 @@ cmd_checkout() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --resolve)  resolve=true; shift ;;
+            --resolve|--continue) resolve=true; shift ;;
             --force)    force=true; shift ;;
             --dry-run)  dry_run=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
@@ -1971,7 +2035,7 @@ cmd_checkin() {
     local checkin_n=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --resolve)  resolve=true; shift ;;
+            --resolve|--continue) resolve=true; shift ;;
             --dry-run)  dry_run=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          [[ -z "$checkin_n" ]] && checkin_n="$1" || die "Unexpected argument: $1"; shift ;;
@@ -2047,6 +2111,75 @@ cmd_checkin() {
     echo -e "  ${CYAN}Next:${NC} git dispatch apply"
 }
 
+# ---------- abort ----------
+
+cmd_abort() {
+    local aborted=false
+
+    # 1. Check for dispatch temp worktrees with pending operations
+    local -a wt_paths=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && wt_paths+=("$line")
+    done < <(_find_dispatch_worktrees)
+
+    for wt in ${wt_paths[@]+"${wt_paths[@]}"}; do
+        local branch
+        branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+
+        if git -C "$wt" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+            git -C "$wt" cherry-pick --abort 2>/dev/null || git -C "$wt" reset --merge 2>/dev/null || true
+            info "Aborted cherry-pick on $branch"
+            aborted=true
+        elif git -C "$wt" rev-parse --verify MERGE_HEAD &>/dev/null; then
+            git -C "$wt" merge --abort 2>/dev/null || true
+            info "Aborted merge on $branch"
+            aborted=true
+        fi
+
+        # Remove queue file
+        rm -f "$wt/.dispatch-queue"
+
+        # Clean up temp worktree
+        git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+        info "Cleaned up worktree: $wt"
+        aborted=true
+    done
+
+    # 2. Check if current branch has pending merge/cherry-pick
+    if git rev-parse --verify CHERRY_PICK_HEAD &>/dev/null; then
+        git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+        info "Aborted cherry-pick on $(current_branch)"
+        aborted=true
+    elif git rev-parse --verify MERGE_HEAD &>/dev/null; then
+        git merge --abort 2>/dev/null || true
+        info "Aborted merge on $(current_branch)"
+        aborted=true
+    fi
+
+    # 3. Check for checkout branch and offer to clean it
+    local cur
+    cur=$(current_branch 2>/dev/null || true)
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        local rest="${cur#dispatch-checkout/}"
+        local source="${rest%/*}"
+        if [[ -n "$source" ]]; then
+            git checkout "$source" -q 2>/dev/null || true
+            git branch -D "$cur" -q 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
+            info "Deleted checkout branch $cur, switched to $source"
+            aborted=true
+        fi
+    fi
+
+    git worktree prune 2>/dev/null || true
+
+    if $aborted; then
+        info "Abort complete."
+    else
+        info "Nothing to abort."
+    fi
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -2088,7 +2221,7 @@ WORKFLOW
 COMMANDS
   init        Configure dispatch on current source branch
   apply       Make all targets match source. apply <N> for one target. apply --base
-              to merge base first. apply reset <N> to regenerate.
+              to merge base first. apply reset <N|all> to regenerate.
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
@@ -2099,12 +2232,14 @@ COMMANDS
   push        Push branches (push <all|source|N>)
   status      Show base, source, and all targets with sync state
   continue    Resume after conflict resolution
+  abort       Cancel in-progress operation, clean up worktrees, return to source
   reset       Delete all dispatch targets and config
 
 FLAGS
   --base      Merge base into source before applying (apply only)
   --dry-run   Show plan, make no changes
-  --resolve   Leave conflict active in a temp worktree for manual resolution.
+  --resolve, --continue
+              Leave conflict active in a temp worktree for manual resolution.
               The worktree path is printed. After resolving, run the shown
               git command, then: git dispatch continue
   --force     Override safety checks (apply: rebuild stale targets)
@@ -2143,6 +2278,7 @@ main() {
         checkout)     cmd_checkout "$@" ;;
         checkin)      cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;
+        abort)        cmd_abort "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
