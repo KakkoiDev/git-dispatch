@@ -2008,15 +2008,10 @@ _checkout_create() {
 
     info "Checkout ready: $checkout_branch ($merged targets merged)"
 
-    # Print worktree path if one was created, or show how to use it
-    local wt_path
-    wt_path=$(worktree_for_branch "$checkout_branch")
-    if [[ -n "$wt_path" ]]; then
-        echo -e "  ${CYAN}worktree:${NC} $wt_path"
-    else
-        echo -e "  ${CYAN}branch:${NC} $checkout_branch"
-        echo "  Switch with: git checkout $checkout_branch"
-    fi
+    # Switch to the checkout branch
+    git checkout "$checkout_branch" -q
+    info "Switched to: $checkout_branch"
+    echo -e "  ${CYAN}Return:${NC} git dispatch checkout source"
 }
 
 _checkout_source() {
@@ -2206,7 +2201,15 @@ cmd_checkin() {
     fi
 
     info "Checked in $DISPATCH_LAST_PICKED commit(s) to $source"
-    echo -e "  ${CYAN}Next:${NC} git dispatch apply"
+
+    # Switch back to source branch
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        git checkout "$source" -q
+        info "Switched to source: $source"
+    fi
+
+    echo -e "  ${CYAN}Next:${NC} git dispatch checkout clear  (to delete checkout branch)"
+    echo -e "  ${CYAN}  or:${NC} git dispatch apply"
 }
 
 # ---------- abort ----------
