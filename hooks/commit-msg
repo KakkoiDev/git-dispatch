@@ -15,6 +15,20 @@ if ! grep -q "^Dispatch-Target-Id:" "$msg_file"; then
     exit 1
 fi
 
+# Reject duplicate Dispatch-Target-Id trailers
+target_count=$(grep -c "^Dispatch-Target-Id:" "$msg_file")
+if [[ "$target_count" -gt 1 ]]; then
+    echo "Error: Multiple Dispatch-Target-Id trailers found ($target_count). Only one is allowed per commit."
+    exit 1
+fi
+
+# Reject duplicate Dispatch-Source-Keep trailers
+source_keep_count=$(grep -c "^Dispatch-Source-Keep:" "$msg_file" || true)
+if [[ "$source_keep_count" -gt 1 ]]; then
+    echo "Error: Multiple Dispatch-Source-Keep trailers found ($source_keep_count). Only one is allowed per commit."
+    exit 1
+fi
+
 # Validate Dispatch-Target-Id is numeric (integer or decimal) or "all"
 target_id=$(grep "^Dispatch-Target-Id:" "$msg_file" | head -1 | sed 's/^Dispatch-Target-Id:[[:space:]]*//')
 if [[ "$target_id" == "all" ]]; then

@@ -936,6 +936,12 @@ cmd_apply() {
         (( _pc > 2 )) && continue
         # Skip commits from base (already integrated)
         git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
+        # Reject commits with multiple Dispatch-Target-Id trailers (defense-in-depth)
+        local _tcount
+        _tcount=$(git log -1 --format="%(trailers)" "$_h" | grep -c "^Dispatch-Target-Id:" || true)
+        if [[ "$_tcount" -gt 1 ]]; then
+            die "Commit $(echo "$_h" | cut -c1-8) has $_tcount Dispatch-Target-Id trailers. Only one is allowed."
+        fi
         local _t
         _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
         echo "$_h $_t"

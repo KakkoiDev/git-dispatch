@@ -368,6 +368,87 @@ test_hook_auto_carry_no_override() {
     teardown
 }
 
+test_hook_rejects_duplicate_target_id() {
+    echo "=== test: hook rejects duplicate Dispatch-Target-Id ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "x" > x.txt; git add x.txt
+    # Craft a commit message with two Dispatch-Target-Id trailers
+    if git commit -m "dual target$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject duplicate Dispatch-Target-Id"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects duplicate Dispatch-Target-Id"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_hook_rejects_duplicate_source_keep() {
+    echo "=== test: hook rejects duplicate Dispatch-Source-Keep ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "x" > x.txt; git add x.txt
+    # Craft a commit message with two Dispatch-Source-Keep trailers
+    if git commit -m "dual keep$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Source-Keep: true\nDispatch-Source-Keep: false')" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} hook should reject duplicate Dispatch-Source-Keep"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC} hook rejects duplicate Dispatch-Source-Keep"
+        PASS=$((PASS + 1))
+    fi
+
+    teardown
+}
+
+test_hook_ignores_legacy_target_id() {
+    echo "=== test: hook ignores legacy Target-Id trailer ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "x" > x.txt; git add x.txt
+    # Legacy Target-Id alongside valid Dispatch-Target-Id should be accepted (Target-Id is dead)
+    git commit -m "legacy mix$(printf '\n\nTarget-Id: 9\nDispatch-Target-Id: 3')" -q
+    if [[ $? -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC} hook ignores legacy Target-Id"
+        PASS=$((PASS + 1))
+    fi
+
+    # Verify only Dispatch-Target-Id is read
+    local target_id
+    target_id=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$target_id" "only Dispatch-Target-Id is used (not legacy Target-Id)"
+
+    teardown
+}
+
+test_apply_rejects_duplicate_target_id() {
+    echo "=== test: apply rejects commits with duplicate Dispatch-Target-Id ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    # Bypass the hook by committing directly with git (no hooks)
+    echo "a" > a.txt; git add a.txt
+    git commit --no-verify -m "dual trailer$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply -y 2>&1 || true)
+    assert_contains "$output" "Dispatch-Target-Id trailers" "apply rejects duplicate Dispatch-Target-Id"
+
+    teardown
+}
+
 test_worktree_shares_hooks_via_hookspath() {
     echo "=== test: worktree shares hooks via core.hooksPath ==="
     setup
@@ -3339,6 +3420,10 @@ test_hook_rejects_non_numeric_target_id
 test_hook_allows_decimal_target_id
 test_hook_auto_carry_target_id
 test_hook_auto_carry_no_override
+test_hook_rejects_duplicate_target_id
+test_hook_rejects_duplicate_source_keep
+test_hook_ignores_legacy_target_id
+test_apply_rejects_duplicate_target_id
 test_worktree_shares_hooks_via_hookspath
 test_apply_creates_targets
 test_apply_dry_run
