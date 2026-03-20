@@ -24,7 +24,8 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 |---------|-------------|
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts when args omitted) |
 | `git dispatch init --hooks` | Install hooks only |
-| `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force] [--yes]` | Create/update targets from source |
+| `git dispatch sync [--dry-run] [--resolve]` | Merge base into source and existing targets |
+| `git dispatch apply [<N>] [--dry-run] [--resolve] [--force] [--yes]` | Cherry-pick source commits to targets |
 | `git dispatch apply reset <N\|all> [--yes]` | Regenerate one or all targets from scratch |
 | `git dispatch checkout <N> [--dry-run] [--resolve\|--continue]` | Create integration branch with targets 1..N + "all" commits |
 | `git dispatch checkout source` | Return to source branch |
@@ -191,16 +192,24 @@ All propagation commands support `--resolve`/`--continue` to leave conflicts act
 
 Only files from that target's own commits are checked. Base drift (source behind master) produces cosmetic differences, not false DIVERGED. Uses commit-message traceability to distinguish apply results from independent changes.
 
+## Data Flow
+
+| Command | Direction | What it does |
+|---------|-----------|--------------|
+| `sync` | base -> source + targets | Merge master into source and existing targets |
+| `apply` | source -> targets | Cherry-pick new commits to target branches |
+| `checkin` | checkout -> source | Cherry-pick fixes from checkout back to source |
+
 ## apply vs apply reset
 
 `apply <N>` = incremental (new commits only). Push stays fast-forward.
 `apply reset <N>` = recreate from scratch. Requires `push --force` (history rewritten).
 
-**Force-push trap**: source behind master -> `apply` creates targets with different SHAs (cosmetic divergence) -> later `apply <N>` can't match SHAs, re-applies everything, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
+**Force-push trap**: source behind master -> `apply` creates targets with different SHAs (cosmetic) -> later `apply <N>` can't match, re-applies, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
 
-**Prevention**: always run `apply --base` before `apply` when source is behind master. This merges master into source and targets, keeping SHAs stable so incremental `apply <N>` works and push stays fast-forward.
+**Prevention**: always `sync` before `apply` when source is behind master. Keeps SHAs stable.
 
-**If already in the trap**: `apply reset <N>` then `push <N> --force`. Target branches are generated artifacts, so force-push is safe but should be avoided by using `apply --base` upfront.
+**If already in the trap**: `apply reset <N>` then `push <N> --force`. Safe but avoidable.
 
 ## Troubleshooting
 
@@ -210,13 +219,12 @@ Only files from that target's own commits are checked. Base drift (source behind
 | Target ahead of source | `checkout`, `checkin`, then `apply` |
 | `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
-| Source behind base (cosmetic) | `git dispatch apply --base` |
+| Source behind base | `git dispatch sync` |
 | Stale target (tid reassigned) | `git dispatch apply --force` |
 | Generated file conflict | `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
-| Need upstream changes | `git dispatch apply --base` |
 | All targets need regeneration | `git dispatch apply reset all --yes` |
 | Stuck operation/conflict | `git dispatch abort` |
 | Worktree config collision | Fixed: config is branch-scoped per-worktree |

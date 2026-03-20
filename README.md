@@ -51,7 +51,8 @@ git dispatch push all
 |---------|-------------|
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts when args omitted) |
 | `git dispatch init --hooks` | Install hooks only |
-| `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force] [--yes]` | Create/update target branches from source |
+| `git dispatch sync [--dry-run] [--resolve]` | Merge base into source and existing targets |
+| `git dispatch apply [<N>] [--dry-run] [--resolve] [--force] [--yes]` | Cherry-pick source commits to targets |
 | `git dispatch apply reset <N\|all> [--yes]` | Regenerate one or all targets from scratch |
 | `git dispatch checkout <N> [--dry-run] [--resolve\|--continue]` | Integration branch with targets 1..N |
 | `git dispatch checkout source` | Return to source branch |
@@ -224,7 +225,17 @@ All commands show conflicted files and diff on failure.
 Base drift (source behind master) no longer causes false DIVERGED. When all target commits trace back to source commits by subject, the difference is recognized as cosmetic.
 
 Fix real divergence: use `checkout`/`checkin` flow to reconcile, then `apply`.
-Fix base drift: `git dispatch apply --base` to merge master into source and targets.
+Fix base drift: `git dispatch sync` to merge master into source and targets.
+
+## Data Flow
+
+Each command flows in one direction:
+
+| Command | Direction | What it does |
+|---------|-----------|--------------|
+| `sync` | base -> source + targets | Merge master into source and existing targets |
+| `apply` | source -> targets | Cherry-pick new commits to target branches |
+| `checkin` | checkout -> source | Cherry-pick fixes from checkout back to source |
 
 ## apply vs apply reset
 
@@ -234,28 +245,22 @@ Fix base drift: `git dispatch apply --base` to merge master into source and targ
 
 ### The force-push trap
 
-This chain leads to force-push (which violates the no-force-push design):
-
 1. Source is behind master (base drift)
-2. `apply` creates targets with auto-resolved cherry-picks producing different SHAs (cosmetic divergence)
-3. Later, you add a commit and run `apply <N>` to update one target
-4. Dispatch can't match existing target commits to source (mismatched SHAs) and re-applies everything
-5. Conflicts everywhere (old vs new versions of the same code)
-6. Only fix: `apply reset <N>`, which rewrites history and needs `push --force`
+2. `apply` creates targets with different SHAs (cosmetic divergence)
+3. Later `apply <N>` can't match SHAs, re-applies everything, conflicts
+4. Only fix: `apply reset <N>` -> needs `push --force`
 
 ### How to avoid it
 
-**Always run `apply --base` before `apply` when source is behind master.**
+**Always `sync` before `apply` when source is behind master.**
 
 ```bash
-git dispatch apply --base    # merge master into source + existing targets
+git dispatch sync            # merge master into source + existing targets
 git dispatch apply           # targets created with stable SHAs
 # ... later, add a commit ...
 git dispatch apply 1         # incremental, works, no conflicts
 git dispatch push 1          # fast-forward, no --force needed
 ```
-
-This keeps source up-to-date with master, so cherry-picks produce matching SHAs and incremental `apply <N>` works correctly.
 
 ## Stale Target Detection
 

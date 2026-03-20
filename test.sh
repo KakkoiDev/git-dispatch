@@ -707,8 +707,8 @@ test_apply_create_auto_resolves_with_theirs() {
 
 # ---------- merge tests ----------
 
-test_apply_base_merges_and_applies() {
-    echo "=== test: apply --base merges base into source then applies ==="
+test_sync_merges_and_applies() {
+    echo "=== test: sync merges base into source then apply works ==="
     setup
     create_source
 
@@ -720,7 +720,7 @@ test_apply_base_merges_and_applies() {
     git commit --no-verify -m "advance master" -q
     git checkout source/feature -q
 
-    bash "$DISPATCH" apply --base >/dev/null 2>&1
+    bash "$DISPATCH" sync >/dev/null 2>&1
 
     # Source should have merge commit (base merged in)
     local has_new
@@ -730,21 +730,21 @@ test_apply_base_merges_and_applies() {
     teardown
 }
 
-test_apply_base_up_to_date() {
-    echo "=== test: apply --base when already up to date ==="
+test_sync_up_to_date() {
+    echo "=== test: sync when already up to date ==="
     setup
     create_source
 
     local output
-    output=$(bash "$DISPATCH" apply --base 2>&1)
+    output=$(bash "$DISPATCH" sync 2>&1)
 
     assert_contains "$output" "up to date" "reports already up to date"
 
     teardown
 }
 
-test_apply_base_dry_run() {
-    echo "=== test: apply --base --dry-run ==="
+test_sync_dry_run() {
+    echo "=== test: sync --dry-run ==="
     setup
     create_source
 
@@ -754,7 +754,7 @@ test_apply_base_dry_run() {
     git checkout source/feature -q
 
     local output
-    output=$(bash "$DISPATCH" apply --base --dry-run 2>&1)
+    output=$(bash "$DISPATCH" sync --dry-run 2>&1)
 
     assert_contains "$output" "dry-run" "dry-run shows merge plan"
     assert_contains "$output" "merge" "shows merge action"
@@ -1004,8 +1004,8 @@ test_apply_decimal_target_id() {
 
 # ---------- conflict handling tests ----------
 
-test_apply_base_conflict_shows_details() {
-    echo "=== test: apply --base conflict shows details ==="
+test_sync_conflict_shows_details() {
+    echo "=== test: sync conflict shows details ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1021,7 +1021,7 @@ test_apply_base_conflict_shows_details() {
     git checkout source/feature -q
 
     local output
-    output=$(bash "$DISPATCH" apply --base 2>&1) || true
+    output=$(bash "$DISPATCH" sync 2>&1) || true
 
     assert_contains "$output" "Merge conflict" "shows merge conflict header"
     assert_contains "$output" "file.txt" "shows conflicted filename"
@@ -1865,7 +1865,7 @@ test_apply_warns_base_drift() {
     output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
     assert_contains "$output" "behind" "warns source is behind base"
-    assert_contains "$output" "apply --base" "suggests apply --base command"
+    assert_contains "$output" "git dispatch sync" "suggests sync command"
 
     teardown
 }
@@ -3124,8 +3124,8 @@ test_no_legacy_fallback() {
 
 # ---------- merge-base-into-targets tests ----------
 
-test_apply_base_merges_into_existing_targets() {
-    echo "=== test: apply --base merges base into existing targets ==="
+test_sync_merges_into_existing_targets() {
+    echo "=== test: sync merges base into existing targets ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3150,7 +3150,7 @@ test_apply_base_merges_into_existing_targets() {
     git checkout source/feature -q
 
     # Apply with --base should merge master into source AND targets
-    bash "$DISPATCH" apply --base
+    bash "$DISPATCH" sync
 
     # Verify targets have master's change (via merge, not recreate)
     local t1_master t2_master
@@ -3171,8 +3171,8 @@ test_apply_base_merges_into_existing_targets() {
     teardown
 }
 
-test_apply_base_no_force_push_needed() {
-    echo "=== test: apply --base produces fast-forward-compatible targets ==="
+test_sync_no_force_push_needed() {
+    echo "=== test: sync produces fast-forward-compatible targets ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3195,7 +3195,7 @@ test_apply_base_no_force_push_needed() {
     git -c core.hooksPath= commit -m "master: add m.txt" -q
 
     git checkout source/feature -q
-    bash "$DISPATCH" apply --base
+    bash "$DISPATCH" sync
 
     # Target should be a descendant of the old SHA (no force push needed)
     if git merge-base --is-ancestor "$sha_before" "source/feature-task-1"; then
@@ -3209,8 +3209,8 @@ test_apply_base_no_force_push_needed() {
     teardown
 }
 
-test_apply_base_target_merge_dry_run() {
-    echo "=== test: apply --base --dry-run shows merge plan ==="
+test_sync_target_merge_dry_run() {
+    echo "=== test: sync --dry-run shows merge plan ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3231,15 +3231,15 @@ test_apply_base_target_merge_dry_run() {
     git checkout source/feature -q
 
     local output
-    output=$(bash "$DISPATCH" apply --base --dry-run 2>&1)
+    output=$(bash "$DISPATCH" sync --dry-run 2>&1)
 
     assert_contains "$output" "merge" "dry-run shows merge plan for targets"
 
     teardown
 }
 
-test_apply_base_skips_up_to_date_targets() {
-    echo "=== test: apply --base skips targets already up to date ==="
+test_sync_skips_up_to_date_targets() {
+    echo "=== test: sync skips targets already up to date ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3253,15 +3253,15 @@ test_apply_base_skips_up_to_date_targets() {
 
     # Apply --base with no base changes (source already up to date)
     local output
-    output=$(bash "$DISPATCH" apply --base 2>&1)
+    output=$(bash "$DISPATCH" sync 2>&1)
 
-    assert_contains "$output" "already up to date" "no merge when base unchanged"
+    assert_contains "$output" "Already in sync" "no merge when base unchanged"
 
     teardown
 }
 
-test_apply_base_conflict_on_target_merge() {
-    echo "=== test: apply --base conflict on target merge ==="
+test_sync_conflict_on_target_merge() {
+    echo "=== test: sync conflict on target merge ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3271,34 +3271,40 @@ test_apply_base_conflict_on_target_merge() {
     git add a.txt
     git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
 
+    # Create a second file so source merge doesn't conflict on a.txt
+    echo "b" > b.txt; git add b.txt
+    git commit -m "add b" --trailer "Dispatch-Target-Id=1" -q
+
     bash "$DISPATCH" apply
 
-    # Master changes same file
+    # Directly modify target's a.txt (simulating a checkin that diverged)
+    local wt_path
+    wt_path=$(mktemp -d)
+    git worktree add -q "$wt_path" "source/feature-task-1"
+    echo "target-modified-a" > "$wt_path/a.txt"
+    git -C "$wt_path" add a.txt
+    git -C "$wt_path" commit --no-verify -m "target-only change" -q
+    git worktree remove --force "$wt_path"
+    git worktree prune
+
+    # Master also changes a.txt
     git checkout master -q
-    echo "master-a" > a.txt
-    git add a.txt
+    echo "master-a" > a.txt; git add a.txt
     git -c core.hooksPath= commit -m "master: change a.txt" -q
-
-    # Source merges master (resolve conflict)
     git checkout source/feature -q
-    git -c core.hooksPath= merge master --no-edit 2>/dev/null || {
-        echo "source-merged" > a.txt
-        git add a.txt
-        git -c core.hooksPath= commit --no-edit -q
-    }
 
-    # Now apply --base should try to merge master into target
-    # Target has "source-a", master has "master-a" - conflict
+    # Sync: source merge is clean (source doesn't conflict with master on a.txt)
+    # but target merge conflicts (target has "target-modified-a", master has "master-a")
     local output
-    output=$(bash "$DISPATCH" apply --base 2>&1) || true
+    output=$(bash "$DISPATCH" sync 2>&1) || true
 
     assert_contains "$output" "Merge conflict" "detects conflict merging base into target"
 
     teardown
 }
 
-test_apply_base_new_target_created_normally() {
-    echo "=== test: apply --base creates new targets from base ==="
+test_sync_does_not_create_new_targets() {
+    echo "=== test: sync does not create new targets ==="
     setup
 
     git checkout -b source/feature master -q
@@ -3310,27 +3316,25 @@ test_apply_base_new_target_created_normally() {
 
     bash "$DISPATCH" apply
 
-    # Advance master
-    git checkout master -q
-    echo "m" > m.txt
-    git add m.txt
-    git -c core.hooksPath= commit -m "master change" -q
-
-    # Add new target on source
-    git checkout source/feature -q
+    # Add new target on source (not yet applied)
     echo "c" > c.txt
     git add c.txt
     git commit -m "add c" --trailer "Dispatch-Target-Id=2" -q
 
-    bash "$DISPATCH" apply --base
+    # Advance master
+    git checkout master -q
+    echo "m" > m.txt; git add m.txt
+    git -c core.hooksPath= commit -m "master change" -q
+    git checkout source/feature -q
 
-    # New target should be created from updated base
-    local t2_m t2_c
-    t2_m=$(git show "source/feature-task-2:m.txt" 2>/dev/null || echo "MISSING")
-    t2_c=$(git show "source/feature-task-2:c.txt" 2>/dev/null || echo "MISSING")
+    bash "$DISPATCH" sync
 
-    assert_eq "m" "$t2_m" "new target has master content"
-    assert_eq "c" "$t2_c" "new target has source content"
+    # Sync should NOT create target-2 (only apply creates targets)
+    assert_branch_not_exists "source/feature-task-2" "sync does not create new targets"
+    # But target-1 should have the master merge
+    local t1_m
+    t1_m=$(git show "source/feature-task-1:m.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "m" "$t1_m" "existing target-1 has master content via merge"
 
     teardown
 }
@@ -3521,6 +3525,58 @@ test_continue_alias_for_resolve() {
     teardown
 }
 
+test_apply_base_flag_removed() {
+    echo "=== test: apply --base gives helpful error ==="
+    setup
+    create_source
+
+    local output
+    output=$(bash "$DISPATCH" apply --base 2>&1) || true
+    assert_contains "$output" "git dispatch sync" "apply --base suggests sync"
+
+    teardown
+}
+
+test_sync_blocked_during_checkout() {
+    echo "=== test: sync blocked during active checkout ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    bash "$DISPATCH" checkout 4 >/dev/null 2>&1
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" sync 2>&1) || true
+    assert_contains "$output" "Cannot sync while checkout is active" "sync blocked during checkout"
+
+    teardown
+}
+
+test_sync_warns_source_behind_in_apply() {
+    echo "=== test: apply warns when source is behind base ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "new" > new.txt; git add new.txt
+    git commit --no-verify -m "New base commit" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_contains "$output" "behind" "warns source is behind"
+    assert_contains "$output" "git dispatch sync" "suggests sync command"
+
+    teardown
+}
+
 test_spinner_no_output_in_pipe() {
     echo "=== test: spinner suppressed in non-interactive mode ==="
     setup
@@ -3569,9 +3625,9 @@ test_apply_new_target_mid_range
 test_apply_idempotent
 test_apply_conflict_aborts
 test_apply_create_auto_resolves_with_theirs
-test_apply_base_merges_and_applies
-test_apply_base_up_to_date
-test_apply_base_dry_run
+test_sync_merges_and_applies
+test_sync_up_to_date
+test_sync_dry_run
 test_push_dry_run_all
 test_push_dry_run_single
 test_push_force_dry_run
@@ -3585,7 +3641,7 @@ test_reset_cleans_up
 test_help
 test_install_chmod
 test_apply_decimal_target_id
-test_apply_base_conflict_shows_details
+test_sync_conflict_shows_details
 test_status_shows_diverged
 test_status_no_false_diverged_base_drift
 test_status_semantic_source_to_target
@@ -3660,18 +3716,21 @@ test_worktree_config_isolation
 test_reset_preserves_other_session_hooks
 test_reset_removes_hooks_when_last_session
 test_no_legacy_fallback
-test_apply_base_merges_into_existing_targets
-test_apply_base_no_force_push_needed
-test_apply_base_target_merge_dry_run
-test_apply_base_skips_up_to_date_targets
-test_apply_base_conflict_on_target_merge
-test_apply_base_new_target_created_normally
+test_sync_merges_into_existing_targets
+test_sync_no_force_push_needed
+test_sync_target_merge_dry_run
+test_sync_skips_up_to_date_targets
+test_sync_conflict_on_target_merge
+test_sync_does_not_create_new_targets
 test_apply_reset_does_not_cascade
 test_apply_reset_all
 test_apply_reset_all_includes_orphaned
 test_abort_cleans_cherry_pick_worktree
 test_abort_nothing_to_abort
 test_continue_alias_for_resolve
+test_apply_base_flag_removed
+test_sync_blocked_during_checkout
+test_sync_warns_source_behind_in_apply
 test_spinner_no_output_in_pipe
 
 echo ""
