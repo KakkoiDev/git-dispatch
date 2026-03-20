@@ -1965,6 +1965,8 @@ _checkout_create() {
     local dispatch_base
     dispatch_base=$(_get_config base)
     [[ -n "$dispatch_base" ]] || die "Not initialized. Run: git dispatch init"
+    # Reject if on a checkout branch
+    [[ "$source" != dispatch-checkout/* ]] || die "Already on a checkout branch. Run: git dispatch checkout clear  first, or: git dispatch checkout source"
     # Verify we're on source (has dispatch config and is not a target)
     local cur_source
     cur_source=$(git config "branch.${source}.dispatchsource" 2>/dev/null || true)

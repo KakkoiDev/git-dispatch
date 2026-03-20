@@ -2140,7 +2140,7 @@ test_checkout_errors_if_exists() {
 
     local output
     output=$(bash "$DISPATCH" checkout 4 2>&1) || true
-    assert_contains "$output" "already exists" "errors when checkout branch exists"
+    assert_contains "$output" "Already on a checkout branch" "errors when checkout branch exists"
 
     teardown
 }
