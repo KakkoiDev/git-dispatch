@@ -52,16 +52,16 @@ git dispatch push all
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts when args omitted) |
 | `git dispatch init --hooks` | Install hooks only |
 | `git dispatch apply [<N>] [--base] [--dry-run] [--resolve] [--force] [-y]` | Create/update target branches from source |
-| `git dispatch apply reset <N\|all> [--force] [-y]` | Regenerate one or all targets from scratch |
+| `git dispatch apply reset <N\|all> [-y]` | Regenerate one or all targets from scratch |
 | `git dispatch checkout <N> [--dry-run] [--resolve\|--continue]` | Integration branch with targets 1..N |
 | `git dispatch checkout source` | Return to source branch |
-| `git dispatch checkout clear [--force]` | Remove checkout branch |
+| `git dispatch checkout clear [--force]` | Remove checkout branch (--force discards unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
-| `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
+| `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
 | `git dispatch status` | Show sync state, divergence |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up |
-| `git dispatch reset [--force] [-y]` | Delete targets and config |
+| `git dispatch reset [-y]` | Delete targets and config |
 
 ## Trailers
 
@@ -202,8 +202,8 @@ Checkout branches: `dispatch-checkout/<source>/<N>`
 |------|---------|
 | `--dry-run` | Show plan, make no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
-| `--force` | Override safety checks |
-| `-y`, `--yes` | Auto-confirm prompts (for scripting) |
+| `-y`, `--yes` | Skip confirmation prompts (required for scripting/CI) |
+| `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
 
 ## Conflict Handling
 

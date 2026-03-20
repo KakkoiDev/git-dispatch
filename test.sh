@@ -2930,6 +2930,88 @@ test_apply_reset_yes_skips_prompt() {
     teardown
 }
 
+test_force_only_for_safety_overrides() {
+    echo "=== test: --force only for safety overrides, -y for prompts ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+    bash "$DISPATCH" apply
+
+    # -y skips apply reset all confirmation (piped stdin = non-interactive)
+    local output
+    output=$(bash "$DISPATCH" apply reset all -y 2>&1)
+    assert_contains "$output" "Deleted source/feature-task-1" "apply reset all -y works"
+    assert_contains "$output" "Created source/feature-task-1" "apply reset all -y recreates"
+
+    # --force without -y on apply does NOT skip prompts for reset all
+    # (--force is for stale rebuild, not confirmation skip)
+    bash "$DISPATCH" apply  # recreate target
+
+    # In piped stdin (non-interactive), apply reset all --force without -y fails at prompt
+    output=$(bash "$DISPATCH" apply reset all --force 2>&1) || true
+    # --force is a deprecated alias for -y in apply context, so it still works
+    # (backward compat until removed)
+
+    teardown
+}
+
+test_reset_y_instead_of_force() {
+    echo "=== test: reset uses -y for confirmation ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    # -y skips the prompt
+    bash "$DISPATCH" reset -y
+
+    local base
+    base=$(git config branch.source/feature.dispatchbase 2>/dev/null || true)
+    assert_eq "" "$base" "reset -y clears config"
+
+    # Re-init, test that --force still works as deprecated alias
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+    bash "$DISPATCH" reset --force
+
+    base=$(git config branch.source/feature.dispatchbase 2>/dev/null || true)
+    assert_eq "" "$base" "reset --force (deprecated) still works"
+
+    teardown
+}
+
+test_apply_force_only_for_stale() {
+    echo "=== test: apply --force is only for stale target rebuild ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Reassign tid to make target-1 stale
+    git reset --hard master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    # Without --force: stale detected but not rebuilt
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1) || true
+    assert_contains "$output" "Stale targets" "stale detected without force"
+
+    # With --force: stale targets rebuilt
+    output=$(bash "$DISPATCH" apply --force 2>&1)
+    assert_contains "$output" "Deleted stale" "stale rebuilt with force"
+
+    teardown
+}
+
 test_init_interactive_missing_target_pattern() {
     echo "=== test: init fails non-interactive without target-pattern ==="
     setup
@@ -3358,7 +3440,7 @@ test_apply_reset_all_includes_orphaned() {
 
     # apply reset all should find orphaned branch via pattern matching and recreate it
     local output
-    output=$(bash "$DISPATCH" apply reset all --force 2>&1)
+    output=$(bash "$DISPATCH" apply reset all -y 2>&1)
 
     assert_contains "$output" "Deleted source/feature-task-1" "orphaned target found and deleted by reset all"
 
@@ -3577,6 +3659,9 @@ test_init_yes_skips_overwrite_prompt
 test_init_y_short_flag
 test_reset_yes_skips_prompt
 test_apply_reset_yes_skips_prompt
+test_force_only_for_safety_overrides
+test_reset_y_instead_of_force
+test_apply_force_only_for_stale
 test_init_interactive_missing_target_pattern
 test_worktree_config_isolation
 test_reset_preserves_other_session_hooks

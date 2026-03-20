@@ -781,7 +781,8 @@ cmd_init() {
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   shift 2 ;;  # deprecated, ignored
-            --force|-y|--yes) DISPATCH_YES=true; shift ;;
+            -y|--yes) DISPATCH_YES=true; shift ;;
+            --force) DISPATCH_YES=true; shift ;;  # deprecated alias for -y
             -*)       die "Unknown flag: $1" ;;
             *)        die "Unexpected argument: $1" ;;
         esac
@@ -1166,13 +1167,11 @@ cmd_apply() {
 
             [[ ${#reset_branches[@]} -gt 0 ]] || die "No target branches found to reset"
 
-            if ! $force; then
-                echo -e "${CYAN}Will reset ${#reset_branches[@]} target(s):${NC}"
-                for _rb in "${reset_branches[@]}"; do
-                    echo "  $_rb"
-                done
-                _confirm "Proceed?" || { echo "Aborted."; return 0; }
-            fi
+            echo -e "${CYAN}Will reset ${#reset_branches[@]} target(s):${NC}"
+            for _rb in "${reset_branches[@]}"; do
+                echo "  $_rb"
+            done
+            _confirm "Proceed?" || { echo "Aborted."; return 0; }
         else
             local _rb
             _rb=$(_target_branch_name "$reset_target")
@@ -1190,7 +1189,7 @@ cmd_apply() {
             fi
 
             # Check for target-only commits that would be lost
-            if ! $force && [[ "$reset_target" != "all" ]]; then
+            if [[ "$reset_target" != "all" ]]; then
                 local _target_only=0
                 while IFS= read -r _rh; do
                     [[ -n "$_rh" ]] || continue
@@ -1692,11 +1691,9 @@ cmd_status() {
 cmd_reset() {
     _require_init
 
-    local force=false
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --force) force=true; shift ;;
+            --force) DISPATCH_YES=true; shift ;;  # deprecated alias for -y
             -y|--yes) DISPATCH_YES=true; shift ;;
             -*)      die "Unknown flag: $1" ;;
             *)       die "Unexpected argument: $1" ;;
@@ -1718,10 +1715,8 @@ cmd_reset() {
     fi
     echo "  - hooks and core.hooksPath config"
 
-    if ! $force; then
-        echo ""
-        _confirm "Proceed?" || { echo "Aborted."; exit 0; }
-    fi
+    echo ""
+    _confirm "Proceed?" || { echo "Aborted."; exit 0; }
 
     local cur
     cur=$(current_branch)
@@ -2417,10 +2412,12 @@ FLAGS
               Leave conflict active in a temp worktree for manual resolution.
               The worktree path is printed. After resolving, run the shown
               git command, then: git dispatch continue
-  --force     Override safety checks (apply: rebuild stale targets)
-  -y, --yes   Auto-confirm prompts (for scripting). Applies to: init, apply,
-              reset. In non-interactive mode (piped stdin), prompts fail
-              unless --yes is passed.
+  -y, --yes   Skip all confirmation prompts. Required in non-interactive mode
+              (piped stdin). Applies to: init, apply, apply reset, reset.
+  --force     Override safety checks. Meaning depends on command:
+                apply --force       Rebuild stale targets (tid reassigned)
+                push --force        Push with --force-with-lease
+                checkout clear --force  Discard unpicked commits
 
 TRAILERS
   Dispatch-Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "all"
