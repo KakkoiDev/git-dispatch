@@ -2111,6 +2111,11 @@ _checkout_create() {
 
     _leave_branch
 
+    # Store the checkout creation point (everything after this is "new work")
+    local checkout_head
+    checkout_head=$(git rev-parse "$checkout_branch")
+    git config "branch.${checkout_branch}.dispatchcheckoutbase" "$checkout_head"
+
     info "Checkout ready: $checkout_branch ($merged targets merged)"
 
     # Switch to the checkout branch
@@ -2183,25 +2188,33 @@ _checkout_clear() {
 
     DISPATCH_SOURCE="$source"  # set cache for _get_config
 
-    # Check for unpicked commits
+    # Check for unpicked commits (authored after checkout creation)
     if ! $force; then
-        local base
-        base=$(_get_config base)
-        # Count commits on checkout that aren't on source (by patch-id)
-        local checkout_count source_pids unpicked=0
-        source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
-            git show "$h" 2>/dev/null
-        done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+        local checkout_base
+        checkout_base=$(git config "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true)
 
-        while IFS= read -r ch; do
-            [[ -z "$ch" ]] && continue
-            local cpid
-            cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
-            [[ -z "$cpid" ]] && continue
-            if ! echo "$source_pids" | grep -Fxq "$cpid"; then
-                unpicked=$((unpicked + 1))
-            fi
-        done < <(git log --format="%H" "$base..$checkout_branch")
+        local unpicked=0
+        if [[ -n "$checkout_base" ]]; then
+            unpicked=$(git log --no-merges --oneline "$checkout_base..$checkout_branch" 2>/dev/null | wc -l | tr -d ' ')
+        else
+            # Fallback: patch-id matching for old checkouts
+            local base
+            base=$(_get_config base)
+            local source_pids
+            source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
+                git show "$h" 2>/dev/null
+            done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+
+            while IFS= read -r ch; do
+                [[ -z "$ch" ]] && continue
+                local cpid
+                cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+                [[ -z "$cpid" ]] && continue
+                if ! echo "$source_pids" | grep -Fxq "$cpid"; then
+                    unpicked=$((unpicked + 1))
+                fi
+            done < <(git log --format="%H" "$base..$checkout_branch")
+        fi
 
         if [[ $unpicked -gt 0 ]]; then
             warn "$unpicked unpicked commit(s) on $checkout_branch"
@@ -2218,7 +2231,8 @@ _checkout_clear() {
         git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
     fi
 
-    # Delete branch
+    # Delete branch and config
+    git config --unset "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true
     git branch -D "$checkout_branch" -q 2>/dev/null
     git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
     git worktree prune 2>/dev/null || true
@@ -2266,24 +2280,34 @@ cmd_checkin() {
     base=$(_get_config base)
     [[ -n "$base" ]] || die "Cannot determine base branch."
 
-    # Build patch-id set for source commits
+    # Find new commits: only those authored AFTER checkout was created
     _spinner_start "Comparing commits..."
-    local source_pids
-    source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
-        git show "$h" 2>/dev/null
-    done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+    local checkout_base
+    checkout_base=$(git config "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true)
 
-    # Find new commits on checkout (not in source by patch-id)
     local -a new_hashes=()
-    while IFS= read -r ch; do
-        [[ -z "$ch" ]] && continue
-        local cpid
-        cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
-        [[ -z "$cpid" ]] && continue
-        if ! echo "$source_pids" | grep -Fxq "$cpid"; then
-            new_hashes+=("$ch")
-        fi
-    done < <(git log --reverse --format="%H" "$base..$checkout_branch")
+    if [[ -n "$checkout_base" ]]; then
+        # Fast path: checkout base SHA recorded, only look at commits after it
+        while IFS= read -r ch; do
+            [[ -n "$ch" ]] && new_hashes+=("$ch")
+        done < <(git log --no-merges --reverse --format="%H" "$checkout_base..$checkout_branch")
+    else
+        # Fallback for checkouts created before this fix: patch-id matching
+        local source_pids
+        source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
+            git show "$h" 2>/dev/null
+        done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+
+        while IFS= read -r ch; do
+            [[ -z "$ch" ]] && continue
+            local cpid
+            cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+            [[ -z "$cpid" ]] && continue
+            if ! echo "$source_pids" | grep -Fxq "$cpid"; then
+                new_hashes+=("$ch")
+            fi
+        done < <(git log --reverse --format="%H" "$base..$checkout_branch")
+    fi
     _spinner_stop
 
     if [[ ${#new_hashes[@]} -eq 0 ]]; then

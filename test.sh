@@ -2651,6 +2651,42 @@ test_checkin_then_apply_lifecycle() {
     teardown
 }
 
+test_checkin_only_picks_new_commits() {
+    echo "=== test: checkin only picks commits authored after checkout ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "feature a$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "feature b$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Checkout: merges target-1 (which has 2 cherry-picked commits)
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    git checkout "dispatch-checkout/source/feature/1" -q
+
+    # Add ONE new commit on the checkout branch
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "hotfix$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Checkin should pick ONLY the 1 new commit, not the 2 original target commits
+    local output
+    output=$(bash "$DISPATCH" checkin 2>&1)
+
+    assert_contains "$output" "1 commit" "checkin picks only new commit"
+    assert_not_contains "$output" "Conflict" "no conflicts from replayed originals"
+
+    # Verify the fix is on source
+    local fix_content
+    fix_content=$(git show "source/feature:fix.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "fix" "$fix_content" "fix cherry-picked to source"
+
+    teardown
+}
+
 test_checkout_full_lifecycle() {
     echo "=== test: checkout full lifecycle ==="
     setup
@@ -3700,6 +3736,7 @@ test_checkout_dry_run
 test_checkin_skips_original_commits
 test_checkin_source_keep_auto_resolves_conflict
 test_checkin_then_apply_lifecycle
+test_checkin_only_picks_new_commits
 test_checkout_full_lifecycle
 test_checkout_does_not_affect_targets
 test_continue_resumes_remaining_queue
