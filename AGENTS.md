@@ -191,12 +191,20 @@ All propagation commands support `--resolve`/`--continue` to leave conflicts act
 
 Only files from that target's own commits are checked. Base drift (source behind master) produces cosmetic differences, not false DIVERGED. Uses commit-message traceability to distinguish apply results from independent changes.
 
+## apply vs apply reset
+
+`apply <N>` = incremental update (cherry-picks only new commits).
+`apply reset <N>` = recreate from scratch (deletes target, replays all commits).
+
+When `apply <N>` conflicts on diverged/cosmetic targets, it means dispatch can't match existing target commits to source (mismatched SHAs from base drift or previous reset). It re-applies everything and hits old-vs-new conflicts. Always use `apply reset <N>` in that case.
+
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
 | Target behind source | `git dispatch apply` |
 | Target ahead of source | `checkout`, `checkin`, then `apply` |
+| `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base (cosmetic) | `git dispatch apply --base` |
 | Stale target (tid reassigned) | `git dispatch apply --force` |
@@ -205,6 +213,6 @@ Only files from that target's own commits are checked. Base drift (source behind
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
 | Need upstream changes | `git dispatch apply --base` |
-| All targets need regeneration | `git dispatch apply reset all` |
+| All targets need regeneration | `git dispatch apply reset all --yes` |
 | Stuck operation/conflict | `git dispatch abort` |
 | Worktree config collision | Fixed: config is branch-scoped per-worktree |

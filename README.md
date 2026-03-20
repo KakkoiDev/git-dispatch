@@ -226,6 +226,17 @@ Base drift (source behind master) no longer causes false DIVERGED. When all targ
 Fix real divergence: use `checkout`/`checkin` flow to reconcile, then `apply`.
 Fix base drift: `git dispatch apply --base` to merge master into source and targets.
 
+## apply vs apply reset
+
+`apply <N>` is **incremental**: it cherry-picks only new commits not yet on the target. Use it when you added commits to source and want to update an existing target.
+
+`apply reset <N>` **recreates from scratch**: deletes the target and replays all commits. Use it when:
+- Target is DIVERGED or cosmetic (SHAs don't match after base drift)
+- `apply <N>` conflicts because it can't match existing target commits to source
+- You changed commit order or amended commits on source
+
+Rule of thumb: if `apply <N>` conflicts on files that should already be correct, use `apply reset <N>` instead.
+
 ## Stale Target Detection
 
 When a commit's `Dispatch-Target-Id` is changed on source (e.g., during interactive rebase), `apply` detects stale targets via patch-id matching:
