@@ -193,10 +193,14 @@ Only files from that target's own commits are checked. Base drift (source behind
 
 ## apply vs apply reset
 
-`apply <N>` = incremental update (cherry-picks only new commits).
-`apply reset <N>` = recreate from scratch (deletes target, replays all commits).
+`apply <N>` = incremental (new commits only). Push stays fast-forward.
+`apply reset <N>` = recreate from scratch. Requires `push --force` (history rewritten).
 
-When `apply <N>` conflicts on diverged/cosmetic targets, it means dispatch can't match existing target commits to source (mismatched SHAs from base drift or previous reset). It re-applies everything and hits old-vs-new conflicts. Always use `apply reset <N>` in that case.
+**Force-push trap**: source behind master -> `apply` creates targets with different SHAs (cosmetic divergence) -> later `apply <N>` can't match SHAs, re-applies everything, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
+
+**Prevention**: always run `apply --base` before `apply` when source is behind master. This merges master into source and targets, keeping SHAs stable so incremental `apply <N>` works and push stays fast-forward.
+
+**If already in the trap**: `apply reset <N>` then `push <N> --force`. Target branches are generated artifacts, so force-push is safe but should be avoided by using `apply --base` upfront.
 
 ## Troubleshooting
 

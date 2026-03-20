@@ -159,10 +159,12 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 
 ## apply vs apply reset
 
-`apply <N>` is incremental: cherry-picks only new commits not yet on the target.
-`apply reset <N>` recreates from scratch: deletes the target and replays all commits.
+`apply <N>` = incremental (new commits only). Push stays fast-forward.
+`apply reset <N>` = recreate from scratch. Requires `push --force` (history rewritten).
 
-When `apply <N>` conflicts on files that should already be correct (old vs new version of the same code), the target has mismatched SHAs from base drift or a previous `apply reset all`. Dispatch can't match existing target commits to source commits and re-applies from scratch, hitting conflicts. Fix: use `apply reset <N>` instead.
+**Force-push trap**: source behind master -> `apply` creates targets with different SHAs (cosmetic) -> later `apply <N>` can't match SHAs, re-applies everything, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
+
+**Prevention**: always `apply --base` before `apply` when source is behind master. This merges master into source and targets, keeping SHAs stable so incremental `apply <N>` works and push stays fast-forward.
 
 ## Common Fixes
 

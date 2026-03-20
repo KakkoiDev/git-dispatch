@@ -228,14 +228,34 @@ Fix base drift: `git dispatch apply --base` to merge master into source and targ
 
 ## apply vs apply reset
 
-`apply <N>` is **incremental**: it cherry-picks only new commits not yet on the target. Use it when you added commits to source and want to update an existing target.
+`apply <N>` is **incremental**: cherry-picks only new commits not yet on the target. Push stays fast-forward.
 
-`apply reset <N>` **recreates from scratch**: deletes the target and replays all commits. Use it when:
-- Target is DIVERGED or cosmetic (SHAs don't match after base drift)
-- `apply <N>` conflicts because it can't match existing target commits to source
-- You changed commit order or amended commits on source
+`apply reset <N>` **recreates from scratch**: deletes the target and replays all commits. Requires `push --force` afterward since history is rewritten.
 
-Rule of thumb: if `apply <N>` conflicts on files that should already be correct, use `apply reset <N>` instead.
+### The force-push trap
+
+This chain leads to force-push (which violates the no-force-push design):
+
+1. Source is behind master (base drift)
+2. `apply` creates targets with auto-resolved cherry-picks producing different SHAs (cosmetic divergence)
+3. Later, you add a commit and run `apply <N>` to update one target
+4. Dispatch can't match existing target commits to source (mismatched SHAs) and re-applies everything
+5. Conflicts everywhere (old vs new versions of the same code)
+6. Only fix: `apply reset <N>`, which rewrites history and needs `push --force`
+
+### How to avoid it
+
+**Always run `apply --base` before `apply` when source is behind master.**
+
+```bash
+git dispatch apply --base    # merge master into source + existing targets
+git dispatch apply           # targets created with stable SHAs
+# ... later, add a commit ...
+git dispatch apply 1         # incremental, works, no conflicts
+git dispatch push 1          # fast-forward, no --force needed
+```
+
+This keeps source up-to-date with master, so cherry-picks produce matching SHAs and incremental `apply <N>` works correctly.
 
 ## Stale Target Detection
 
