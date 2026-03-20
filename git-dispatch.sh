@@ -781,7 +781,7 @@ cmd_init() {
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   shift 2 ;;  # deprecated, ignored
-            -y|--yes) DISPATCH_YES=true; shift ;;
+            --yes) DISPATCH_YES=true; shift ;;
             --force) DISPATCH_YES=true; shift ;;  # deprecated alias for -y
             -*)       die "Unknown flag: $1" ;;
             *)        die "Unexpected argument: $1" ;;
@@ -858,7 +858,7 @@ cmd_apply() {
             --resolve|--continue) resolve=true; shift ;;
             --force)    force=true; shift ;;
             --base)     merge_base=true; shift ;;
-            -y|--yes)   DISPATCH_YES=true; shift ;;
+            --yes)      DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          positional+=("$1"); shift ;;
         esac
@@ -1694,7 +1694,7 @@ cmd_reset() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) DISPATCH_YES=true; shift ;;  # deprecated alias for -y
-            -y|--yes) DISPATCH_YES=true; shift ;;
+            --yes) DISPATCH_YES=true; shift ;;
             -*)      die "Unknown flag: $1" ;;
             *)       die "Unexpected argument: $1" ;;
         esac
@@ -2412,7 +2412,7 @@ FLAGS
               Leave conflict active in a temp worktree for manual resolution.
               The worktree path is printed. After resolving, run the shown
               git command, then: git dispatch continue
-  -y, --yes   Skip all confirmation prompts. Required in non-interactive mode
+  --yes       Skip all confirmation prompts. Required in non-interactive mode
               (piped stdin). Applies to: init, apply, apply reset, reset.
   --force     Override safety checks. Meaning depends on command:
                 apply --force       Rebuild stale targets (tid reassigned)

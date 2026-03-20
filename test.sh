@@ -443,7 +443,7 @@ test_apply_rejects_duplicate_target_id() {
     git commit --no-verify -m "dual trailer$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" -q
 
     local output
-    output=$(bash "$DISPATCH" apply -y 2>&1 || true)
+    output=$(bash "$DISPATCH" apply --yes 2>&1 || true)
     assert_contains "$output" "Dispatch-Target-Id trailers" "apply rejects duplicate Dispatch-Target-Id"
 
     teardown
@@ -2868,20 +2868,16 @@ test_init_yes_skips_overwrite_prompt() {
     teardown
 }
 
-test_init_y_short_flag() {
-    echo "=== test: init -y short flag ==="
+test_short_flags_rejected() {
+    echo "=== test: -y short flag rejected (long flags only) ==="
     setup
 
     git checkout -b source/feature master -q
 
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
-
-    # Re-init with -y should not prompt
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" -y
-
-    local base
-    base=$(git config branch.source/feature.dispatchbase)
-    assert_eq "master" "$base" "config updated with -y"
+    # -y should be rejected as unknown flag
+    local output
+    output=$(bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" -y 2>&1) || true
+    assert_contains "$output" "Unknown flag" "-y rejected on init"
 
     teardown
 }
@@ -2931,7 +2927,7 @@ test_apply_reset_yes_skips_prompt() {
 }
 
 test_force_only_for_safety_overrides() {
-    echo "=== test: --force only for safety overrides, -y for prompts ==="
+    echo "=== test: --force only for safety overrides, --yes for prompts ==="
     setup
 
     git checkout -b source/feature master -q
@@ -2941,37 +2937,34 @@ test_force_only_for_safety_overrides() {
     git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
     bash "$DISPATCH" apply
 
-    # -y skips apply reset all confirmation (piped stdin = non-interactive)
+    # --yes skips apply reset all confirmation (piped stdin = non-interactive)
     local output
-    output=$(bash "$DISPATCH" apply reset all -y 2>&1)
-    assert_contains "$output" "Deleted source/feature-task-1" "apply reset all -y works"
-    assert_contains "$output" "Created source/feature-task-1" "apply reset all -y recreates"
+    output=$(bash "$DISPATCH" apply reset all --yes 2>&1)
+    assert_contains "$output" "Deleted source/feature-task-1" "apply reset all --yes works"
+    assert_contains "$output" "Created source/feature-task-1" "apply reset all --yes recreates"
 
-    # --force without -y on apply does NOT skip prompts for reset all
-    # (--force is for stale rebuild, not confirmation skip)
+    # --force on apply is for stale rebuild, not confirmation skip
     bash "$DISPATCH" apply  # recreate target
 
-    # In piped stdin (non-interactive), apply reset all --force without -y fails at prompt
+    # --force is a deprecated alias for --yes, so it still works
     output=$(bash "$DISPATCH" apply reset all --force 2>&1) || true
-    # --force is a deprecated alias for -y in apply context, so it still works
-    # (backward compat until removed)
 
     teardown
 }
 
 test_reset_y_instead_of_force() {
-    echo "=== test: reset uses -y for confirmation ==="
+    echo "=== test: reset uses --yes for confirmation ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
-    # -y skips the prompt
-    bash "$DISPATCH" reset -y
+    # --yes skips the prompt
+    bash "$DISPATCH" reset --yes
 
     local base
     base=$(git config branch.source/feature.dispatchbase 2>/dev/null || true)
-    assert_eq "" "$base" "reset -y clears config"
+    assert_eq "" "$base" "reset --yes clears config"
 
     # Re-init, test that --force still works as deprecated alias
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
@@ -3440,7 +3433,7 @@ test_apply_reset_all_includes_orphaned() {
 
     # apply reset all should find orphaned branch via pattern matching and recreate it
     local output
-    output=$(bash "$DISPATCH" apply reset all -y 2>&1)
+    output=$(bash "$DISPATCH" apply reset all --yes 2>&1)
 
     assert_contains "$output" "Deleted source/feature-task-1" "orphaned target found and deleted by reset all"
 
@@ -3656,7 +3649,7 @@ test_checkout_does_not_affect_targets
 test_continue_resumes_remaining_queue
 test_continue_resumes_apply_queue
 test_init_yes_skips_overwrite_prompt
-test_init_y_short_flag
+test_short_flags_rejected
 test_reset_yes_skips_prompt
 test_apply_reset_yes_skips_prompt
 test_force_only_for_safety_overrides
