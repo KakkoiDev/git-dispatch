@@ -218,10 +218,13 @@ All commands show conflicted files and diff on failure.
 ## Divergence Detection
 
 `status` tags targets:
-- `(DIVERGED)` - file content differs. Changes may be lost.
-- `(cosmetic)` - same content, different SHAs. Safe to ignore.
+- `(DIVERGED)` - target has commits not traceable to source. Someone pushed directly to the target.
+- `(cosmetic)` - same logical changes, different SHAs or base drift. Safe to ignore.
 
-Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
+Base drift (source behind master) no longer causes false DIVERGED. When all target commits trace back to source commits by subject, the difference is recognized as cosmetic.
+
+Fix real divergence: use `checkout`/`checkin` flow to reconcile, then `apply`.
+Fix base drift: `git dispatch apply --base` to merge master into source and targets.
 
 ## Stale Target Detection
 

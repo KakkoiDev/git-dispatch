@@ -1060,6 +1060,51 @@ test_status_shows_diverged() {
     teardown
 }
 
+test_status_no_false_diverged_base_drift() {
+    echo "=== test: no false DIVERGED when source is behind base ==="
+    setup
+
+    # Create a 20-line file (enough separation for clean region-based merge)
+    for i in $(seq -w 1 20); do echo "line$i" >> shared.txt; done
+    git add shared.txt
+    git commit -m "Initial shared file" -q
+
+    # Advance master at line15 (far from source changes at line05)
+    sed -i.bak 's/line15/line15-master/' shared.txt && rm shared.txt.bak
+    git add shared.txt
+    git commit -m "Master change at line15" -q
+
+    # Source branch from old master (before the advance), creating base drift
+    git checkout -b source/feature HEAD~1 -q
+
+    # Two DTI=1 commits both modifying line05 (triggers re-cherry-pick conflict in status)
+    sed -i.bak 's/line05/line05-v1/' shared.txt && rm shared.txt.bak
+    git add shared.txt
+    git commit -m "Feature change v1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    sed -i.bak 's/line05-v1/line05-v2/' shared.txt && rm shared.txt.bak
+    git add shared.txt
+    git commit -m "Feature change v2$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Apply: cherry-picks onto current master (clean merge, different regions)
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Verify target has merged content (both feature and master changes)
+    local target_content
+    target_content=$(git show source/feature-1:shared.txt)
+    assert_contains "$target_content" "line05-v2" "target has feature change"
+    assert_contains "$target_content" "line15-master" "target has master change (base drift)"
+
+    # Status should NOT show DIVERGED - the diff is from base drift, not real divergence
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_not_contains "$status_output" "DIVERGED" "no false diverged after base drift"
+
+    teardown
+}
+
 test_status_semantic_source_to_target() {
     echo "=== test: status uses semantic check for source->target ==="
     setup
@@ -3401,6 +3446,23 @@ test_continue_alias_for_resolve() {
     teardown
 }
 
+test_spinner_no_output_in_pipe() {
+    echo "=== test: spinner suppressed in non-interactive mode ==="
+    setup
+    create_source
+
+    # When stdout/stderr are piped, spinner text should not appear
+    local apply_output
+    apply_output=$(bash "$DISPATCH" apply 2>&1)
+    assert_not_contains "$apply_output" "Refreshing base" "no spinner text in piped apply"
+
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1)
+    assert_not_contains "$status_output" "Analyzing" "no spinner text in piped status"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -3450,6 +3512,7 @@ test_install_chmod
 test_apply_decimal_target_id
 test_apply_base_conflict_shows_details
 test_status_shows_diverged
+test_status_no_false_diverged_base_drift
 test_status_semantic_source_to_target
 test_apply_reset_regenerates_target
 test_apply_single_target
@@ -3531,6 +3594,7 @@ test_apply_reset_all_includes_orphaned
 test_abort_cleans_cherry_pick_worktree
 test_abort_nothing_to_abort
 test_continue_alias_for_resolve
+test_spinner_no_output_in_pipe
 
 echo ""
 echo "======================="

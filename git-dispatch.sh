@@ -20,6 +20,33 @@ die() { echo -e "${RED}Error: $*${NC}" >&2; exit 1; }
 info() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}$*${NC}"; }
 
+# Spinner for long-running operations (stderr, so stdout stays clean for piping)
+_SPINNER_PID=""
+_spinner_start() {
+    local msg="${1:-Processing...}"
+    [[ ! -t 2 ]] && return 0  # no spinner in non-interactive (pipes, tests)
+    (
+        trap 'exit 0' TERM
+        local frames=('/' '-' '\' '|')
+        local i=0
+        while true; do
+            printf '\r  %s %s ' "${frames[$((i % 4))]}" "$msg" >&2
+            i=$((i + 1))
+            sleep 0.15 || exit 0
+        done
+    ) &
+    _SPINNER_PID=$!
+    disown "$_SPINNER_PID" 2>/dev/null || true
+}
+_spinner_stop() {
+    if [[ -n "$_SPINNER_PID" ]]; then
+        kill "$_SPINNER_PID" 2>/dev/null || true
+        wait "$_SPINNER_PID" 2>/dev/null || true
+        _SPINNER_PID=""
+    fi
+    [[ -t 2 ]] && printf '\r\033[K' >&2 || true
+}
+
 DISPATCH_YES=false
 
 _confirm() {
@@ -403,14 +430,41 @@ _target_id_files() {
 # Only checks files from commits with the matching Dispatch-Target-Id (avoids false
 # positives from generated files or other tasks' changes in independent mode).
 # Returns 0 if content actually differs, 1 if same content (different commits only).
+#
+# When files differ, uses commit-message traceability to distinguish base drift
+# (source behind master) from real divergence. Cherry-pick preserves the original
+# commit subject, so if every target commit matches a source commit by subject,
+# the difference is from base drift / auto-conflict resolution, not independent changes.
 _target_content_diverged() {
-    local source="$1" target_branch="$2" base="$3" tid="$4"
+    local source="$1" target_branch="$2" base="$3" tid="$4" commit_file="${5:-}"
     local -a target_files_arr=()
     while IFS= read -r f; do
         [[ -n "$f" ]] && target_files_arr+=("$f")
     done < <(_target_id_files "$base" "$target_branch" "$tid" | sort -u)
     [[ ${#target_files_arr[@]} -eq 0 ]] && return 1
     git diff --quiet "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null && return 1
+
+    # Files differ. Check if all target commits trace back to source commits
+    # by subject line. If they do, the diff is from base drift, not real divergence.
+    if [[ -n "$commit_file" && -f "$commit_file" ]]; then
+        local source_subjects=""
+        while read -r _hash _ctid; do
+            [[ "$_ctid" == "$tid" || "$_ctid" == "all" ]] || continue
+            local _subj
+            _subj=$(git log -1 --format="%s" "$_hash" 2>/dev/null)
+            [[ -n "$_subj" ]] && source_subjects+="${_subj}"$'\n'
+        done < "$commit_file"
+
+        if [[ -n "$source_subjects" ]]; then
+            local all_traced=true
+            while IFS= read -r _tsubj; do
+                [[ -n "$_tsubj" ]] || continue
+                echo "$source_subjects" | grep -qxF "$_tsubj" || { all_traced=false; break; }
+            done < <(git log --no-merges --format="%s" "$base..$target_branch" 2>/dev/null)
+            $all_traced && return 1  # all matched = cosmetic (base drift)
+        fi
+    fi
+
     return 0
 }
 
@@ -828,7 +882,9 @@ cmd_apply() {
     [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
 
     # Ensure base ref is up-to-date before creating/updating targets (best-effort)
+    _spinner_start "Refreshing base..."
     _refresh_base "$base" || true
+    _spinner_stop
 
     # --base: merge base into source first
     if $merge_base; then
@@ -1360,10 +1416,13 @@ cmd_push() {
         if $dry_run; then
             echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $branch"
         else
+            _spinner_start "Pushing $branch..."
             local push_out
             if push_out=$(git push "${push_args[@]}" "$branch" 2>&1); then
+                _spinner_stop
                 info "  Pushed $branch"
             else
+                _spinner_stop
                 local reason
                 reason=$(printf '%s\n' "$push_out" | sed '/^[[:space:]]*$/d' | tail -n 1)
                 [[ -z "$reason" ]] && reason="unknown error"
@@ -1398,7 +1457,7 @@ cmd_status() {
     local status_commit_file status_map_file
     status_commit_file=$(mktemp)
     status_map_file=$(mktemp)
-    trap "rm -f '$status_commit_file' '$status_map_file'" RETURN
+    trap "_spinner_stop; rm -f '$status_commit_file' '$status_map_file'" RETURN
     while IFS= read -r _line; do
         local _h="${_line%% *}" _t="${_line#* }"
         _t=$(echo "$_t" | tr -d '[:space:]')
@@ -1429,6 +1488,10 @@ cmd_status() {
         bn=$(_target_branch_name "$tid")
         (( ${#bn} > max_branch )) && max_branch=${#bn}
     done
+
+    _spinner_start "Analyzing ${#unique_tids[@]} target(s)..."
+    local _status_outfile
+    _status_outfile=$(mktemp)
 
     for tid in "${unique_tids[@]}"; do
         local branch_name
@@ -1564,7 +1627,7 @@ cmd_status() {
 
             local diverge_tag=""
             if [[ $source_to_target -gt 0 && $target_to_source -gt 0 ]]; then
-                if _target_content_diverged "$source" "$branch_name" "$base" "$tid"; then
+                if _target_content_diverged "$source" "$branch_name" "$base" "$tid" "$status_commit_file"; then
                     diverge_tag=" ${RED}(DIVERGED)${NC}"
                     has_diverged=true
                 else
@@ -1575,7 +1638,11 @@ cmd_status() {
 
             printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${diverge_tag}${pr_suffix}\n" "$tid" "$branch_name"
         fi
-    done
+    done > "$_status_outfile"
+
+    _spinner_stop
+    cat "$_status_outfile"
+    rm -f "$_status_outfile"
 
     # Detect orphaned targets (tid no longer in source)
     local -a orphaned_branches=() orphaned_tids=()
@@ -1970,7 +2037,9 @@ _checkout_create() {
         local tb="${merge_branches[$i]}"
         local ttid="${unique_tids[$i]}"
 
+        _spinner_start "Merging target $ttid..."
         if ! "${gcmd[@]}" merge "$tb" --no-edit 2>/dev/null; then
+            _spinner_stop
             if $resolve; then
                 echo ""
                 warn "Conflict merging target $ttid ($tb) into checkout"
@@ -2001,6 +2070,7 @@ _checkout_create() {
             git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
             die "Conflict merging target $ttid ($tb). Re-run with --resolve to resolve manually."
         fi
+        _spinner_stop
         merged=$((merged + 1))
     done
 
@@ -2162,6 +2232,7 @@ cmd_checkin() {
     [[ -n "$base" ]] || die "Cannot determine base branch."
 
     # Build patch-id set for source commits
+    _spinner_start "Comparing commits..."
     local source_pids
     source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
         git show "$h" 2>/dev/null
@@ -2178,6 +2249,7 @@ cmd_checkin() {
             new_hashes+=("$ch")
         fi
     done < <(git log --reverse --format="%H" "$base..$checkout_branch")
+    _spinner_stop
 
     if [[ ${#new_hashes[@]} -eq 0 ]]; then
         info "No new commits to pick."

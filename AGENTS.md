@@ -186,12 +186,10 @@ All propagation commands support `--resolve`/`--continue` to leave conflicts act
 ## Divergence Detection
 
 `status` tags:
-- `(DIVERGED)` - file content differs (changes may be lost)
-- `(cosmetic)` - same content, different SHAs (safe to ignore)
+- `(DIVERGED)` - target has commits not traceable to source (e.g., manual push to target)
+- `(cosmetic)` - same logical changes, different SHAs or base drift (safe to ignore)
 
-Only files from that target's own commits are checked.
-
-Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
+Only files from that target's own commits are checked. Base drift (source behind master) produces cosmetic differences, not false DIVERGED. Uses commit-message traceability to distinguish apply results from independent changes.
 
 ## Troubleshooting
 
@@ -199,7 +197,8 @@ Fix: use `checkout`/`checkin` flow to reconcile, then `apply`.
 |---------|-----|
 | Target behind source | `git dispatch apply` |
 | Target ahead of source | `checkout`, `checkin`, then `apply` |
-| DIVERGED | `checkout`, reconcile, `checkin`, `apply` |
+| DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
+| Source behind base (cosmetic) | `git dispatch apply --base` |
 | Stale target (tid reassigned) | `git dispatch apply --force` |
 | Generated file conflict | `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
