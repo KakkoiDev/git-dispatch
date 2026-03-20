@@ -416,6 +416,55 @@ _commit_semantically_in_branch() {
     return 1
 }
 
+# Find source commits not yet on a target branch.
+# Primary: subject-line matching (handles cosmetic divergence from different cherry-pick contexts).
+# Fallback: patch-id matching (handles amended subjects with identical diffs).
+# Args: base target_branch hash1 [hash2 ...]
+# Output: one hash per line for commits needing cherry-pick
+_find_new_commits_for_target() {
+    local base="$1" target_branch="$2"
+    shift 2
+    [[ $# -eq 0 ]] && return 0
+
+    # Collect target subjects in one pass
+    local target_subjects
+    target_subjects=$(git log --no-merges --format="%s" "$base..$target_branch" 2>/dev/null) || true
+
+    # If target has no commits, all source commits are new
+    if [[ -z "$target_subjects" ]]; then
+        printf '%s\n' "$@"
+        return 0
+    fi
+
+    # Collect target patch-ids in one batched pass (fallback)
+    local target_pids
+    target_pids=$(git log --no-merges --format="%H" "$base..$target_branch" 2>/dev/null | \
+        while read -r _h; do [[ -n "$_h" ]] && git show "$_h" 2>/dev/null; done | \
+        git patch-id --stable 2>/dev/null | awk '{print $1}') || true
+
+    local hash
+    for hash in "$@"; do
+        local subject
+        subject=$(git log -1 --format="%s" "$hash")
+
+        # Primary: subject-line match (handles cosmetic divergence)
+        if [[ -n "$subject" ]] && printf '%s\n' "$target_subjects" | grep -Fxq "$subject"; then
+            continue
+        fi
+
+        # Fallback: patch-id match (handles amended subjects)
+        if [[ -n "$target_pids" ]]; then
+            local spid
+            spid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+            if [[ -n "$spid" ]] && printf '%s\n' "$target_pids" | grep -Fxq "$spid"; then
+                continue
+            fi
+        fi
+
+        echo "$hash"
+    done
+}
+
 # Get files touched by commits with a specific Dispatch-Target-Id on a branch.
 _target_id_files() {
     local base="$1" branch="$2" tid="$3"
@@ -1300,18 +1349,11 @@ cmd_apply() {
 
         if $dry_run; then
             if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
-                # Check for new commits
+                # Check for new commits (subject-line matching with patch-id fallback)
                 local new_count=0
-                local cherry_out
-                cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
-                while IFS= read -r line; do
-                    [[ "$line" == +* ]] || continue
-                    local hash
-                    hash=$(echo "$line" | awk '{print $2}')
-                    local ctid
-                    ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-                    [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && new_count=$((new_count + 1))
-                done <<< "$cherry_out"
+                while IFS= read -r _nh; do
+                    [[ -n "$_nh" ]] && new_count=$((new_count + 1))
+                done < <(_find_new_commits_for_target "$base" "$branch_name" "${hashes[@]}")
                 if [[ $new_count -gt 0 ]]; then
                     echo -e "  ${YELLOW}cherry-pick${NC} $new_count commit(s) to target $tid  $branch_name"
                 else
@@ -1334,18 +1376,11 @@ cmd_apply() {
                 continue
             fi
 
-            # Target exists locally - cherry-pick new commits (including "all" commits)
+            # Target exists locally - find new commits (subject-line matching with patch-id fallback)
             local -a new_hashes=()
-            local cherry_out
-            cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
-            while IFS= read -r line; do
-                [[ "$line" == +* ]] || continue
-                local hash
-                hash=$(echo "$line" | awk '{print $2}')
-                local ctid
-                ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
-                [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && new_hashes+=("$hash")
-            done <<< "$cherry_out"
+            while IFS= read -r _nh; do
+                [[ -n "$_nh" ]] && new_hashes+=("$_nh")
+            done < <(_find_new_commits_for_target "$base" "$branch_name" "${hashes[@]}")
 
             if [[ ${#new_hashes[@]} -gt 0 ]]; then
                 # Detect suspected source rebase: if "new" commits >= existing target commits,
@@ -1560,18 +1595,15 @@ cmd_status() {
         # Count pending source -> target
         # Two-phase: cheap history check, then semantic filtering for candidates
         local source_to_target=0
-        local cherry_out
         local -a source_to_target_candidates=()
-        cherry_out=$(git cherry -v "$branch_name" "$source" 2>/dev/null) || true
-        while IFS= read -r line; do
-            [[ "$line" == +* ]] || continue
-            local hash
-            hash=$(echo "$line" | awk '{print $2}')
-            # Look up tid from cached commit file instead of per-commit git log
-            local ctid
-            ctid=$(awk -v h="$hash" '$1 == h {print $2; exit}' "$status_commit_file")
-            [[ "$ctid" == "$tid" || "$ctid" == "all" ]] && source_to_target_candidates+=("$hash")
-        done <<< "$cherry_out"
+        # Collect source hashes for this target from cached commit file
+        local -a _status_hashes=()
+        while IFS= read -r _sh; do
+            [[ -n "$_sh" ]] && _status_hashes+=("$_sh")
+        done < <(awk -v t="$tid" '$2 == t || $2 == "all" {print $1}' "$status_commit_file")
+        while IFS= read -r _nh; do
+            [[ -n "$_nh" ]] && source_to_target_candidates+=("$_nh")
+        done < <(_find_new_commits_for_target "$base" "$branch_name" "${_status_hashes[@]}")
 
         if [[ ${#source_to_target_candidates[@]} -gt 0 ]]; then
             # Fast path: check if file content matches for all files touched by candidate commits
