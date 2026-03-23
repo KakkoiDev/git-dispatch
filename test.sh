@@ -1555,8 +1555,121 @@ test_apply_stale_dry_run() {
     teardown
 }
 
+test_apply_force_resets_partial_reassignment() {
+    echo "=== test: apply --force resets target with partially reassigned commits ==="
+    setup
 
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
 
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Verify target-1 has 2 commits
+    local count
+    count=$(git log --oneline master..target-1 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "target-1 has 2 commits before reassignment"
+
+    # Reassign Feature B from tid 1 to tid 2 (rewrite source)
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    # apply --force should reset target-1 and create target-2
+    local output
+    output=$(bash "$DISPATCH" apply --force 2>&1)
+
+    assert_contains "$output" "reassigned" "reports reassigned commits"
+    assert_contains "$output" "Reset target-1" "resets target-1"
+
+    # target-1 should now have only 1 commit (Feature A)
+    count=$(git log --oneline master..target-1 | wc -l | tr -d ' ')
+    assert_eq "1" "$count" "target-1 rebuilt with 1 commit"
+
+    # target-2 should be created with Feature B
+    assert_branch_exists "target-2" "target-2 created"
+    count=$(git log --oneline master..target-2 | wc -l | tr -d ' ')
+    assert_eq "1" "$count" "target-2 has 1 commit"
+
+    teardown
+}
+
+test_apply_no_force_ignores_partial_reassignment() {
+    echo "=== test: apply without --force does not reset partial reassignment ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Reassign Feature B from tid 1 to tid 2
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    # apply without --force should still work (incremental), target-1 keeps old commits
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1)
+
+    # target-1 still has 2 commits (old cherry-pick not removed)
+    local count
+    count=$(git log --oneline master..target-1 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "target-1 unchanged without --force"
+
+    # target-2 created
+    assert_branch_exists "target-2" "target-2 created"
+
+    teardown
+}
+
+test_apply_dry_run_shows_partial_reassignment() {
+    echo "=== test: apply --dry-run reports partial reassignment ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Reassign Feature B from tid 1 to tid 2
+    git reset --hard master -q
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1)
+
+    assert_contains "$output" "reassigned" "shows reassigned warning"
+    assert_contains "$output" "would reset" "shows would reset"
+
+    # Branches untouched
+    local count
+    count=$(git log --oneline master..target-1 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "target-1 not modified in dry-run"
+
+    teardown
+}
 
 
 
@@ -3835,6 +3948,9 @@ test_apply_force_rebuilds_stale
 test_status_shows_stale
 test_apply_stale_warns_target_only_commits
 test_apply_stale_dry_run
+test_apply_force_resets_partial_reassignment
+test_apply_no_force_ignores_partial_reassignment
+test_apply_dry_run_shows_partial_reassignment
 test_apply_from_target_branch
 test_apply_skips_base_ancestor_commits
 test_target_id_all_hook_accepts

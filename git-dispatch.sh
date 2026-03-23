@@ -1163,7 +1163,7 @@ cmd_apply() {
         etid=$(_extract_tid_from_branch "$existing")
         [[ -n "$etid" ]] || continue
 
-        # Skip targets whose tid is still in source
+        # Skip targets whose tid is still in source (handled separately below)
         local still_active=false
         for t in "${target_ids[@]}"; do
             [[ "$t" == "$etid" ]] && { still_active=true; break; }
@@ -1230,6 +1230,61 @@ cmd_apply() {
         else
             warn "Run: git dispatch apply --force  to rebuild stale targets."
             exit 1
+        fi
+    fi
+
+    # --- Partial reassignment: active targets with commits now targeting a different tid ---
+    # Only matters with --force (auto-reset) or --dry-run (report).
+    if $force || $dry_run; then
+        local -a partial_stale_branches=()
+        while IFS= read -r existing; do
+            [[ -n "$existing" ]] || continue
+            local etid
+            etid=$(_extract_tid_from_branch "$existing")
+            [[ -n "$etid" ]] || continue
+
+            # Only check targets whose tid IS still in source
+            local is_active=false
+            for t in "${target_ids[@]}"; do
+                [[ "$t" == "$etid" ]] && { is_active=true; break; }
+            done
+            $is_active || continue
+
+            local stale_out
+            stale_out=$(_find_stale_commits "$existing" "$etid" "$base" "$patch_map_file") || true
+            [[ -n "$stale_out" ]] && partial_stale_branches+=("$existing")
+        done < <(find_dispatch_targets "$source")
+
+        if [[ ${#partial_stale_branches[@]} -gt 0 ]]; then
+            echo ""
+            warn "Targets with reassigned commits:"
+            for sb in "${partial_stale_branches[@]}"; do
+                echo -e "  ${YELLOW}${sb}${NC}"
+            done
+            echo ""
+            if $dry_run; then
+                for sb in "${partial_stale_branches[@]}"; do
+                    echo -e "  ${YELLOW}would reset${NC} ${sb}"
+                done
+                echo ""
+            elif $force; then
+                for sb in "${partial_stale_branches[@]}"; do
+                    local wt_path
+                    wt_path=$(worktree_for_branch "$sb")
+                    if [[ -n "$wt_path" ]]; then
+                        if ! git -C "$wt_path" diff --quiet 2>/dev/null || ! git -C "$wt_path" diff --cached --quiet 2>/dev/null; then
+                            warn "  Worktree $wt_path has uncommitted changes. Stashing before removal."
+                            git -C "$wt_path" stash push --include-untracked --quiet -m "git-dispatch: auto-stash before worktree removal" 2>/dev/null || true
+                        fi
+                        git worktree remove --force "$wt_path" 2>/dev/null || true
+                        git worktree prune 2>/dev/null || true
+                    fi
+                    git config --unset "branch.${sb}.dispatchsource" 2>/dev/null || true
+                    git branch -D "$sb" 2>/dev/null || true
+                    info "  Reset ${sb} (will regenerate)"
+                done
+                echo ""
+            fi
         fi
     fi
 
