@@ -2307,6 +2307,77 @@ test_checkout_clear_force_with_unpicked() {
     teardown
 }
 
+test_checkout_clear_removes_all_branches() {
+    echo "=== test: checkout clear removes all checkout branches at once ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Create two checkout branches (must return to source between them)
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+
+    assert_branch_exists "dispatch-checkout/source/feature/1" "checkout 1 exists"
+    assert_branch_exists "dispatch-checkout/source/feature/2" "checkout 2 exists"
+
+    # Single clear should remove both
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1)
+    assert_not_contains "$output" "No checkout branch" "found branches to clear"
+    assert_contains "$output" "dispatch-checkout/source/feature/1" "reports clearing checkout 1"
+    assert_contains "$output" "dispatch-checkout/source/feature/2" "reports clearing checkout 2"
+
+    assert_branch_not_exists "dispatch-checkout/source/feature/1" "checkout 1 deleted"
+    assert_branch_not_exists "dispatch-checkout/source/feature/2" "checkout 2 deleted"
+
+    teardown
+}
+
+test_checkout_clear_all_with_one_unpicked() {
+    echo "=== test: checkout clear clears safe branches, warns about unpicked ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+
+    # Add unpicked commit to checkout 1
+    git checkout "dispatch-checkout/source/feature/1" -q
+    echo "new" > new.txt; git add new.txt
+    git commit -m "new commit$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1) || true
+
+    # Checkout 1 should be preserved (unpicked), checkout 2 should be cleared
+    assert_contains "$output" "unpicked" "warns about unpicked on checkout 1"
+    assert_contains "$output" "Cleared: dispatch-checkout/source/feature/2" "clears checkout 2"
+    assert_branch_exists "dispatch-checkout/source/feature/1" "checkout 1 preserved"
+    assert_branch_not_exists "dispatch-checkout/source/feature/2" "checkout 2 deleted"
+
+    teardown
+}
+
 test_checkout_clear_no_checkout_exists() {
     echo "=== test: checkout clear when no checkout exists ==="
     setup
@@ -3793,6 +3864,8 @@ test_checkout_source_noop_on_source
 test_checkout_clear_removes_branch
 test_checkout_clear_warns_unpicked_commits
 test_checkout_clear_force_with_unpicked
+test_checkout_clear_removes_all_branches
+test_checkout_clear_all_with_one_unpicked
 test_checkout_clear_no_checkout_exists
 test_checkout_clear_from_checkout_branch
 test_checkin_picks_new_commits_to_source

@@ -2217,7 +2217,7 @@ _checkout_source() {
 
 _checkout_clear() {
     local force="$1"
-    local source checkout_branch
+    local source
 
     local cur
     cur=$(current_branch)
@@ -2226,71 +2226,87 @@ _checkout_clear() {
     if [[ "$cur" == dispatch-checkout/* ]]; then
         local rest="${cur#dispatch-checkout/}"
         source="${rest%/*}"
-        checkout_branch="$cur"
         git checkout "$source" -q
         info "Switched to source: $source"
     else
         source=$(resolve_source "")
-        checkout_branch=$(_find_checkout_branch "$source")
     fi
 
-    if [[ -z "$checkout_branch" ]]; then
+    # Collect all checkout branches for this source
+    local -a all_checkouts=()
+    while IFS= read -r b; do
+        [[ -n "$b" ]] && all_checkouts+=("$b")
+    done < <(git for-each-ref --format='%(refname:short)' "refs/heads/dispatch-checkout/${source}/" 2>/dev/null)
+
+    if [[ ${#all_checkouts[@]} -eq 0 ]]; then
         info "No checkout branch found."
         return
     fi
 
     DISPATCH_SOURCE="$source"  # set cache for _get_config
 
-    # Check for unpicked commits (authored after checkout creation)
-    if ! $force; then
-        local checkout_base
-        checkout_base=$(git config "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true)
+    local had_failure=false
+    local checkout_branch
+    for checkout_branch in "${all_checkouts[@]}"; do
+        # Check for unpicked commits (authored after checkout creation)
+        if ! $force; then
+            local checkout_base
+            checkout_base=$(git config "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true)
 
-        local unpicked=0
-        if [[ -n "$checkout_base" ]]; then
-            unpicked=$(git log --no-merges --oneline "$checkout_base..$checkout_branch" 2>/dev/null | wc -l | tr -d ' ')
-        else
-            # Fallback: patch-id matching for old checkouts
-            local base
-            base=$(_get_config base)
-            local source_pids
-            source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
-                git show "$h" 2>/dev/null
-            done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+            local unpicked=0
+            if [[ -n "$checkout_base" ]]; then
+                unpicked=$(git log --no-merges --oneline "$checkout_base..$checkout_branch" 2>/dev/null | wc -l | tr -d ' ')
+            else
+                # Fallback: patch-id matching for old checkouts
+                local base
+                base=$(_get_config base)
+                local source_pids
+                source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
+                    git show "$h" 2>/dev/null
+                done | git patch-id --stable 2>/dev/null | awk '{print $1}')
 
-            while IFS= read -r ch; do
-                [[ -z "$ch" ]] && continue
-                local cpid
-                cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
-                [[ -z "$cpid" ]] && continue
-                if ! echo "$source_pids" | grep -Fxq "$cpid"; then
-                    unpicked=$((unpicked + 1))
-                fi
-            done < <(git log --format="%H" "$base..$checkout_branch")
+                while IFS= read -r ch; do
+                    [[ -z "$ch" ]] && continue
+                    local cpid
+                    cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+                    [[ -z "$cpid" ]] && continue
+                    if ! echo "$source_pids" | grep -Fxq "$cpid"; then
+                        unpicked=$((unpicked + 1))
+                    fi
+                done < <(git log --format="%H" "$base..$checkout_branch")
+            fi
+
+            if [[ $unpicked -gt 0 ]]; then
+                warn "$unpicked unpicked commit(s) on $checkout_branch"
+                warn "Run: git dispatch checkin  (to pick back to source)"
+                warn "  or: git dispatch checkout clear --force  (to discard)"
+                had_failure=true
+                continue
+            fi
         fi
 
-        if [[ $unpicked -gt 0 ]]; then
-            warn "$unpicked unpicked commit(s) on $checkout_branch"
-            warn "Run: git dispatch checkin  (to pick back to source)"
-            warn "  or: git dispatch checkout clear --force  (to discard)"
-            return 1
+        # Remove worktree if exists
+        local wt_path
+        wt_path=$(worktree_for_branch "$checkout_branch")
+        if [[ -n "$wt_path" ]]; then
+            git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
         fi
-    fi
 
-    # Remove worktree if exists
-    local wt_path
-    wt_path=$(worktree_for_branch "$checkout_branch")
-    if [[ -n "$wt_path" ]]; then
-        git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
-    fi
+        # Delete branch and config
+        git config --unset "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true
+        git branch -D "$checkout_branch" -q 2>/dev/null
+        git worktree prune 2>/dev/null || true
 
-    # Delete branch and config
-    git config --unset "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true
-    git branch -D "$checkout_branch" -q 2>/dev/null
-    git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
-    git worktree prune 2>/dev/null || true
+        info "Cleared: $checkout_branch"
+    done
 
-    info "Cleared: $checkout_branch"
+    # Clean up source config once all are gone
+    local remaining
+    remaining=$(git for-each-ref --format='%(refname:short)' "refs/heads/dispatch-checkout/${source}/" 2>/dev/null | head -1)
+    [[ -n "$remaining" ]] || git config --unset "branch.${source}.dispatchcheckoutbranch" 2>/dev/null || true
+
+    $had_failure && return 1
+    return 0
 }
 
 # ---------- checkin ----------
