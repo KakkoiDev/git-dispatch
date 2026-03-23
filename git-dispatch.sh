@@ -1645,6 +1645,10 @@ cmd_status() {
             if git merge-base --is-ancestor "$hash" "$base" 2>/dev/null; then
                 continue
             fi
+            # Skip Source-Keep commits - generated files, expected to drift
+            local _sk
+            _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+            [[ "$_sk" == "true" ]] && continue
             target_to_source_candidates+=("$hash")
         done <<< "$cherry_out"
 
