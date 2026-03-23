@@ -1509,7 +1509,7 @@ cmd_push() {
 cmd_status() {
     _require_init
 
-    local base target_pattern source has_stale=false has_diverged=false has_cosmetic=false
+    local base target_pattern source has_stale=false has_diverged=false
     base=$(_get_config base)
     target_pattern=$(_get_config targetPattern)
     source=$(resolve_source "")
@@ -1686,24 +1686,21 @@ cmd_status() {
             [[ -z "$_utid" || ( "$_utid" != "$tid" && "$_utid" != "all" ) ]] && untracked=$((untracked + 1))
         done < <(git log --no-merges --format="%H %(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$branch_name" 2>/dev/null)
 
-        if [[ $source_to_target -eq 0 && $target_to_source -eq 0 && $untracked -eq 0 ]]; then
+        # Check for real content divergence when target has non-matching commits
+        local diverge_tag=""
+        if [[ $target_to_source -gt 0 ]]; then
+            if _target_content_diverged "$source" "$branch_name" "$base" "$tid" "$status_commit_file"; then
+                diverge_tag=" ${RED}(DIVERGED - checkout, checkin, apply)${NC}"
+                has_diverged=true
+            fi
+        fi
+
+        if [[ $source_to_target -eq 0 && $untracked -eq 0 && -z "$diverge_tag" ]]; then
             printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
         else
             local status_parts=""
             [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
-            [[ $target_to_source -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${target_to_source} ahead"
             [[ $untracked -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${CYAN}${untracked} untracked${NC}"
-
-            local diverge_tag=""
-            if [[ $source_to_target -gt 0 && $target_to_source -gt 0 ]]; then
-                if _target_content_diverged "$source" "$branch_name" "$base" "$tid" "$status_commit_file"; then
-                    diverge_tag=" ${RED}(DIVERGED)${NC}"
-                    has_diverged=true
-                else
-                    diverge_tag=" (cosmetic)"
-                    has_cosmetic=true
-                fi
-            fi
 
             printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${diverge_tag}${pr_suffix}\n" "$tid" "$branch_name"
         fi
@@ -1741,13 +1738,8 @@ cmd_status() {
 
     if [[ "${has_diverged:-}" == "true" ]]; then
         echo ""
-        warn "Diverged targets have different file content than source."
-    fi
-    if [[ "${has_cosmetic:-}" == "true" ]]; then
-        echo ""
-        echo "  \"cosmetic\" = same file content, different commit SHAs (normal after"
-        echo "  conflict resolution). Safe to ignore, or fix by regenerating the target:"
-        echo "  git dispatch apply reset <id>"
+        warn "Diverged targets have file content that differs from source."
+        echo "  Fix: git dispatch checkout <id>, edit on source, git dispatch checkin, git dispatch apply"
     fi
     if [[ "${has_stale:-}" == "true" ]]; then
         echo ""

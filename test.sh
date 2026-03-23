@@ -1055,7 +1055,7 @@ test_status_shows_diverged() {
     output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     assert_contains "$output" "DIVERGED" "status shows DIVERGED tag"
-    assert_contains "$output" "Diverged targets have different file content" "status shows diverged hint"
+    assert_contains "$output" "Diverged targets have file content that differs from source" "status shows diverged hint"
 
     teardown
 }
