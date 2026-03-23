@@ -3630,6 +3630,76 @@ test_spinner_no_output_in_pipe() {
     teardown
 }
 
+test_status_no_false_diverged_source_keep() {
+    echo "=== test: Source-Keep commits do not trigger false DIVERGED ==="
+    setup
+
+    echo "base-gen" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Base generated file" -q
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Source adds a Source-Keep commit (generated file regen)
+    echo "source-gen-v2" > generated.txt; git add generated.txt
+    git commit -m "Regen files$(printf '\n\nDispatch-Target-Id: 1\nDispatch-Source-Keep: true')" -q
+
+    # Apply the Source-Keep commit to target
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Manually diverge the generated file on target (simulates regen on different base)
+    git checkout target-1 -q
+    echo "target-gen-v2" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Target regen diverges" -q
+    git checkout source -q
+
+    # Status should NOT show DIVERGED - only Source-Keep files differ
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_not_contains "$status_output" "DIVERGED" "no false diverged from Source-Keep drift"
+
+    teardown
+}
+
+test_status_diverged_non_source_keep_still_detected() {
+    echo "=== test: real divergence still detected alongside Source-Keep ==="
+    setup
+
+    echo "base-gen" > generated.txt; git add generated.txt
+    git commit --no-verify -m "Base generated file" -q
+
+    git checkout -b source master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Source adds a Source-Keep commit
+    echo "source-gen-v2" > generated.txt; git add generated.txt
+    git commit -m "Regen files$(printf '\n\nDispatch-Target-Id: 1\nDispatch-Source-Keep: true')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Diverge target with BOTH generated AND real files
+    git checkout target-1 -q
+    echo "target-gen-v2" > generated.txt; git add generated.txt
+    echo "rogue-change" > a.txt; git add a.txt
+    git commit --no-verify -m "Target diverges for real" -q
+    git checkout source -q
+
+    # Status SHOULD show DIVERGED - real file (a.txt) differs
+    local status_output
+    status_output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    assert_contains "$status_output" "DIVERGED" "real divergence still detected"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -3769,6 +3839,8 @@ test_apply_base_flag_removed
 test_sync_blocked_during_checkout
 test_sync_warns_source_behind_in_apply
 test_spinner_no_output_in_pipe
+test_status_no_false_diverged_source_keep
+test_status_diverged_non_source_keep_still_detected
 
 echo ""
 echo "======================="

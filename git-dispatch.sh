@@ -491,6 +491,31 @@ _target_content_diverged() {
         [[ -n "$f" ]] && target_files_arr+=("$f")
     done < <(_target_id_files "$base" "$target_branch" "$tid" | sort -u)
     [[ ${#target_files_arr[@]} -eq 0 ]] && return 1
+
+    # Collect files from Source-Keep commits on target - these are generated
+    # files expected to drift and should not count as divergence evidence.
+    local -a sk_files=()
+    while IFS= read -r hash; do
+        local _sk
+        _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+        [[ "$_sk" == "true" ]] || continue
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && sk_files+=("$f")
+        done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
+    done < <(git log --format="%H" "$base..$target_branch" 2>/dev/null)
+
+    if [[ ${#sk_files[@]} -gt 0 ]]; then
+        # Subtract Source-Keep files from the check set
+        local -a filtered=()
+        local sk_set
+        sk_set=$(printf '%s\n' "${sk_files[@]}" | sort -u)
+        for f in "${target_files_arr[@]}"; do
+            echo "$sk_set" | grep -qxF "$f" || filtered+=("$f")
+        done
+        target_files_arr=("${filtered[@]+"${filtered[@]}"}")
+        [[ ${#target_files_arr[@]} -eq 0 ]] && return 1
+    fi
+
     git diff --quiet "$source" "$target_branch" -- "${target_files_arr[@]}" 2>/dev/null && return 1
 
     # Files differ. Check if all target commits trace back to source commits
