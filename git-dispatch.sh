@@ -2536,6 +2536,191 @@ cmd_abort() {
     fi
 }
 
+# ---------- retarget ----------
+
+cmd_retarget() {
+    _require_init
+    _acquire_lock
+
+    local dry_run=false auto_apply=false
+    local -a positional=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)  dry_run=true; shift ;;
+            --apply)    auto_apply=true; shift ;;
+            -*)         die "Unknown flag: $1" ;;
+            *)          positional+=("$1"); shift ;;
+        esac
+    done
+
+    [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]"
+    local from_id="${positional[0]}" to_id="${positional[1]}"
+
+    # Validate ids
+    [[ "$from_id" == "$to_id" ]] && die "from-id and to-id are the same: $from_id"
+    [[ "$from_id" == "all" ]] && die "Cannot retarget from 'all'. Shared commits cannot be moved."
+    for _vid in "$from_id" "$to_id"; do
+        [[ "$_vid" == "all" ]] && continue
+        echo "$_vid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' || die "Invalid target id: $_vid"
+    done
+
+    local base source
+    base=$(_get_config base)
+    source=$(resolve_source "")
+    [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
+
+    # Must be on source branch (not checkout)
+    local cur
+    cur=$(current_branch)
+    if [[ "$cur" == dispatch-checkout/* ]]; then
+        die "Cannot retarget from checkout branch. Switch to source first: git dispatch checkout source"
+    fi
+
+    # Find source commits with Dispatch-Target-Id: from_id
+    local -a from_hashes=() from_subjects=()
+    while IFS= read -r _h; do
+        [[ -n "$_h" ]] || continue
+        local _pc
+        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
+        (( _pc > 2 )) && continue
+        git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
+        local _t
+        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        if [[ "$_t" == "$from_id" ]]; then
+            from_hashes+=("$_h")
+            from_subjects+=("$(git log -1 --format='%s' "$_h")")
+        fi
+    done < <(git log --reverse --format="%H" "$base..$source")
+
+    [[ ${#from_hashes[@]} -gt 0 ]] || die "No commits found with Dispatch-Target-Id: $from_id"
+
+    echo -e "${CYAN}Retarget ${#from_hashes[@]} commit(s) from target $from_id to target $to_id${NC}"
+    echo ""
+    for i in "${!from_hashes[@]}"; do
+        echo "  $(echo "${from_hashes[$i]}" | cut -c1-8) ${from_subjects[$i]}"
+    done
+    echo ""
+
+    if $dry_run; then
+        echo "For each commit above, retarget will create on source:"
+        echo "  1. revert commit  (Dispatch-Target-Id: $from_id) - cancels original on old target"
+        echo "  2. re-apply commit (Dispatch-Target-Id: $to_id) - adds changes to new target"
+        echo ""
+        echo -e "${YELLOW}Dry run - no changes made.${NC}"
+        return 0
+    fi
+
+    # Create revert + re-apply pairs on source
+    # Reverts in reverse order (last commit reverted first), re-applies in original order
+    local -a revert_hashes=()
+    for (( i=${#from_hashes[@]}-1; i>=0; i-- )); do
+        local hash="${from_hashes[$i]}"
+        local subj="${from_subjects[$i]}"
+
+        # Create revert commit
+        local revert_msg
+        revert_msg="revert: ${subj}
+
+Retargeted from $from_id to $to_id by git dispatch retarget.
+This reverts the content of $(echo "$hash" | cut -c1-8).
+
+Dispatch-Target-Id: $from_id"
+
+        if ! git revert --no-commit "$hash" 2>/dev/null; then
+            # Revert conflict - this shouldn't normally happen on source
+            if git diff --cached --quiet 2>/dev/null; then
+                warn "Revert of $(echo "$hash" | cut -c1-8) produced no changes (already reverted?). Skipping."
+                git revert --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+                continue
+            fi
+            warn "Conflict reverting $(echo "$hash" | cut -c1-8): $subj"
+            warn "Resolve the conflict, then run: git dispatch retarget $from_id $to_id"
+            exit 1
+        fi
+
+        if git diff --cached --quiet 2>/dev/null; then
+            warn "Revert of $(echo "$hash" | cut -c1-8) produced no changes. Skipping."
+            git reset --merge 2>/dev/null || true
+            continue
+        fi
+
+        git commit --no-verify -m "$revert_msg" -q || die "Failed to create revert commit"
+        revert_hashes+=("$(git rev-parse HEAD)")
+    done
+
+    # Re-apply in original order
+    local -a reapply_hashes=()
+    for i in "${!from_hashes[@]}"; do
+        local hash="${from_hashes[$i]}"
+        local subj="${from_subjects[$i]}"
+
+        # Cherry-pick the original content (re-apply)
+        local reapply_msg
+        reapply_msg="${subj}
+
+Retargeted from $from_id to $to_id by git dispatch retarget.
+
+Dispatch-Target-Id: $to_id"
+
+        if ! git cherry-pick --no-commit "$hash" 2>/dev/null; then
+            if git diff --cached --quiet 2>/dev/null; then
+                warn "Re-apply of $(echo "$hash" | cut -c1-8) produced no changes. Skipping."
+                git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+                continue
+            fi
+            warn "Conflict re-applying $(echo "$hash" | cut -c1-8): $subj"
+            warn "Resolve the conflict, then run: git dispatch retarget $from_id $to_id"
+            git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
+            exit 1
+        fi
+
+        if git diff --cached --quiet 2>/dev/null; then
+            warn "Re-apply of $(echo "$hash" | cut -c1-8) produced no changes. Skipping."
+            git reset --merge 2>/dev/null || true
+            continue
+        fi
+
+        git commit --no-verify -m "$reapply_msg" -q || die "Failed to create re-apply commit"
+        reapply_hashes+=("$(git rev-parse HEAD)")
+    done
+
+    echo ""
+    info "Created ${#revert_hashes[@]} revert(s) and ${#reapply_hashes[@]} re-apply commit(s) on source."
+
+    # Check if old target is now empty (all commits retargeted)
+    local remaining=0
+    while IFS= read -r _h; do
+        [[ -n "$_h" ]] || continue
+        local _pc
+        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
+        (( _pc > 2 )) && continue
+        git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
+        local _t
+        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        [[ "$_t" == "$from_id" ]] && remaining=$((remaining + 1))
+    done < <(git log --reverse --format="%H" "$base..$source")
+
+    # Subtract: for each original commit, there's now a revert, so pairs cancel out.
+    # remaining counts all commits with from_id (originals + reverts).
+    # If remaining == 2 * original_count, all originals have reverts = empty target.
+    local original_count=${#from_hashes[@]}
+    if [[ $remaining -eq $((original_count * 2)) ]]; then
+        echo ""
+        warn "Target $from_id is now empty (all commits retargeted to $to_id)."
+        echo "  Consider: git dispatch apply reset $from_id"
+    fi
+
+    if $auto_apply; then
+        echo ""
+        info "Running: git dispatch apply"
+        cmd_apply
+    else
+        echo ""
+        echo "Next: git dispatch apply"
+    fi
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -2580,6 +2765,9 @@ COMMANDS
   sync        Merge base into source and existing targets. Run before apply.
   apply       Cherry-pick source commits to targets. apply <N> for one target.
               apply reset <N|all> to regenerate from scratch.
+  retarget    Move commits between targets without rewriting history:
+                retarget <from-id> <to-id>  Creates revert + re-apply pairs
+                --apply to run apply automatically after retargeting
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
@@ -2639,6 +2827,7 @@ main() {
         checkin)      cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;
         abort)        cmd_abort "$@" ;;
+        retarget)     cmd_retarget "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;

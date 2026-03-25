@@ -24,6 +24,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
+| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence |
 | `git dispatch continue` | Resume after conflict resolution |
@@ -91,6 +92,12 @@ git dispatch checkin             # Source-Keep auto-resolves conflict
 git dispatch checkout source
 git dispatch apply
 git dispatch push 3
+```
+
+### Retarget commits (change Dispatch-Target-Id)
+```bash
+git dispatch retarget 8 15       # moves commits from target 8 to 15
+git dispatch apply               # updates both targets
 ```
 
 ### Review feedback
@@ -165,6 +172,7 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | `sync` | base -> source + targets | Merge master into source and existing targets |
 | `apply` | source -> targets | Cherry-pick new commits to target branches |
 | `checkin` | checkout -> source | Cherry-pick fixes from checkout back to source |
+| `retarget` | source (in-place) | Revert + re-apply commits with new target id |
 
 ## apply vs apply reset
 
@@ -184,7 +192,8 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base | `git dispatch sync` |
-| Stale target after tid reassignment | `git dispatch apply --force` |
+| Move commit to different target | `git dispatch retarget <from> <to>` then `apply` |
+| Stale target after tid reassignment (rebase) | `git dispatch apply --force` |
 | Generated file conflict | Add `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (missing swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Use decimal: `Dispatch-Target-Id=1.5` |

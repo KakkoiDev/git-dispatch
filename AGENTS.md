@@ -31,6 +31,7 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
+| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch status` | Show sync state, divergence, stale targets |
 | `git dispatch continue` | Resume after conflict resolution |
@@ -95,6 +96,12 @@ git dispatch checkin              # Source-Keep auto-resolves conflict with sour
 git dispatch checkout source
 git dispatch apply
 git dispatch push 3
+```
+
+### Retarget commits (change Dispatch-Target-Id)
+```bash
+git dispatch retarget 8 15       # moves commits from target 8 to 15
+git dispatch apply               # updates both targets
 ```
 
 ### Review feedback
@@ -199,6 +206,7 @@ Only files from that target's own commits are checked. Base drift (source behind
 | `sync` | base -> source + targets | Merge master into source and existing targets |
 | `apply` | source -> targets | Cherry-pick new commits to target branches |
 | `checkin` | checkout -> source | Cherry-pick fixes from checkout back to source |
+| `retarget` | source (in-place) | Revert + re-apply commits with new target id |
 
 ## apply vs apply reset
 
@@ -220,7 +228,8 @@ Only files from that target's own commits are checked. Base drift (source behind
 | `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base | `git dispatch sync` |
-| Stale target (tid reassigned) | `git dispatch apply --force` |
+| Move commit to different target | `git dispatch retarget <from> <to>` then `apply` |
+| Stale target (tid reassigned via rebase) | `git dispatch apply --force` |
 | Generated file conflict | `Dispatch-Source-Keep=true` trailer |
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |

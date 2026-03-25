@@ -58,6 +58,7 @@ git dispatch push all
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (--force discards unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
+| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
 | `git dispatch status` | Show sync state, divergence |
 | `git dispatch continue` | Resume after conflict resolution |
@@ -149,6 +150,18 @@ git dispatch apply
 git dispatch push 3
 ```
 
+## Workflow: Retarget Commits (Change Target-Id)
+
+When a commit was assigned to the wrong target (e.g., reviewer says "this belongs in task-15, not task-8"), use `retarget` instead of interactive rebase:
+
+```bash
+git dispatch retarget 8 15            # moves commits from target 8 to 15
+git dispatch apply                    # updates both targets
+git dispatch push 8 && git dispatch push 15
+```
+
+No history rewrite. No force-push. The original commit stays on source, paired with a revert (on old target) and re-apply (on new target).
+
 ## Workflow: Review Feedback
 
 ```bash
@@ -236,6 +249,7 @@ Each command flows in one direction:
 | `sync` | base -> source + targets | Merge master into source and existing targets |
 | `apply` | source -> targets | Cherry-pick new commits to target branches |
 | `checkin` | checkout -> source | Cherry-pick fixes from checkout back to source |
+| `retarget` | source (in-place) | Revert + re-apply commits with new target id |
 
 ## apply vs apply reset
 
@@ -269,6 +283,13 @@ When a commit's `Dispatch-Target-Id` is changed on source (e.g., during interact
 ```bash
 git dispatch apply              # reports stale targets
 git dispatch apply --force      # rebuilds them
+```
+
+Preferred alternative: use `retarget` instead of interactive rebase to avoid stale targets entirely:
+
+```bash
+git dispatch retarget 8 15      # no history rewrite, no force-push needed
+git dispatch apply
 ```
 
 ## Config

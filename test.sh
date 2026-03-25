@@ -3884,6 +3884,215 @@ test_status_diverged_non_source_keep_still_detected() {
     teardown
 }
 
+# ---------- retarget tests ----------
+
+test_retarget_basic() {
+    echo "=== test: retarget moves commits between targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
+    echo "feature B" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 9')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Verify target-8 has Feature A
+    local count
+    count=$(git log --oneline master..target-8 | wc -l | tr -d ' ')
+    assert_eq "1" "$count" "target-8 has 1 commit before retarget"
+
+    # Retarget from 8 to 9
+    local output
+    output=$(bash "$DISPATCH" retarget 8 9 2>&1)
+
+    assert_contains "$output" "Retarget 1 commit(s)" "reports commit count"
+    assert_contains "$output" "Feature A" "reports commit subject"
+    assert_contains "$output" "now empty" "reports old target empty"
+
+    # Source should have revert + re-apply commits
+    local source_count
+    source_count=$(git log --oneline master..source | wc -l | tr -d ' ')
+    assert_eq "4" "$source_count" "source has 4 commits (2 original + 1 revert + 1 re-apply)"
+
+    # Net diff on source should be zero (revert + re-apply cancel out)
+    local diff_to_original
+    diff_to_original=$(git diff source~2 source 2>/dev/null)
+    assert_eq "" "$diff_to_original" "retarget is net-zero diff on source"
+
+    # After apply, target-9 should have Feature B + re-applied Feature A
+    bash "$DISPATCH" apply --force >/dev/null 2>&1
+    count=$(git log --oneline master..target-9 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "target-9 has 2 commits after apply (Feature B + re-applied Feature A)"
+
+    # target-8 should have original + revert (net empty diff)
+    local t8_count
+    t8_count=$(git log --oneline master..target-8 | wc -l | tr -d ' ')
+    assert_eq "2" "$t8_count" "target-8 has 2 commits (original + revert, net zero)"
+    local t8_diff
+    t8_diff=$(git diff master target-8 2>/dev/null)
+    assert_eq "" "$t8_diff" "target-8 has no net diff from master"
+
+    teardown
+}
+
+test_retarget_dry_run() {
+    echo "=== test: retarget --dry-run makes no changes ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature A" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 8')" -q
+
+    local before_sha
+    before_sha=$(git rev-parse HEAD)
+
+    local output
+    output=$(bash "$DISPATCH" retarget 8 15 --dry-run 2>&1)
+
+    assert_contains "$output" "Feature A" "shows commit in dry run"
+    assert_contains "$output" "Dry run" "says dry run"
+    assert_eq "$before_sha" "$(git rev-parse HEAD)" "no commits created"
+
+    teardown
+}
+
+test_retarget_multiple_commits() {
+    echo "=== test: retarget handles multiple commits ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nDispatch-Target-Id: 5')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nDispatch-Target-Id: 5')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "Third$(printf '\n\nDispatch-Target-Id: 5')" -q
+
+    local output
+    output=$(bash "$DISPATCH" retarget 5 10 2>&1)
+
+    assert_contains "$output" "Retarget 3 commit(s)" "reports 3 commits"
+    assert_contains "$output" "3 revert(s) and 3 re-apply" "created correct commit count"
+
+    # Source should have 3 original + 3 reverts + 3 re-applies = 9 commits
+    local count
+    count=$(git log --oneline master..source | wc -l | tr -d ' ')
+    assert_eq "9" "$count" "source has 9 commits"
+
+    teardown
+}
+
+test_retarget_no_commits_errors() {
+    echo "=== test: retarget errors when no commits with from-id ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" retarget 99 1 2>&1) || exit_code=$?
+
+    assert_eq "1" "$exit_code" "exits with error"
+    assert_contains "$output" "No commits found" "reports no commits"
+
+    teardown
+}
+
+test_retarget_all_disallowed() {
+    echo "=== test: retarget from 'all' is disallowed ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" retarget all 1 2>&1) || exit_code=$?
+
+    assert_eq "1" "$exit_code" "exits with error"
+    assert_contains "$output" "Cannot retarget from" "rejects retarget from all"
+
+    teardown
+}
+
+test_retarget_same_id_errors() {
+    echo "=== test: retarget same from and to errors ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" retarget 1 1 2>&1) || exit_code=$?
+
+    assert_eq "1" "$exit_code" "exits with error"
+    assert_contains "$output" "same" "reports same id error"
+
+    teardown
+}
+
+test_retarget_to_all_allowed() {
+    echo "=== test: retarget to 'all' is allowed ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Shared change$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    local output
+    output=$(bash "$DISPATCH" retarget 3 all 2>&1)
+
+    assert_contains "$output" "Retarget 1 commit(s)" "retarget to all works"
+    assert_contains "$output" "1 revert(s) and 1 re-apply" "creates commits"
+
+    # Verify the re-apply commit has Dispatch-Target-Id: all
+    local last_trailer
+    last_trailer=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "all" "$last_trailer" "re-apply has target-id all"
+
+    teardown
+}
+
+test_retarget_with_apply_flag() {
+    echo "=== test: retarget --apply runs apply automatically ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Other$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" retarget 1 2 --apply 2>&1)
+
+    assert_contains "$output" "Running: git dispatch apply" "runs apply"
+
+    teardown
+}
+
 # ---------- run ----------
 
 echo "git-dispatch test suite"
@@ -4030,6 +4239,14 @@ test_sync_warns_source_behind_in_apply
 test_spinner_no_output_in_pipe
 test_status_no_false_diverged_source_keep
 test_status_diverged_non_source_keep_still_detected
+test_retarget_basic
+test_retarget_dry_run
+test_retarget_multiple_commits
+test_retarget_no_commits_errors
+test_retarget_all_disallowed
+test_retarget_same_id_errors
+test_retarget_to_all_allowed
+test_retarget_with_apply_flag
 
 echo ""
 echo "======================="
