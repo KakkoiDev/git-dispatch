@@ -349,9 +349,9 @@ _is_content_merged() {
     local mb
     mb=$(git merge-base "$base_ref" "$branch_tip" 2>/dev/null) || return 1
     local -a changed_files_arr=()
-    while IFS= read -r -d '' f; do
-        changed_files_arr+=("$f")
-    done < <(git diff --name-only -z "$mb" "$branch_tip" 2>/dev/null)
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && changed_files_arr+=("$f")
+    done < <(git diff --name-only "$mb" "$branch_tip" 2>/dev/null)
     [[ ${#changed_files_arr[@]} -eq 0 ]] && return 0
     git diff --quiet "$base_ref" "$branch_tip" -- "${changed_files_arr[@]}" 2>/dev/null
 }
