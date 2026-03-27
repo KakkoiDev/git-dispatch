@@ -4562,6 +4562,143 @@ test_delete_all_targets
 test_delete_dry_run
 test_delete_prune_orphaned
 
+# ---------- broken trailer tests ----------
+
+test_apply_N_with_broken_trailer_on_other_target() {
+    echo "=== test: apply N works despite broken trailer on other target ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Commit for target 1 (clean trailer)
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Feature A$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Commit for target 2 with broken trailer (conflict metadata after trailer)
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Feature B$(printf '\n\nDispatch-Target-Id: 2\n\n# Conflicts:\n#\tfile.txt\n(cherry picked from commit abc123)')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Add new commit for target 1
+    echo "a2" > a.txt; git add a.txt
+    git commit -m "Feature A update$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # apply 1 should work despite broken trailer on target-2 commit
+    local output
+    output=$(bash "$DISPATCH" apply 1 2>&1)
+    assert_eq "0" "$?" "apply 1 succeeds"
+    assert_not_contains "$output" "Error" "no error from broken trailer"
+
+    teardown
+}
+
+test_fallback_parser_reads_broken_trailer() {
+    echo "=== test: fallback parser extracts tid from broken trailer block ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Create commit with broken trailer (cherry-pick metadata after trailer)
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 5\n\n# Conflicts:\n#\tfile.txt\n(cherry picked from commit abc123)')" -q
+
+    # Apply should recognize the trailer via fallback parser
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1)
+    assert_contains "$output" "target 5" "fallback parser finds target 5"
+
+    teardown
+}
+
+test_apply_all_dies_on_broken_trailer() {
+    echo "=== test: apply (no target) dies on missing trailer ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Create commit with no trailer using commit-tree to bypass all hooks
+    echo "a" > a.txt; git add a.txt
+    local tree
+    tree=$(git write-tree)
+    local parent
+    parent=$(git rev-parse HEAD)
+    local new_commit
+    new_commit=$(echo "No trailer at all" | git commit-tree "$tree" -p "$parent")
+    git reset --hard "$new_commit" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1) || true
+    assert_contains "$output" "no Dispatch-Target-Id trailer" "dies on missing trailer for full apply"
+
+    teardown
+}
+
+test_apply_N_warns_on_broken_trailer() {
+    echo "=== test: apply N warns but continues on broken unrelated trailer ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Good commit
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Create commit with no trailer using commit-tree
+    echo "b" > b.txt; git add b.txt
+    local tree
+    tree=$(git write-tree)
+    local parent
+    parent=$(git rev-parse HEAD)
+    local new_commit
+    new_commit=$(echo "Broken commit no trailer" | git commit-tree "$tree" -p "$parent")
+    git reset --hard "$new_commit" -q
+
+    # apply 1 should warn about broken commit but succeed
+    local output
+    output=$(bash "$DISPATCH" apply 1 2>&1)
+    assert_contains "$output" "skipped" "warns about broken commit"
+    assert_contains "$output" "Created" "still creates target 1"
+
+    teardown
+}
+
+test_checkin_strips_cherry_pick_metadata() {
+    echo "=== test: checkin does not add cherry-pick metadata to source ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Create checkout, add a commit, checkin
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "Fix bug$(printf '\n\nDispatch-Target-Id: 1')" -q
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    # Source commit should NOT have cherry-pick metadata
+    local msg
+    msg=$(git log -1 --format="%B" source)
+    assert_not_contains "$msg" "cherry picked from" "no cherry-pick metadata in source commit"
+
+    teardown
+}
+
+test_apply_N_with_broken_trailer_on_other_target
+test_fallback_parser_reads_broken_trailer
+test_apply_all_dies_on_broken_trailer
+test_apply_N_warns_on_broken_trailer
+test_checkin_strips_cherry_pick_metadata
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

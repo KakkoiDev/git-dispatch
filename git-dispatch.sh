@@ -416,6 +416,41 @@ _commit_semantically_in_branch() {
     return 1
 }
 
+# Extract Dispatch-Target-Id from a commit with fallback for broken trailer blocks.
+# git's %(trailers) parser fails when cherry-pick metadata (# Conflicts:, cherry picked from)
+# appears after the trailer, breaking the "last paragraph" rule. This function falls back to
+# grepping the raw commit message for Dispatch-Target-Id: lines.
+_extract_dispatch_tid() {
+    local hash="$1"
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+    if [[ -n "$tid" ]]; then
+        echo "$tid"
+        return
+    fi
+    tid=$(git log -1 --format="%B" "$hash" 2>/dev/null | \
+        (grep -m1 "^Dispatch-Target-Id:" || true) | \
+        sed 's/^Dispatch-Target-Id:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -n "$tid" ]] && echo "$tid"
+    return 0
+}
+
+# Extract Dispatch-Source-Keep from a commit with fallback.
+_extract_dispatch_source_keep() {
+    local hash="$1"
+    local val
+    val=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+    if [[ -n "$val" ]]; then
+        echo "$val"
+        return
+    fi
+    val=$(git log -1 --format="%B" "$hash" 2>/dev/null | \
+        (grep -m1 "^Dispatch-Source-Keep:" || true) | \
+        sed 's/^Dispatch-Source-Keep:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -n "$val" ]] && echo "$val"
+    return 0
+}
+
 # Find source commits not yet on a target branch.
 # Primary: subject-line matching (handles cosmetic divergence from different cherry-pick contexts).
 # Fallback: patch-id matching (handles amended subjects with identical diffs).
@@ -470,7 +505,7 @@ _target_id_files() {
     local base="$1" branch="$2" tid="$3"
     while IFS= read -r hash; do
         local ctid
-        ctid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        ctid=$(_extract_dispatch_tid "$hash")
         [[ "$ctid" == "$tid" ]] && git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null
     done < <(git log --format="%H" "$base..$branch")
 }
@@ -497,7 +532,7 @@ _target_content_diverged() {
     local -a sk_files=()
     while IFS= read -r hash; do
         local _sk
-        _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+        _sk=$(_extract_dispatch_source_keep "$hash")
         [[ "$_sk" == "true" ]] || continue
         while IFS= read -r f; do
             [[ -n "$f" ]] && sk_files+=("$f")
@@ -680,10 +715,11 @@ _handle_cherry_pick_conflict() {
 # Sets DISPATCH_LAST_PICKED / DISPATCH_LAST_SKIPPED globals.
 _cherry_pick_commits() {
     local resolve="$1" branch="$2"; shift 2
-    local add_trailer="" theirs_fallback=false
+    local add_trailer="" theirs_fallback=false no_x=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --add-trailer) add_trailer="$2"; shift 2 ;;
+            --no-x) no_x=true; shift ;;
             --theirs-fallback) theirs_fallback=true; shift ;;
             *) break ;;
         esac
@@ -703,7 +739,7 @@ _cherry_pick_commits() {
         local needs_trailer=false
         if [[ -n "$add_trailer" ]]; then
             local tid
-            tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+            tid=$(_extract_dispatch_tid "$hash")
             [[ "$tid" != "$add_trailer" ]] && needs_trailer=true
         fi
 
@@ -715,7 +751,7 @@ _cherry_pick_commits() {
                 fi
                 # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
                 local _source_keep
-                _source_keep=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
+                _source_keep=$(_extract_dispatch_source_keep "$hash")
                 if [[ -n "$_source_keep" ]]; then
                     "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${gcmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
@@ -745,6 +781,43 @@ _cherry_pick_commits() {
                 die "Cherry-pick into $branch failed on $hash while creating commit. Resolve manually."
             fi
             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
+        elif $no_x; then
+            # Cherry-pick without -x: avoids appending "(cherry picked from ...)" and
+            # "# Conflicts:" metadata that breaks git's trailer parser.
+            if ! "${gcmd[@]}" cherry-pick --no-commit "$hash" 2>/dev/null; then
+                if "${gcmd[@]}" rev-parse --verify CHERRY_PICK_HEAD &>/dev/null && "${gcmd[@]}" diff --cached --quiet; then
+                    _skip_empty_pick "$hash" "${gcmd[@]}"; continue
+                fi
+                local _source_keep_nx
+                _source_keep_nx=$(_extract_dispatch_source_keep "$hash")
+                if [[ -n "$_source_keep_nx" ]]; then
+                    "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
+                    if ! "${gcmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
+                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        _conflict_leave "$resolve"; return 1
+                    fi
+                    warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                else
+                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                    _conflict_leave "$resolve"; return 1
+                fi
+            fi
+            if "${gcmd[@]}" diff --cached --quiet; then
+                _skip_empty_pick "$hash" "${gcmd[@]}"; continue
+            fi
+            # Commit with clean message (strip cherry-pick/conflict metadata from source commit)
+            local _cp_msg
+            _cp_msg=$(git log -1 --format="%B" "$hash" | \
+                sed '/^(cherry picked from commit /d' | \
+                sed '/^# Conflicts:$/,/^[^#]/{/^#/d;}' | \
+                sed -e :a -e '/^\n*$/{$d;N;ba;}')
+            if ! "${gcmd[@]}" commit -m "$_cp_msg" --quiet 2>/dev/null; then
+                if "${gcmd[@]}" diff --cached --quiet; then
+                    _skip_empty_pick "$hash" "${gcmd[@]}"; continue
+                fi
+                die "Cherry-pick into $branch failed on $hash"
+            fi
+            DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
         else
             # Standard cherry-pick -x
             if ! "${gcmd[@]}" cherry-pick -x "$hash" 2>/dev/null; then
@@ -753,7 +826,7 @@ _cherry_pick_commits() {
                 fi
                 # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
                 local _source_keep2
-                _source_keep2=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" | tr -d '[:space:]')
+                _source_keep2=$(_extract_dispatch_source_keep "$hash")
                 if [[ -n "$_source_keep2" ]]; then
                     "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
@@ -1120,12 +1193,12 @@ cmd_apply() {
         git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
         # Reject commits with multiple Dispatch-Target-Id trailers (defense-in-depth)
         local _tcount
-        _tcount=$(git log -1 --format="%(trailers)" "$_h" | grep -c "^Dispatch-Target-Id:" || true)
+        _tcount=$(git log -1 --format="%B" "$_h" | grep -c "^Dispatch-Target-Id:" || true)
         if [[ "$_tcount" -gt 1 ]]; then
             die "Commit $(echo "$_h" | cut -c1-8) has $_tcount Dispatch-Target-Id trailers. Only one is allowed."
         fi
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(_extract_dispatch_tid "$_h")
         echo "$_h $_t"
     done < <(git log --reverse --format="%H" "$base..$source") > "$commit_file"
 
@@ -1146,11 +1219,23 @@ cmd_apply() {
         return
     fi
 
-    # Validate all commits have numeric Dispatch-Target-Id or "all"
+    # Validate commits have numeric Dispatch-Target-Id or "all"
+    # When targeting a specific id (apply <N>), warn on unrelated broken commits instead of dying
+    local _valid_file
+    _valid_file=$(mktemp)
     while read -r hash tid; do
-        [[ -z "$tid" ]] && die "Commit $(echo "$hash" | cut -c1-8) has no Dispatch-Target-Id trailer"
-        [[ "$tid" == "all" ]] && continue
-        if ! echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+        if [[ -z "$tid" ]]; then
+            if [[ -n "$apply_target" ]]; then
+                warn "Commit $(echo "$hash" | cut -c1-8) has no Dispatch-Target-Id trailer (skipped)" >&2
+                continue
+            fi
+            die "Commit $(echo "$hash" | cut -c1-8) has no Dispatch-Target-Id trailer"
+        fi
+        if [[ "$tid" != "all" ]] && ! echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+            if [[ -n "$apply_target" && "$tid" != "$apply_target" ]]; then
+                warn "Commit $(echo "$hash" | cut -c1-8) has invalid Dispatch-Target-Id '$tid' (skipped)" >&2
+                continue
+            fi
             if echo "$tid" | grep -Eq '^0[0-9]'; then
                 die "Commit $(echo "$hash" | cut -c1-8) has Dispatch-Target-Id '$tid' with leading zero. Use '${tid#0}' instead."
             elif [[ "$tid" == "0" ]]; then
@@ -1158,7 +1243,9 @@ cmd_apply() {
             fi
             die "Commit $(echo "$hash" | cut -c1-8) has non-numeric Dispatch-Target-Id '$tid'"
         fi
-    done < "$commit_file"
+        echo "$hash $tid"
+    done < "$commit_file" > "$_valid_file"
+    mv "$_valid_file" "$commit_file"
 
     # Ordered unique target ids (numeric sort), excluding "all"
     local -a target_ids=()
@@ -1377,7 +1464,7 @@ cmd_apply() {
                     _rpc=$(git rev-list --parents -n1 "$_rh" | wc -w)
                     (( _rpc > 2 )) && continue
                     local _rtid
-                    _rtid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_rh" | tr -d '[:space:]')
+                    _rtid=$(_extract_dispatch_tid "$_rh")
                     [[ -z "$_rtid" || "$_rtid" != "$reset_tid" ]] && _target_only=$((_target_only + 1))
                 done < <(git log --format="%H" "$base..$reset_branch" 2>/dev/null)
                 if [[ $_target_only -gt 0 ]]; then
@@ -1644,6 +1731,10 @@ cmd_status() {
     while IFS= read -r _line; do
         local _h="${_line%% *}" _t="${_line#* }"
         _t=$(echo "$_t" | tr -d '[:space:]')
+        # Fallback for broken trailer blocks
+        if [[ -z "$_t" && -n "$_h" ]]; then
+            _t=$(_extract_dispatch_tid "$_h")
+        fi
         if [[ -n "$_t" && -n "$_h" ]]; then
             source_tids+=("$_t")
             echo "$_h $_t" >> "$status_commit_file"
@@ -1764,7 +1855,7 @@ cmd_status() {
             fi
             # Skip Source-Keep commits - generated files, expected to drift
             local _sk
-            _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$hash" 2>/dev/null | tr -d '[:space:]')
+            _sk=$(_extract_dispatch_source_keep "$hash")
             [[ "$_sk" == "true" ]] && continue
             target_to_source_candidates+=("$hash")
         done <<< "$cherry_out"
@@ -1804,6 +1895,10 @@ cmd_status() {
             [[ ${#_uhash} -lt 10 ]] && continue  # skip junk lines
             local _utid="${_uline#* }"
             _utid=$(echo "$_utid" | tr -d '[:space:]')
+            # Fallback for broken trailer blocks
+            if [[ -z "$_utid" && -n "$_uhash" ]]; then
+                _utid=$(_extract_dispatch_tid "$_uhash")
+            fi
             [[ -z "$_utid" || ( "$_utid" != "$tid" && "$_utid" != "all" ) ]] && untracked=$((untracked + 1))
         done < <(git log --no-merges --format="%H %(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$branch_name" 2>/dev/null)
 
@@ -1902,10 +1997,22 @@ cmd_delete() {
     if $prune; then
         # Find targets whose tid no longer exists in source commits
         local -a unique_source_tids=()
-        while IFS= read -r _tid; do
+        while IFS= read -r _line; do
+            local _tid="${_line#* }"
             _tid=$(echo "$_tid" | tr -d '[:space:]')
+            local _ph="${_line%% *}"
+            # Fallback for broken trailer blocks
+            if [[ -z "$_tid" && -n "$_ph" ]]; then
+                _tid=$(_extract_dispatch_tid "$_ph")
+            fi
             [[ -n "$_tid" && "$_tid" != "all" ]] && unique_source_tids+=("$_tid")
-        done < <(git log --no-merges --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$source" 2>/dev/null | sort -u)
+        done < <(git log --no-merges --format="%H %(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$source" 2>/dev/null)
+        # Deduplicate
+        local -a _deduped=()
+        while IFS= read -r _ut; do
+            [[ -n "$_ut" ]] && _deduped+=("$_ut")
+        done < <(printf '%s\n' "${unique_source_tids[@]}" | sort -u)
+        unique_source_tids=("${_deduped[@]}")
 
         while IFS= read -r existing; do
             [[ -n "$existing" ]] || continue
@@ -2149,7 +2256,7 @@ cmd_continue() {
                             fi
                             # Auto-resolve with --theirs when Dispatch-Source-Keep trailer is present
                             local _sk
-                            _sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" "$qhash" | tr -d '[:space:]')
+                            _sk=$(_extract_dispatch_source_keep "$qhash")
                             if [[ -n "$_sk" ]]; then
                                 "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                                 if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$qhash" 2>/dev/null; then
@@ -2261,7 +2368,7 @@ _checkout_create() {
     local -a target_tids=()
     while IFS= read -r hash; do
         local tid
-        tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$hash" | tr -d '[:space:]')
+        tid=$(_extract_dispatch_tid "$hash")
         [[ -z "$tid" || "$tid" == "all" ]] && continue
         if echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
             if awk "BEGIN {exit !($tid <= $n)}"; then
@@ -2586,7 +2693,8 @@ cmd_checkin() {
     info "Picking ${#new_hashes[@]} commit(s) to source: $source"
 
     # Cherry-pick to source, honoring Dispatch-Source-Keep
-    if ! _cherry_pick_commits "$resolve" "$source" "${new_hashes[@]}"; then
+    # Use --no-x to avoid appending cherry-pick metadata that breaks trailer parsing
+    if ! _cherry_pick_commits "$resolve" "$source" --no-x "${new_hashes[@]}"; then
         warn "Conflict during checkin. Resolve and run: git dispatch continue"
         return 1
     fi
@@ -2722,7 +2830,7 @@ cmd_retarget() {
         (( _pc > 2 )) && continue
         git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(_extract_dispatch_tid "$_h")
         if [[ "$_t" == "$from_id" ]]; then
             from_hashes+=("$_h")
             from_subjects+=("$(git log -1 --format='%s' "$_h")")
@@ -2833,7 +2941,7 @@ Dispatch-Target-Id: $to_id"
         (( _pc > 2 )) && continue
         git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
         local _t
-        _t=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$_h" | tr -d '[:space:]')
+        _t=$(_extract_dispatch_tid "$_h")
         [[ "$_t" == "$from_id" ]] && remaining=$((remaining + 1))
     done < <(git log --reverse --format="%H" "$base..$source")
 
