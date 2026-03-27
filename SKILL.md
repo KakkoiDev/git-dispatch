@@ -26,7 +26,8 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
 | `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
-| `git dispatch status` | Show mode, base, targets, sync state, divergence |
+| `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch status` | Show mode, base, targets, sync state, divergence, merged |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up, return to source |
 | `git dispatch reset [--yes]` | Delete target branches and config |
@@ -146,6 +147,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `--dry-run` | Show plan, make no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
+| `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
 
 ## Conflict Handling
@@ -199,6 +201,9 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | Insert task between existing | Use decimal: `Dispatch-Target-Id=1.5` |
 | All targets need regeneration | `git dispatch apply reset all --yes` |
 | Stuck operation/conflict | `git dispatch abort` |
+| Clean up merged targets | `git dispatch delete <N>` or `delete --prune` |
+| Merged PR reverted on base | `git dispatch apply reset <N>` then `apply` |
+| Force sync/apply on merged targets | `--all` flag |
 
 ## Installation
 

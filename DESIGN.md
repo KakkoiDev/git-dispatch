@@ -52,6 +52,7 @@ git dispatch checkout source
 git dispatch checkout clear [--force]
 git dispatch checkin [<N>] [--dry-run] [--resolve|--continue]
 git dispatch push <all|source|N> [--dry-run] [--force]
+git dispatch delete <N|all|--prune> [--dry-run] [-y|--yes]
 git dispatch status
 git dispatch continue
 git dispatch abort
@@ -65,6 +66,7 @@ git dispatch reset [--force] [-y|--yes]
 | `--dry-run` | Show plan, make no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--force` | Override safety checks |
+| `--all` | Include merged targets in sync/apply |
 | `-y`, `--yes` | Auto-confirm prompts (for scripting) |
 
 ### Command Reference
@@ -85,7 +87,9 @@ git dispatch reset [--force] [-y|--yes]
 
 **push** - Push branches. Positional arg: `push all`, `push source`, `push 3`.
 
-**status** - Show mode, base, source, all targets with sync state, divergence, stale detection.
+**delete** - Delete target branches. `delete 3` deletes one target, `delete all` deletes all targets, `delete --prune` auto-detects and deletes targets whose tid no longer exists in source. Unlike `reset`, does not touch dispatch config or hooks.
+
+**status** - Show mode, base, source, all targets with sync state, divergence, stale detection. Shows `merged` for targets whose content is already in base.
 
 **continue** - Resume after conflict resolution.
 
@@ -149,7 +153,14 @@ Every command supports `--dry-run`.
 ### Layer 6: Base merge into targets
 `apply --base` merges base into existing targets (no recreate, no force-push) preserving PR history.
 
+### Layer 7: Merged target skip
+`sync` and `apply` skip targets whose content is already in base (PR was merged). Content-based detection via file diff against base. `--all` overrides to force processing. If a merged PR is reverted, the target is no longer detected as merged and normal processing resumes.
+
 ## Lifecycle
+
+```
+init --> apply --> push --> [PR merged] --> delete <N> (cleanup)
+```
 
 ```
 init --> apply --> push

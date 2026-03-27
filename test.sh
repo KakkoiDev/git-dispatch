@@ -4248,6 +4248,320 @@ test_retarget_same_id_errors
 test_retarget_to_all_allowed
 test_retarget_with_apply_flag
 
+# ---------- merged target detection ----------
+
+test_merged_target_skipped_in_apply() {
+    echo "=== test: apply skips merged targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge into master
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+    git checkout source -q
+
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1)
+    assert_contains "$output" "merged" "apply reports merged target"
+
+    teardown
+}
+
+test_merged_target_skipped_in_sync() {
+    echo "=== test: sync skips merged targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge into master
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+
+    # Add another commit to master so sync has work to do
+    echo "base change" > base.txt; git add base.txt
+    git commit --no-verify -m "base update" -q
+    git checkout source -q
+
+    local output
+    output=$(bash "$DISPATCH" sync 2>&1)
+    assert_contains "$output" "merged" "sync reports merged target skipped"
+
+    teardown
+}
+
+test_apply_all_includes_merged() {
+    echo "=== test: apply --all includes merged targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+    git checkout source -q
+
+    # Add new commit to same target
+    echo "feature v2" > a.txt; git add a.txt
+    git commit -m "Feature v2$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --all 2>&1)
+    assert_not_contains "$output" "merged" "apply --all does not skip merged"
+
+    teardown
+}
+
+test_sync_all_includes_merged() {
+    echo "=== test: sync --all includes merged targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge + extra base commit
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+    echo "base" > base.txt; git add base.txt
+    git commit --no-verify -m "base update" -q
+    git checkout source -q
+
+    local output
+    output=$(bash "$DISPATCH" sync --all 2>&1)
+    assert_not_contains "$output" "skipped. Use --all" "sync --all does not skip merged"
+
+    teardown
+}
+
+test_status_shows_merged() {
+    echo "=== test: status shows merged indicator ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+    git checkout source -q
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1)
+    assert_contains "$output" "merged" "status shows merged target"
+
+    teardown
+}
+
+test_merged_target_resumes_after_revert() {
+    echo "=== test: unmerged target resumes after revert on base ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "feature" > a.txt; git add a.txt
+    git commit -m "Feature$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "merge target 1" -q
+
+    # Revert it (disable hooks for master commit)
+    git -c core.hooksPath=/tmp revert --no-edit HEAD
+    git checkout source -q
+
+    # Target is no longer merged - apply should not skip it
+    local output
+    output=$(bash "$DISPATCH" apply 2>&1)
+    assert_not_contains "$output" "merged" "reverted target not reported as merged"
+
+    teardown
+}
+
+# ---------- delete command ----------
+
+test_delete_single_target() {
+    echo "=== test: delete removes a single target ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "B$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" delete 1 --yes 2>&1)
+    assert_contains "$output" "Deleted target-1" "reports deletion"
+
+    # Branch should be gone
+    local exists
+    exists=$(git rev-parse --verify refs/heads/target-1 2>&1 || true)
+    assert_contains "$exists" "fatal" "target-1 branch deleted"
+
+    # target-2 should still exist
+    git rev-parse --verify refs/heads/target-2 >/dev/null 2>&1
+    assert_eq "0" "$?" "target-2 still exists"
+
+    teardown
+}
+
+test_delete_all_targets() {
+    echo "=== test: delete all removes all targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "B$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" delete all --yes 2>&1)
+    assert_contains "$output" "2 target(s) deleted" "reports all deleted"
+
+    # Both should be gone
+    local e1 e2
+    e1=$(git rev-parse --verify refs/heads/target-1 2>&1 || true)
+    e2=$(git rev-parse --verify refs/heads/target-2 2>&1 || true)
+    assert_contains "$e1" "fatal" "target-1 deleted"
+    assert_contains "$e2" "fatal" "target-2 deleted"
+
+    # Config should still be intact (unlike reset)
+    local base
+    base=$(git config branch.source.dispatchbase 2>/dev/null || echo "")
+    assert_eq "master" "$base" "dispatch config preserved after delete"
+
+    teardown
+}
+
+test_delete_dry_run() {
+    echo "=== test: delete --dry-run makes no changes ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" delete 1 --dry-run 2>&1)
+    assert_contains "$output" "dry-run" "shows dry-run"
+
+    # Branch should still exist
+    git rev-parse --verify refs/heads/target-1 >/dev/null 2>&1
+    assert_eq "0" "$?" "target-1 still exists after dry-run"
+
+    teardown
+}
+
+test_delete_prune_orphaned() {
+    echo "=== test: delete --prune removes orphaned targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "B$(printf '\n\nDispatch-Target-Id: 2')" -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "C$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Rebase to remove tid 3 (simulate dropping the commit via interactive rebase)
+    # Instead: create a new source without tid 3
+    git branch -D target-3 -q 2>/dev/null || true
+    # Manually create orphan: target-3 exists but tid 3 gone from source
+    # Use apply reset to rebuild, then remove the tid 3 commit
+    # Simpler: just apply, then amend the last commit to change its tid
+    git config --unset branch.target-3.dispatchsource 2>/dev/null || true
+
+    # Re-create target-3 manually as a dispatch target
+    git branch target-3 master -q
+    git config "branch.target-3.dispatchsource" "source"
+
+    # Now remove the tid-3 commit from source via rebase (drop last commit, add it back as tid 2)
+    local last_hash
+    last_hash=$(git log -1 --format="%H" source)
+    git reset --hard HEAD~1 -q
+    echo "c" > c.txt; git add c.txt
+    git commit -m "C moved$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    # target-3 exists but tid 3 no longer in source
+    local output
+    output=$(bash "$DISPATCH" delete --prune --yes 2>&1)
+    assert_contains "$output" "Deleted target-3" "prune deletes orphaned target-3"
+
+    # target-1 and target-2 should still exist
+    git rev-parse --verify refs/heads/target-1 >/dev/null 2>&1
+    assert_eq "0" "$?" "target-1 preserved by prune"
+    git rev-parse --verify refs/heads/target-2 >/dev/null 2>&1
+    assert_eq "0" "$?" "target-2 preserved by prune"
+
+    teardown
+}
+
+test_merged_target_skipped_in_apply
+test_merged_target_skipped_in_sync
+test_apply_all_includes_merged
+test_sync_all_includes_merged
+test_status_shows_merged
+test_merged_target_resumes_after_revert
+test_delete_single_target
+test_delete_all_targets
+test_delete_dry_run
+test_delete_prune_orphaned
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

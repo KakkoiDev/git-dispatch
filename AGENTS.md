@@ -33,7 +33,8 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
 | `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
-| `git dispatch status` | Show sync state, divergence, stale targets |
+| `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch status` | Show sync state, divergence, stale targets, merged |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up, return to source |
 | `git dispatch reset [--yes]` | Delete targets and config |
@@ -46,7 +47,7 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | Update one existing target | `git dispatch apply <N>` |
 | Regenerate one target from scratch | `git dispatch apply reset <N>` |
 | Regenerate all targets from scratch | `git dispatch apply reset all` |
-| Merge base into source and targets | `git dispatch apply --base` |
+| Include merged targets | `git dispatch apply --all` |
 
 ## Workflows
 
@@ -167,6 +168,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `--dry-run` | Show plan, make no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
+| `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
 
 ## Conflict Handling
@@ -236,4 +238,7 @@ Only files from that target's own commits are checked. Base drift (source behind
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
 | All targets need regeneration | `git dispatch apply reset all --yes` |
 | Stuck operation/conflict | `git dispatch abort` |
+| Clean up merged/orphaned targets | `git dispatch delete <N>` or `delete --prune` |
+| Merged PR reverted on base | `git dispatch apply reset <N>` then `apply` |
+| Force sync/apply on merged targets | `--all` flag |
 | Worktree config collision | Fixed: config is branch-scoped per-worktree |

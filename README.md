@@ -60,7 +60,8 @@ git dispatch push all
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
 | `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
-| `git dispatch status` | Show sync state, divergence |
+| `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch status` | Show sync state, divergence, merged targets |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up |
 | `git dispatch reset [--yes]` | Delete targets and config |
@@ -217,6 +218,7 @@ Checkout branches: `dispatch-checkout/<source>/<N>`
 | `--dry-run` | Show plan, make no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
+| `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
 
 ## Conflict Handling
@@ -228,6 +230,31 @@ All commands show conflicted files and diff on failure.
 - **`git dispatch abort`**: cancel operation, clean up, return to source
 - **`Dispatch-Source-Keep`**: auto-resolves with `--strategy-option theirs`
 - **`git dispatch continue`**: checks for pending resolutions
+
+## Merged Target Detection
+
+When a target's PR is merged (regular or squash-merge), `status` shows it as `merged`. `sync` and `apply` skip merged targets automatically since there's no point updating branches already in base.
+
+- `--all` overrides the skip: `git dispatch sync --all` or `git dispatch apply --all`
+- Merged detection is content-based (compares file content against base), not GitHub API
+
+### Clean up merged targets
+
+```bash
+git dispatch delete 3             # delete specific target
+git dispatch delete all           # delete all targets
+git dispatch delete --prune       # delete targets whose tid no longer exists in source
+```
+
+### Revert recovery
+
+If a merged PR gets reverted on base, the target is no longer detected as merged. Normal `apply` resumes working on it. If the target branch is stale, regenerate it:
+
+```bash
+git dispatch apply reset 3        # regenerate target from scratch
+git dispatch apply 3              # now works normally
+git dispatch push 3
+```
 
 ## Divergence Detection
 

@@ -923,11 +923,12 @@ cmd_sync() {
     _require_init
     _acquire_lock
 
-    local dry_run=false resolve=false
+    local dry_run=false resolve=false include_merged=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)  dry_run=true; shift ;;
             --resolve|--continue) resolve=true; shift ;;
+            --all)      include_merged=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          die "Unexpected argument: $1" ;;
         esac
@@ -991,7 +992,15 @@ cmd_sync() {
     if [[ ${#existing_targets[@]} -gt 0 ]]; then
         local merged_targets=0 target_merge_skipped=0
 
+        local target_merged_skipped=0
+
         for _et_branch in "${existing_targets[@]}"; do
+            # Skip targets whose content is already merged into base
+            if ! $include_merged && _is_content_merged "$_et_branch" "$base"; then
+                target_merged_skipped=$((target_merged_skipped + 1))
+                continue
+            fi
+
             local _et_behind
             _et_behind=$(git rev-list --count "$_et_branch..$base" 2>/dev/null || echo 0)
             if [[ "$_et_behind" -eq 0 ]]; then
@@ -1038,6 +1047,9 @@ cmd_sync() {
         if [[ $merged_targets -gt 0 && ! $dry_run ]]; then
             info "Synced. Source and $merged_targets target(s) up to date with $base."
         fi
+        if [[ $target_merged_skipped -gt 0 ]]; then
+            info "$target_merged_skipped target(s) already merged into $base, skipped. Use --all to include."
+        fi
     fi
 }
 
@@ -1047,7 +1059,7 @@ cmd_apply() {
     _require_init
     _acquire_lock
 
-    local dry_run=false resolve=false force=false reset_target=""
+    local dry_run=false resolve=false force=false reset_target="" include_merged=false
     local -a positional=()
 
     while [[ $# -gt 0 ]]; do
@@ -1055,6 +1067,7 @@ cmd_apply() {
             --dry-run)  dry_run=true; shift ;;
             --resolve|--continue) resolve=true; shift ;;
             --force)    force=true; shift ;;
+            --all)      include_merged=true; shift ;;
             --base)     die "--base removed. Use: git dispatch sync" ;;
             --yes)      DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
@@ -1410,6 +1423,8 @@ cmd_apply() {
         fi
     fi
 
+    local apply_merged_skipped=0
+
     for tid in "${target_ids[@]}"; do
         # If applying to a specific target, skip others
         if [[ -n "$apply_target" && "$tid" != "$apply_target" ]]; then
@@ -1418,6 +1433,17 @@ cmd_apply() {
 
         local branch_name
         branch_name=$(_target_branch_name "$tid")
+
+        # Skip targets whose content is already merged into base
+        if ! $include_merged && [[ -z "$reset_target" ]] && \
+           git rev-parse --verify "refs/heads/$branch_name" &>/dev/null && \
+           _is_content_merged "$branch_name" "$base"; then
+            if $dry_run; then
+                echo -e "  ${GREEN}skip${NC} target $tid  $branch_name  (merged)"
+            fi
+            apply_merged_skipped=$((apply_merged_skipped + 1))
+            continue
+        fi
 
         # Collect hashes for this target (including "all" commits, in source order)
         local -a hashes=()
@@ -1505,8 +1531,13 @@ cmd_apply() {
         echo -e "${CYAN}Summary (dry-run):${NC} ${#target_ids[@]} targets"
     else
         local summary="$created created, $updated updated, $skipped in sync"
+        [[ $apply_merged_skipped -gt 0 ]] && summary="$summary, $apply_merged_skipped merged"
         [[ $failed -gt 0 ]] && summary="$summary, ${RED}$failed failed${NC}"
         echo -e "${CYAN}Summary:${NC} $summary"
+
+        if [[ $apply_merged_skipped -gt 0 ]]; then
+            info "$apply_merged_skipped target(s) already merged into $base, skipped. Use --all to include."
+        fi
 
         # Warn if targets may be missing base commits
         if [[ $skipped -gt 0 || $updated -gt 0 ]]; then
@@ -1658,6 +1689,12 @@ cmd_status() {
 
         if ! git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
             printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created\n" "$tid" "$branch_name"
+            continue
+        fi
+
+        # Check if target content is already merged into base
+        if _is_content_merged "$branch_name" "$base"; then
+            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  ${GREEN}merged${NC}${pr_suffix}\n" "$tid" "$branch_name"
             continue
         fi
 
@@ -1830,6 +1867,105 @@ cmd_status() {
         warn "Run: git dispatch apply --force  to rebuild stale targets."
     fi
 
+}
+
+# ---------- delete ----------
+
+cmd_delete() {
+    _require_init
+
+    local target="" dry_run=false prune=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            --yes)     DISPATCH_YES=true; shift ;;
+            --prune)   prune=true; shift ;;
+            -*)        die "Unknown flag: $1" ;;
+            *)         [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
+        esac
+    done
+
+    if ! $prune; then
+        [[ -n "$target" ]] || die "Usage: git dispatch delete <N|all|--prune> [--dry-run] [--yes]"
+    fi
+
+    local base source
+    base=$(_get_config base)
+    source=$(resolve_source "")
+    [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
+
+    local cur
+    cur=$(current_branch)
+
+    local -a branches_to_delete=()
+
+    if $prune; then
+        # Find targets whose tid no longer exists in source commits
+        local -a unique_source_tids=()
+        while IFS= read -r _tid; do
+            _tid=$(echo "$_tid" | tr -d '[:space:]')
+            [[ -n "$_tid" && "$_tid" != "all" ]] && unique_source_tids+=("$_tid")
+        done < <(git log --no-merges --format="%(trailers:key=Dispatch-Target-Id,valueonly)" "$base..$source" 2>/dev/null | sort -u)
+
+        while IFS= read -r existing; do
+            [[ -n "$existing" ]] || continue
+            local etid
+            etid=$(_extract_tid_from_branch "$existing") || true
+            [[ -n "$etid" ]] || continue
+            local found=false
+            for t in "${unique_source_tids[@]}"; do
+                [[ "$t" == "$etid" ]] && { found=true; break; }
+            done
+            $found && continue
+            branches_to_delete+=("$existing")
+        done < <(find_dispatch_targets "$source")
+        [[ ${#branches_to_delete[@]} -gt 0 ]] || { info "No orphaned targets found."; return; }
+    elif [[ "$target" == "all" ]]; then
+        while IFS= read -r c; do
+            [[ -n "$c" ]] && branches_to_delete+=("$c")
+        done < <(find_dispatch_targets "$source")
+        [[ ${#branches_to_delete[@]} -gt 0 ]] || die "No targets found"
+    else
+        local branch_name
+        branch_name=$(_target_branch_name "$target")
+        git rev-parse --verify "refs/heads/$branch_name" &>/dev/null || \
+            die "Target branch '$branch_name' does not exist locally"
+        branches_to_delete=("$branch_name")
+    fi
+
+    if $dry_run; then
+        echo -e "${YELLOW}[dry-run]${NC} Would delete: ${branches_to_delete[*]}"
+        return
+    fi
+
+    echo -e "${CYAN}Will delete:${NC} ${branches_to_delete[*]}"
+    _confirm "Proceed?" || { echo "Aborted."; exit 0; }
+
+    local deleted=0
+    for branch in "${branches_to_delete[@]}"; do
+        if [[ "$cur" == "$branch" ]]; then
+            warn "  Skipping $branch (currently checked out)"
+            continue
+        fi
+
+        # Remove worktree if branch is checked out in one
+        local _wt_path
+        _wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$branch" '
+            /^worktree / { wt=$2 }
+            /^branch refs\/heads\// { br=substr($2,12); if (br == b) print wt }
+        ')
+        if [[ -n "$_wt_path" ]]; then
+            git worktree remove --force "$_wt_path" 2>/dev/null || true
+        fi
+
+        git config --unset "branch.${branch}.dispatchsource" 2>/dev/null || true
+        git branch -D "$branch" 2>/dev/null || true
+        info "  Deleted $branch"
+        deleted=$((deleted + 1))
+    done
+
+    echo ""
+    info "$deleted target(s) deleted."
 }
 
 # ---------- reset ----------
@@ -2776,6 +2912,7 @@ COMMANDS
               checkin           (from checkout branch)
               checkin <N>       (from source, picks from checkout N)
   push        Push branches (push <all|source|N>)
+  delete      Delete target branches: delete <N|all|--prune>
   status      Show base, source, and all targets with sync state
   continue    Resume after conflict resolution
   abort       Cancel in-progress operation, clean up worktrees, return to source
@@ -2789,6 +2926,7 @@ FLAGS
               git command, then: git dispatch continue
   --yes       Skip all confirmation prompts. Required in non-interactive mode
               (piped stdin). Applies to: init, apply, apply reset, reset.
+  --all       Include merged targets (skipped by default in sync/apply)
   --force     Override safety checks. Meaning depends on command:
                 apply --force       Rebuild stale targets (tid reassigned)
                 push --force        Push with --force-with-lease
@@ -2828,6 +2966,7 @@ main() {
         continue)     cmd_continue "$@" ;;
         abort)        cmd_abort "$@" ;;
         retarget)     cmd_retarget "$@" ;;
+        delete)       cmd_delete "$@" ;;
         reset)        cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
