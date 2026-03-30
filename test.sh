@@ -4699,6 +4699,39 @@ test_apply_all_dies_on_broken_trailer
 test_apply_N_warns_on_broken_trailer
 test_checkin_strips_cherry_pick_metadata
 
+test_checkin_strips_trailing_blank_lines() {
+    echo "=== test: checkin strips trailing blank lines from commit message ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Create a commit whose message has trailing blank lines
+    echo "a" > a.txt; git add a.txt
+    git commit --allow-empty-message -m "$(printf 'Original feature\n\nBody paragraph\n\n\n')" --trailer "Dispatch-Target-Id: 1" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "$(printf 'Fix with trailing blanks\n\nDetails here\n\n\n')" --trailer "Dispatch-Target-Id: 1" -q
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    # Verify commit message on source: no trailing blank lines
+    local msg last_line
+    msg=$(git log -1 --format="%B" source)
+    # %B always adds a trailing newline; strip that, then check last char
+    last_line=$(printf '%s' "$msg" | tail -1)
+    assert_eq "Dispatch-Target-Id: 1" "$last_line" "last line is trailer, not blank"
+
+    # Verify interior blank lines are preserved (body separated from subject)
+    assert_contains "$msg" "$(printf 'Details here\n\n')" "interior blank line preserved"
+
+    teardown
+}
+
+test_checkin_strips_trailing_blank_lines
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
