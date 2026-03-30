@@ -810,7 +810,7 @@ _cherry_pick_commits() {
             _cp_msg=$(git log -1 --format="%B" "$hash" | \
                 sed '/^(cherry picked from commit /d' | \
                 sed '/^# Conflicts:$/,/^[^#]/{/^#/d;}' | \
-                sed -e :a -e '/^\n*$/{$d;N;ba;}')
+                awk '/^$/{blank++; next} {for(i=0;i<blank;i++) print ""; blank=0; print}')
             if ! "${gcmd[@]}" commit -m "$_cp_msg" --quiet 2>/dev/null; then
                 if "${gcmd[@]}" diff --cached --quiet; then
                     _skip_empty_pick "$hash" "${gcmd[@]}"; continue
