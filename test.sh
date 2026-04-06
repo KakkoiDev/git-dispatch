@@ -4732,6 +4732,338 @@ test_checkin_strips_trailing_blank_lines() {
 
 test_checkin_strips_trailing_blank_lines
 
+# ---------- checkout clear after checkin (subject-line matching) ----------
+
+test_checkout_clear_after_checkin_no_false_unpicked() {
+    echo "=== test: checkout clear after checkin recognizes picked commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Make a commit on checkout branch
+    echo "fix" > fix.txt; git add fix.txt
+    git commit -m "Fix something$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    # Checkin picks it to source (cherry-pick = different SHA, different diff, same subject)
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+
+    # checkout clear should NOT warn about unpicked commits
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1)
+    assert_not_contains "$output" "unpicked" "no false unpicked warning after checkin"
+    assert_branch_not_exists "dispatch-checkout/source/feature/1" "checkout branch deleted"
+
+    teardown
+}
+
+test_checkout_clear_after_checkin_mixed_picked_and_unpicked() {
+    echo "=== test: checkout clear detects real unpicked commits after partial checkin ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+
+    # Make a commit, checkin, clear, then checkout again and add unpicked commit
+    echo "fix1" > fix1.txt; git add fix1.txt
+    git commit -m "First fix$(printf '\n\nDispatch-Target-Id: 1')" -q
+    bash "$DISPATCH" checkin >/dev/null 2>&1
+    bash "$DISPATCH" checkout clear >/dev/null 2>&1
+
+    # Fresh checkout, add a commit without checkin
+    bash "$DISPATCH" checkout 1 >/dev/null 2>&1
+    echo "fix2" > fix2.txt; git add fix2.txt
+    git commit -m "Second fix$(printf '\n\nDispatch-Target-Id: 1')" -q
+    git checkout source/feature -q
+
+    # Should warn about 1 unpicked (second fix)
+    local output
+    output=$(bash "$DISPATCH" checkout clear 2>&1) || true
+    assert_contains "$output" "unpicked" "warns about genuinely unpicked commit"
+    assert_branch_exists "dispatch-checkout/source/feature/1" "branch preserved"
+
+    teardown
+}
+
+test_checkout_clear_after_checkin_no_false_unpicked
+test_checkout_clear_after_checkin_mixed_picked_and_unpicked
+
+# ---------- improvement #6: checkout branch auto-carry skip ----------
+
+test_checkout_branch_no_auto_carry() {
+    echo "=== test: prepare-commit-msg skips auto-carry on checkout branches ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "b" > b.txt; git add b.txt
+    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
+
+    # On checkout branch, commit without explicit trailer - hook should NOT auto-carry
+    echo "fix" > fix.txt; git add fix.txt
+    # Use --no-verify to skip commit-msg (which requires trailer) but test prepare-commit-msg
+    local msg_file
+    msg_file=$(mktemp)
+    echo "Fix on checkout" > "$msg_file"
+    # Simulate prepare-commit-msg hook
+    local checkout_branch
+    checkout_branch=$(git symbolic-ref --short HEAD)
+    local hook_output
+    bash "$SCRIPT_DIR/hooks/prepare-commit-msg" "$msg_file" "message" 2>&1 || true
+    local has_trailer
+    has_trailer=$(grep -c "^Dispatch-Target-Id:" "$msg_file" || true)
+    assert_eq "0" "$has_trailer" "no auto-carried trailer on checkout branch"
+    rm -f "$msg_file"
+
+    teardown
+}
+
+test_checkout_branch_no_auto_carry
+
+# ---------- improvement #2: auto-sync before apply reset ----------
+
+test_apply_reset_auto_syncs() {
+    echo "=== test: apply reset auto-syncs when source is behind base ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Advance master (base) so source falls behind
+    git checkout master -q
+    echo "master-change" > master.txt; git add master.txt
+    git commit --no-verify -m "Master advance" -q
+    git checkout source/feature -q
+
+    # Verify source is behind
+    local behind
+    behind=$(git rev-list --count source/feature..master)
+    assert_eq "1" "$behind" "source is behind master before reset"
+
+    # apply reset should auto-sync
+    local output
+    output=$(bash "$DISPATCH" apply reset 1 --yes 2>&1)
+    assert_contains "$output" "Syncing first" "auto-sync triggered"
+
+    # After auto-sync, source should be up to date
+    behind=$(git rev-list --count source/feature..master)
+    assert_eq "0" "$behind" "source in sync after auto-sync"
+
+    teardown
+}
+
+test_apply_reset_no_sync_flag() {
+    echo "=== test: apply reset --no-sync skips auto-sync ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Advance master
+    git checkout master -q
+    echo "master-change" > master.txt; git add master.txt
+    git commit --no-verify -m "Master advance" -q
+    git checkout source/feature -q
+
+    # apply reset with --no-sync should skip
+    local output
+    output=$(bash "$DISPATCH" apply reset 1 --no-sync --yes 2>&1)
+    assert_not_contains "$output" "Syncing first" "no auto-sync with --no-sync"
+
+    # Source should still be behind
+    local behind
+    behind=$(git rev-list --count source/feature..master)
+    assert_eq "1" "$behind" "source still behind with --no-sync"
+
+    teardown
+}
+
+test_apply_reset_auto_syncs
+test_apply_reset_no_sync_flag
+
+# ---------- improvement #3: Source-Keep guard ----------
+
+test_source_keep_warns_non_generated() {
+    echo "=== test: Source-Keep warns about non-generated files ==="
+    setup
+
+    # Create base with a file that will conflict
+    echo "original" > handwritten.ts; git add handwritten.ts
+    git commit -m "Add handwritten file" -q
+
+    git checkout -b source/feature master -q
+    echo "changed" > handwritten.ts; git add handwritten.ts
+    git commit -m "Modify handwritten$(printf '\n\nDispatch-Target-Id: 1\nDispatch-Source-Keep: true')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Advance master to create a conflict during cherry-pick
+    git checkout master -q
+    echo "conflicting" > handwritten.ts; git add handwritten.ts
+    git commit --no-verify -m "Conflict on master" -q
+    git checkout source/feature -q
+
+    # Apply without sync - cherry-pick will conflict, Source-Keep auto-resolves
+    local output
+    output=$(bash "$DISPATCH" apply --yes 2>&1)
+    assert_contains "$output" "Source-Keep overwrote non-generated file" "warns about non-generated file"
+
+    teardown
+}
+
+test_source_keep_warns_non_generated
+
+# ---------- improvement #4: target-only commit preservation ----------
+
+test_apply_reset_replays_target_only() {
+    echo "=== test: apply reset replays target-only commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Add a target-only commit directly on the target branch
+    git checkout source/feature-1 -q
+    echo "target-fix" > target-fix.txt; git add target-fix.txt
+    git commit --no-verify -m "Target-only fix" -q
+    git checkout source/feature -q
+
+    # apply reset should detect and replay the target-only commit
+    local output
+    output=$(bash "$DISPATCH" apply reset 1 --yes 2>&1)
+    assert_contains "$output" "target-only commit" "detects target-only commits"
+    assert_contains "$output" "Replaying" "replays target-only commits"
+
+    # Verify the target-only file still exists on the rebuilt branch
+    local has_file
+    has_file=$(git log --format="%s" master..source/feature-1 | grep -c "Target-only fix" || true)
+    assert_eq "1" "$has_file" "target-only commit replayed on rebuilt branch"
+
+    teardown
+}
+
+test_apply_reset_no_replay_flag() {
+    echo "=== test: apply reset --no-replay drops target-only commits ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Add a target-only commit directly on target
+    git checkout source/feature-1 -q
+    echo "target-fix" > target-fix.txt; git add target-fix.txt
+    git commit --no-verify -m "Target-only fix" -q
+    git checkout source/feature -q
+
+    # apply reset with --no-replay should drop
+    local output
+    output=$(bash "$DISPATCH" apply reset 1 --no-replay --yes 2>&1)
+    assert_contains "$output" "will be lost" "warns about lost commits"
+    assert_not_contains "$output" "Replaying" "no replay with --no-replay"
+
+    teardown
+}
+
+test_apply_reset_replays_target_only
+test_apply_reset_no_replay_flag
+
+# ---------- improvement #1: verify command ----------
+
+test_verify_basic() {
+    echo "=== test: verify runs configured command ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Configure verify command (always succeeds)
+    git config branch.source/feature.dispatchverify "true"
+
+    local output
+    output=$(bash "$DISPATCH" verify 1 2>&1)
+    assert_contains "$output" "verified" "verify reports success"
+
+    teardown
+}
+
+test_verify_failure() {
+    echo "=== test: verify reports failure ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    # Configure verify command (always fails)
+    git config branch.source/feature.dispatchverify "false"
+
+    local output
+    output=$(bash "$DISPATCH" verify 1 2>&1) || true
+    assert_contains "$output" "failed" "verify reports failure"
+
+    teardown
+}
+
+test_verify_no_config() {
+    echo "=== test: verify fails without config ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" verify 1 2>&1) || true
+    assert_contains "$output" "No verification command" "requires config"
+
+    teardown
+}
+
+test_verify_basic
+test_verify_failure
+test_verify_no_config
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

@@ -500,6 +500,49 @@ _find_new_commits_for_target() {
     done
 }
 
+# Find commits on target that have no match in source (target-only commits).
+# Output: one hash per line (in chronological order).
+_find_target_only_commits() {
+    local base="$1" target_branch="$2" source="$3"
+
+    # Collect source subjects in one pass
+    local source_subjects
+    source_subjects=$(git log --no-merges --format="%s" "$base..$source" 2>/dev/null) || true
+
+    # Collect source patch-ids in one batched pass
+    local source_pids
+    source_pids=$(git log --no-merges --format="%H" "$base..$source" 2>/dev/null | \
+        while read -r _h; do [[ -n "$_h" ]] && git show "$_h" 2>/dev/null; done | \
+        git patch-id --stable 2>/dev/null | awk '{print $1}') || true
+
+    while IFS= read -r hash; do
+        [[ -n "$hash" ]] || continue
+        # Skip merge commits
+        local _pc
+        _pc=$(git rev-list --parents -n1 "$hash" | wc -w)
+        (( _pc > 2 )) && continue
+
+        local subject
+        subject=$(git log -1 --format="%s" "$hash")
+
+        # Check subject-line match
+        if [[ -n "$subject" ]] && [[ -n "$source_subjects" ]] && printf '%s\n' "$source_subjects" | grep -Fxq "$subject"; then
+            continue
+        fi
+
+        # Check patch-id match
+        if [[ -n "$source_pids" ]]; then
+            local tpid
+            tpid=$(git show "$hash" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
+            if [[ -n "$tpid" ]] && printf '%s\n' "$source_pids" | grep -Fxq "$tpid"; then
+                continue
+            fi
+        fi
+
+        echo "$hash"
+    done < <(git log --reverse --format="%H" "$base..$target_branch" 2>/dev/null)
+}
+
 # Get files touched by commits with a specific Dispatch-Target-Id on a branch.
 _target_id_files() {
     local base="$1" branch="$2" tid="$3"
@@ -710,6 +753,48 @@ _handle_cherry_pick_conflict() {
 }
 
 
+# Warn when Source-Keep auto-resolves non-generated files.
+# Usage: _warn_source_keep_non_generated gcmd_array hash
+_warn_source_keep_non_generated() {
+    local wt_path="$1" hash="$2"
+    local changed_files
+    # Try staged-but-uncommitted changes first (--no-commit path)
+    changed_files=$(git -C "$wt_path" diff --name-only HEAD 2>/dev/null || true)
+    # Fall back to last committed changes (cherry-pick -x path)
+    [[ -z "$changed_files" ]] && changed_files=$(git -C "$wt_path" diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)
+    [[ -z "$changed_files" ]] && return 0
+
+    # Configurable generated file patterns (comma-separated globs)
+    local source_branch
+    source_branch=$(_resolve_config_branch 2>/dev/null || true)
+    local patterns
+    patterns=$(git config "branch.${source_branch}.dispatchgeneratedpatterns" 2>/dev/null || true)
+    [[ -z "$patterns" ]] && patterns="*/gen/*,*/generated/*,*.gen.*,swagger.json,openapi.gen.d.ts"
+
+    local has_non_gen=false
+    while IFS= read -r file; do
+        [[ -z "$file" ]] && continue
+        local is_generated=false
+        local saved_ifs="$IFS"
+        IFS=','
+        for pat in $patterns; do
+            pat="${pat## }"
+            pat="${pat%% }"
+            # shellcheck disable=SC2254
+            case "$file" in
+                $pat) is_generated=true; break ;;
+            esac
+        done
+        IFS="$saved_ifs"
+        if ! $is_generated; then
+            warn "    Source-Keep overwrote non-generated file: $file"
+            has_non_gen=true
+        fi
+    done <<< "$changed_files"
+    $has_non_gen && warn "    Configure patterns: git config branch.<source>.dispatchgeneratedpatterns \"pattern1,pattern2\""
+    return 0
+}
+
 # Unified cherry-pick into a branch via temp worktree (no main-worktree checkout).
 # Usage: _cherry_pick_commits resolve branch [--add-trailer tid] [--theirs-fallback] hash...
 # Sets DISPATCH_LAST_PICKED / DISPATCH_LAST_SKIPPED globals.
@@ -756,6 +841,7 @@ _cherry_pick_commits() {
                     "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${gcmd[@]}" cherry-pick --no-commit --strategy-option theirs "$hash" 2>/dev/null; then
                         warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                        _warn_source_keep_non_generated "$_DISPATCH_WT_PATH" "$hash"
                         # Fall through to commit with trailer rewrite below
                     else
                         _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
@@ -797,6 +883,7 @@ _cherry_pick_commits() {
                         _conflict_leave "$resolve"; return 1
                     fi
                     warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                    _warn_source_keep_non_generated "$_DISPATCH_WT_PATH" "$hash"
                 else
                     _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
                     _conflict_leave "$resolve"; return 1
@@ -831,6 +918,7 @@ _cherry_pick_commits() {
                     "${gcmd[@]}" cherry-pick --abort 2>/dev/null || true
                     if "${gcmd[@]}" cherry-pick -x --strategy-option theirs "$hash" 2>/dev/null; then
                         warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
+                        _warn_source_keep_non_generated "$_DISPATCH_WT_PATH" "$hash"
                         DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
                         continue
                     fi
@@ -1132,7 +1220,7 @@ cmd_apply() {
     _require_init
     _acquire_lock
 
-    local dry_run=false resolve=false force=false reset_target="" include_merged=false
+    local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false
     local -a positional=()
 
     while [[ $# -gt 0 ]]; do
@@ -1141,6 +1229,8 @@ cmd_apply() {
             --resolve|--continue) resolve=true; shift ;;
             --force)    force=true; shift ;;
             --all)      include_merged=true; shift ;;
+            --no-sync)  no_sync=true; shift ;;
+            --no-replay) no_replay=true; shift ;;
             --base)     die "--base removed. Use: git dispatch sync" ;;
             --yes)      DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
@@ -1171,18 +1261,28 @@ cmd_apply() {
     _refresh_base "$base" || true
     _spinner_stop
 
-    # Warn if source is behind base
+    # Auto-sync before apply reset, or warn for regular apply
     local _drift_count
     _drift_count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
     if [[ "$_drift_count" -gt 0 ]]; then
-        warn "Source is $_drift_count commit(s) behind $base. Run: git dispatch sync"
+        if [[ -n "$reset_target" ]] && ! $no_sync && ! $dry_run; then
+            warn "Source is $_drift_count commit(s) behind $base. Syncing first..."
+            if $resolve; then
+                cmd_sync --resolve
+            else
+                cmd_sync
+            fi
+        else
+            warn "Source is $_drift_count commit(s) behind $base. Run: git dispatch sync"
+        fi
     fi
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
-    local commit_file patch_map_file
+    local commit_file patch_map_file replay_file
     commit_file=$(mktemp)
     patch_map_file=$(mktemp)
-    trap "rm -f '$commit_file' '$patch_map_file'" RETURN
+    replay_file=$(mktemp)
+    trap "rm -f '$commit_file' '$patch_map_file' '$replay_file'" RETURN
 
     while IFS= read -r _h; do
         # Skip merge commits (they have no Dispatch-Target-Id and that's expected)
@@ -1455,20 +1555,20 @@ cmd_apply() {
                 continue
             fi
 
-            # Check for target-only commits that would be lost
-            if [[ "$reset_target" != "all" ]]; then
-                local _target_only=0
-                while IFS= read -r _rh; do
-                    [[ -n "$_rh" ]] || continue
-                    local _rpc
-                    _rpc=$(git rev-list --parents -n1 "$_rh" | wc -w)
-                    (( _rpc > 2 )) && continue
-                    local _rtid
-                    _rtid=$(_extract_dispatch_tid "$_rh")
-                    [[ -z "$_rtid" || "$_rtid" != "$reset_tid" ]] && _target_only=$((_target_only + 1))
-                done < <(git log --format="%H" "$base..$reset_branch" 2>/dev/null)
-                if [[ $_target_only -gt 0 ]]; then
-                    warn "$reset_branch has $_target_only target-only commit(s) that will be lost."
+            # Detect target-only commits (not traceable to source)
+            local -a _to_hashes=()
+            while IFS= read -r _rh; do
+                [[ -n "$_rh" ]] && _to_hashes+=("$_rh")
+            done < <(_find_target_only_commits "$base" "$reset_branch" "$source")
+
+            if [[ ${#_to_hashes[@]} -gt 0 ]]; then
+                if ! $no_replay; then
+                    for _rh in "${_to_hashes[@]}"; do
+                        echo "$reset_tid $_rh" >> "$replay_file"
+                    done
+                    info "$reset_branch has ${#_to_hashes[@]} target-only commit(s) (will replay after rebuild)."
+                else
+                    warn "$reset_branch has ${#_to_hashes[@]} target-only commit(s) that will be lost (--no-replay)."
                     _confirm "Proceed?" || { echo "Aborted."; return 0; }
                 fi
             fi
@@ -1609,6 +1709,21 @@ cmd_apply() {
             else
                 info "  Created $branch_name (${#hashes[@]} commits)"
             fi
+
+            # Replay target-only commits saved from reset
+            if [[ -s "$replay_file" ]]; then
+                local -a _replay_hashes=()
+                while IFS=' ' read -r _rtid _rhash; do
+                    [[ "$_rtid" == "$tid" ]] && _replay_hashes+=("$_rhash")
+                done < "$replay_file"
+                if [[ ${#_replay_hashes[@]} -gt 0 ]]; then
+                    info "  Replaying ${#_replay_hashes[@]} target-only commit(s)..."
+                    if ! _cherry_pick_commits "$resolve" "$branch_name" "${_replay_hashes[@]}"; then
+                        warn "  Some target-only commits could not be replayed"
+                    fi
+                fi
+            fi
+
             created=$((created + 1))
         fi
     done
@@ -1644,12 +1759,13 @@ cmd_apply() {
 cmd_push() {
     _require_init
 
-    local target="" dry_run=false force=false
+    local target="" dry_run=false force=false verify=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run)  dry_run=true; shift ;;
             --force)    force=true; shift ;;
+            --verify)   verify=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
             *)          [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
         esac
@@ -1683,6 +1799,17 @@ cmd_push() {
     $force && push_args+=(--force-with-lease)
 
     for branch in "${branches[@]}"; do
+        # Pre-push verification
+        if $verify && [[ "$branch" != "$source" ]] && ! $dry_run; then
+            local _vtid
+            _vtid=$(_extract_tid_from_branch "$branch")
+            if [[ -n "$_vtid" ]]; then
+                if ! cmd_verify "$_vtid"; then
+                    warn "  Skipping push for $branch (verification failed)"
+                    continue
+                fi
+            fi
+        fi
         if $dry_run; then
             echo -e "  ${YELLOW}[dry-run]${NC} git push ${push_args[*]} $branch"
         else
@@ -1700,6 +1827,61 @@ cmd_push() {
             fi
         fi
     done
+}
+
+# ---------- verify ----------
+
+cmd_verify() {
+    _require_init
+
+    local target="" fix=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fix)  fix=true; shift ;;
+            -*)     die "Unknown flag: $1" ;;
+            *)      [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
+        esac
+    done
+
+    [[ -n "$target" ]] || die "Usage: git dispatch verify <N> [--fix]"
+
+    local source
+    source=$(resolve_source "")
+
+    # Get verification command from config
+    local verify_cmd
+    verify_cmd=$(git config "branch.${source}.dispatchverify" 2>/dev/null || true)
+    [[ -n "$verify_cmd" ]] || die "No verification command configured. Set: git config branch.${source}.dispatchverify \"<command>\""
+
+    local branch_name
+    branch_name=$(_target_branch_name "$target")
+    git rev-parse --verify "refs/heads/$branch_name" &>/dev/null || \
+        die "Target branch '$branch_name' does not exist. Run: git dispatch apply"
+
+    info "Verifying target $target ($branch_name)..."
+    _enter_branch "$branch_name" || die "Cannot access branch $branch_name"
+
+    local verify_exit=0
+    # Run verification in the worktree directory
+    ( cd "$_DISPATCH_WT_PATH" && eval "$verify_cmd" ) || verify_exit=$?
+
+    if [[ $verify_exit -ne 0 ]]; then
+        if $fix; then
+            warn "Verification failed. Fix in worktree: $_DISPATCH_WT_PATH"
+            warn "When done, commit and run: git dispatch continue"
+            _DISPATCH_WT_CREATED=false
+            _DISPATCH_WT_STASHED=false
+            return 1
+        else
+            _leave_branch
+            warn "Verification failed for target $target (exit code $verify_exit)"
+            return 1
+        fi
+    fi
+
+    _leave_branch
+    info "Target $target verified."
+    return 0
 }
 
 # ---------- status ----------
@@ -2551,28 +2733,47 @@ _checkout_clear() {
             local checkout_base
             checkout_base=$(git config "branch.${checkout_branch}.dispatchcheckoutbase" 2>/dev/null || true)
 
-            local unpicked=0
+            # Determine range of checkout commits to check
+            local range_start
             if [[ -n "$checkout_base" ]]; then
-                unpicked=$(git log --no-merges --oneline "$checkout_base..$checkout_branch" 2>/dev/null | wc -l | tr -d ' ')
+                range_start="$checkout_base"
             else
-                # Fallback: patch-id matching for old checkouts
-                local base
-                base=$(_get_config base)
-                local source_pids
-                source_pids=$(git log --format="%H" "$base..$source" | while read -r h; do
-                    git show "$h" 2>/dev/null
-                done | git patch-id --stable 2>/dev/null | awk '{print $1}')
+                range_start=$(_get_config base)
+            fi
 
-                while IFS= read -r ch; do
-                    [[ -z "$ch" ]] && continue
+            # Subject-line + patch-id matching against source (same strategy as apply)
+            # Cherry-pick across different bases produces different diffs but same subject.
+            local base
+            base=$(_get_config base)
+            local source_subjects
+            source_subjects=$(git log --no-merges --format="%s" "$base..$source" 2>/dev/null) || true
+            local source_pids
+            source_pids=$(git log --no-merges --format="%H" "$base..$source" 2>/dev/null | \
+                while read -r h; do [[ -n "$h" ]] && git show "$h" 2>/dev/null; done | \
+                git patch-id --stable 2>/dev/null | awk '{print $1}') || true
+
+            local unpicked=0
+            while IFS= read -r ch; do
+                [[ -z "$ch" ]] && continue
+                local subj
+                subj=$(git log -1 --format="%s" "$ch")
+
+                # Primary: subject-line match
+                if [[ -n "$subj" ]] && printf '%s\n' "$source_subjects" | grep -Fxq "$subj"; then
+                    continue
+                fi
+
+                # Fallback: patch-id match
+                if [[ -n "$source_pids" ]]; then
                     local cpid
                     cpid=$(git show "$ch" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}')
-                    [[ -z "$cpid" ]] && continue
-                    if ! echo "$source_pids" | grep -Fxq "$cpid"; then
-                        unpicked=$((unpicked + 1))
+                    if [[ -n "$cpid" ]] && printf '%s\n' "$source_pids" | grep -Fxq "$cpid"; then
+                        continue
                     fi
-                done < <(git log --format="%H" "$base..$checkout_branch")
-            fi
+                fi
+
+                unpicked=$((unpicked + 1))
+            done < <(git log --no-merges --format="%H" "$range_start..$checkout_branch")
 
             if [[ $unpicked -gt 0 ]]; then
                 warn "$unpicked unpicked commit(s) on $checkout_branch"
@@ -2700,6 +2901,11 @@ cmd_checkin() {
     fi
 
     info "Checked in $DISPATCH_LAST_PICKED commit(s) to $source"
+
+    # Advance checkout base so checkout clear knows these commits were picked
+    local new_base
+    new_base=$(git rev-parse "$checkout_branch")
+    git config "branch.${checkout_branch}.dispatchcheckoutbase" "$new_base"
 
     # Switch back to source branch
     if [[ "$cur" == dispatch-checkout/* ]]; then
@@ -3020,6 +3226,11 @@ COMMANDS
               checkin           (from checkout branch)
               checkin <N>       (from source, picks from checkout N)
   push        Push branches (push <all|source|N>)
+                push --verify       Run verification before pushing
+  verify      Run configured verification on a target:
+                verify <N>          Verify target N in a temp worktree
+                verify <N> --fix    On failure, leave worktree for fixing
+              Configure: git config branch.<source>.dispatchverify "<command>"
   delete      Delete target branches: delete <N|all|--prune>
   status      Show base, source, and all targets with sync state
   continue    Resume after conflict resolution
@@ -3035,6 +3246,8 @@ FLAGS
   --yes       Skip all confirmation prompts. Required in non-interactive mode
               (piped stdin). Applies to: init, apply, apply reset, reset.
   --all       Include merged targets (skipped by default in sync/apply)
+  --no-sync   Skip auto-sync before apply reset
+  --no-replay Skip replaying target-only commits after apply reset
   --force     Override safety checks. Meaning depends on command:
                 apply --force       Rebuild stale targets (tid reassigned)
                 push --force        Push with --force-with-lease
@@ -3053,6 +3266,8 @@ TRAILERS
 
   When a cherry-pick conflicts on a commit with this trailer, the source
   version is auto-accepted with --strategy-option theirs.
+  Warns when non-generated files are overwritten. Configure patterns:
+    git config branch.<source>.dispatchgeneratedpatterns "*/gen/*,*.gen.*"
 
 HELP
 }
@@ -3068,6 +3283,7 @@ main() {
         sync)         cmd_sync "$@" ;;
         apply)        cmd_apply "$@" ;;
         push)         cmd_push "$@" ;;
+        verify)       cmd_verify "$@" ;;
         status)       cmd_status "$@" ;;
         checkout)     cmd_checkout "$@" ;;
         checkin)      cmd_checkin "$@" ;;

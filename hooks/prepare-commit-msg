@@ -8,6 +8,10 @@ source="$2"  # message, template, merge, squash, commit
 # Skip merge and amend
 [[ "$source" == "merge" || "$source" == "commit" ]] && exit 0
 
+# Skip auto-carry on checkout branches (interleaved targets make it unreliable)
+current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+[[ "$current_branch" == dispatch-checkout/* ]] && exit 0
+
 # Skip if Dispatch-Target-Id already present
 grep -q "^Dispatch-Target-Id:" "$msg_file" && exit 0
 
