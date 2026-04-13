@@ -3816,7 +3816,7 @@ test_retarget_basic() {
 
     # Retarget from 8 to 9
     local output
-    output=$(bash "$DISPATCH" retarget 8 9 2>&1)
+    output=$(bash "$DISPATCH" retarget --target 8 --to-target 9 2>&1)
 
     assert_contains "$output" "Retarget 1 commit(s)" "reports commit count"
     assert_contains "$output" "Feature A" "reports commit subject"
@@ -3862,7 +3862,7 @@ test_retarget_dry_run() {
     before_sha=$(git rev-parse HEAD)
 
     local output
-    output=$(bash "$DISPATCH" retarget 8 15 --dry-run 2>&1)
+    output=$(bash "$DISPATCH" retarget --target 8 --to-target 15 --dry-run 2>&1)
 
     assert_contains "$output" "Feature A" "shows commit in dry run"
     assert_contains "$output" "Dry run" "says dry run"
@@ -3886,7 +3886,7 @@ test_retarget_multiple_commits() {
     git commit -m "Third$(printf '\n\nDispatch-Target-Id: 5')" -q
 
     local output
-    output=$(bash "$DISPATCH" retarget 5 10 2>&1)
+    output=$(bash "$DISPATCH" retarget --target 5 --to-target 10 2>&1)
 
     assert_contains "$output" "Retarget 3 commit(s)" "reports 3 commits"
     assert_contains "$output" "3 revert(s) and 3 re-apply" "created correct commit count"
@@ -3910,7 +3910,7 @@ test_retarget_no_commits_errors() {
     git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output exit_code=0
-    output=$(bash "$DISPATCH" retarget 99 1 2>&1) || exit_code=$?
+    output=$(bash "$DISPATCH" retarget --target 99 --to-target 1 2>&1) || exit_code=$?
 
     assert_eq "1" "$exit_code" "exits with error"
     assert_contains "$output" "No commits found" "reports no commits"
@@ -3929,7 +3929,7 @@ test_retarget_all_disallowed() {
     git commit -m "A$(printf '\n\nDispatch-Target-Id: all')" -q
 
     local output exit_code=0
-    output=$(bash "$DISPATCH" retarget all 1 2>&1) || exit_code=$?
+    output=$(bash "$DISPATCH" retarget --target all --to-target 1 2>&1) || exit_code=$?
 
     assert_eq "1" "$exit_code" "exits with error"
     assert_contains "$output" "Cannot retarget from" "rejects retarget from all"
@@ -3948,7 +3948,7 @@ test_retarget_same_id_errors() {
     git commit -m "A$(printf '\n\nDispatch-Target-Id: 1')" -q
 
     local output exit_code=0
-    output=$(bash "$DISPATCH" retarget 1 1 2>&1) || exit_code=$?
+    output=$(bash "$DISPATCH" retarget --target 1 --to-target 1 2>&1) || exit_code=$?
 
     assert_eq "1" "$exit_code" "exits with error"
     assert_contains "$output" "same" "reports same id error"
@@ -3967,7 +3967,7 @@ test_retarget_to_all_allowed() {
     git commit -m "Shared change$(printf '\n\nDispatch-Target-Id: 3')" -q
 
     local output
-    output=$(bash "$DISPATCH" retarget 3 all 2>&1)
+    output=$(bash "$DISPATCH" retarget --target 3 --to-target all 2>&1)
 
     assert_contains "$output" "Retarget 1 commit(s)" "retarget to all works"
     assert_contains "$output" "1 revert(s) and 1 re-apply" "creates commits"
@@ -3995,9 +3995,86 @@ test_retarget_with_apply_flag() {
     bash "$DISPATCH" apply >/dev/null 2>&1
 
     local output
-    output=$(bash "$DISPATCH" retarget 1 2 --apply 2>&1)
+    output=$(bash "$DISPATCH" retarget --target 1 --to-target 2 --apply 2>&1)
 
     assert_contains "$output" "Running: git dispatch apply" "runs apply"
+
+    teardown
+}
+
+test_retarget_single_commit() {
+    echo "=== test: retarget --commit moves a single commit ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "First$(printf '\n\nDispatch-Target-Id: 1')" -q
+    local first_hash
+    first_hash=$(git rev-parse HEAD)
+
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Second$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    local output
+    output=$(bash "$DISPATCH" retarget --commit "$first_hash" --to-target 2 2>&1)
+
+    assert_contains "$output" "Retarget 1 commit(s)" "reports 1 commit"
+    assert_contains "$output" "First" "reports correct commit subject"
+
+    # Source should have 2 original + 1 revert + 1 re-apply = 4 commits
+    local count
+    count=$(git log --oneline master..source | wc -l | tr -d ' ')
+    assert_eq "4" "$count" "source has 4 commits"
+
+    # Verify re-apply has target-id 2
+    local last_trailer
+    last_trailer=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "2" "$last_trailer" "re-apply has target-id 2"
+
+    teardown
+}
+
+test_retarget_commit_no_trailer_errors() {
+    echo "=== test: retarget --commit errors on commit without trailer ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "No trailer" -q
+    local hash
+    hash=$(git rev-parse HEAD)
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" retarget --commit "$hash" --to-target 2 2>&1) || exit_code=$?
+
+    assert_eq "1" "$exit_code" "exits with error"
+    assert_contains "$output" "no Dispatch-Target-Id" "reports missing trailer"
+
+    teardown
+}
+
+test_retarget_missing_flags_errors() {
+    echo "=== test: retarget errors on missing required flags ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    # Missing --to-target
+    local output exit_code=0
+    output=$(bash "$DISPATCH" retarget --target 1 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "exits with error without --to-target"
+    assert_contains "$output" "--to-target" "reports missing --to-target"
+
+    # Missing --target/--commit
+    exit_code=0
+    output=$(bash "$DISPATCH" retarget --to-target 2 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "exits with error without --target/--commit"
+    assert_contains "$output" "--target" "reports missing --target or --commit"
 
     teardown
 }
@@ -4153,6 +4230,9 @@ test_retarget_all_disallowed
 test_retarget_same_id_errors
 test_retarget_to_all_allowed
 test_retarget_with_apply_flag
+test_retarget_single_commit
+test_retarget_commit_no_trailer_errors
+test_retarget_missing_flags_errors
 
 # ---------- merged target detection ----------
 

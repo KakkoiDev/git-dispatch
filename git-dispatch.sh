@@ -3011,27 +3011,26 @@ cmd_retarget() {
     _acquire_lock
 
     local dry_run=false auto_apply=false
-    local -a positional=()
+    local from_target="" commit_hash="" to_id=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --dry-run)  dry_run=true; shift ;;
-            --apply)    auto_apply=true; shift ;;
-            -*)         die "Unknown flag: $1" ;;
-            *)          positional+=("$1"); shift ;;
+            --dry-run)    dry_run=true; shift ;;
+            --apply)      auto_apply=true; shift ;;
+            --target)     [[ -n "${2:-}" ]] || die "--target requires a value"; from_target="$2"; shift 2 ;;
+            --commit)     [[ -n "${2:-}" ]] || die "--commit requires a value"; commit_hash="$2"; shift 2 ;;
+            --to-target)  [[ -n "${2:-}" ]] || die "--to-target requires a value"; to_id="$2"; shift 2 ;;
+            -*)           die "Unknown flag: $1" ;;
+            *)            die "Unexpected argument: $1" ;;
         esac
     done
 
-    [[ ${#positional[@]} -ge 2 ]] || die "Usage: git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]"
-    local from_id="${positional[0]}" to_id="${positional[1]}"
+    # Validate required flags
+    [[ -n "$to_id" ]] || die "Missing --to-target. Usage: dispatch retarget --target <id> --to-target <id>"
+    [[ -n "$from_target" || -n "$commit_hash" ]] || die "Missing --target or --commit. Usage: dispatch retarget --target <id> --to-target <id>"
+    [[ -z "$from_target" || -z "$commit_hash" ]] || die "Cannot use both --target and --commit. Pick one."
 
-    # Validate ids
-    [[ "$from_id" == "$to_id" ]] && die "from-id and to-id are the same: $from_id"
-    [[ "$from_id" == "all" ]] && die "Cannot retarget from 'all'. Shared commits cannot be moved."
-    for _vid in "$from_id" "$to_id"; do
-        [[ "$_vid" == "all" ]] && continue
-        echo "$_vid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' || die "Invalid target id: $_vid"
-    done
+    _validate_target_id "$to_id"
 
     local base source
     base=$(_get_config base)
@@ -3045,23 +3044,42 @@ cmd_retarget() {
         die "Cannot retarget from checkout branch. Switch to source first: git dispatch checkout source"
     fi
 
-    # Find source commits with Dispatch-Target-Id: from_id
+    local from_id=""
     local -a from_hashes=() from_subjects=()
-    while IFS= read -r _h; do
-        [[ -n "$_h" ]] || continue
-        local _pc
-        _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
-        (( _pc > 2 )) && continue
-        git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
-        local _t
-        _t=$(_extract_dispatch_tid "$_h")
-        if [[ "$_t" == "$from_id" ]]; then
-            from_hashes+=("$_h")
-            from_subjects+=("$(git log -1 --format='%s' "$_h")")
-        fi
-    done < <(git log --reverse --format="%H" "$base..$source")
 
-    [[ ${#from_hashes[@]} -gt 0 ]] || die "No commits found with Dispatch-Target-Id: $from_id"
+    if [[ -n "$commit_hash" ]]; then
+        # Single commit mode
+        commit_hash=$(git rev-parse --verify "$commit_hash" 2>/dev/null) || die "Invalid commit: $commit_hash"
+        git merge-base --is-ancestor "$commit_hash" "$source" 2>/dev/null || die "Commit $commit_hash is not on source branch"
+        from_id=$(_extract_dispatch_tid "$commit_hash")
+        [[ -n "$from_id" ]] || die "Commit $(echo "$commit_hash" | cut -c1-8) has no Dispatch-Target-Id trailer"
+        [[ "$from_id" != "$to_id" ]] || die "Commit already has Dispatch-Target-Id: $to_id"
+        [[ "$from_id" != "all" ]] || die "Cannot retarget from 'all'. Shared commits cannot be moved."
+        from_hashes+=("$commit_hash")
+        from_subjects+=("$(git log -1 --format='%s' "$commit_hash")")
+    else
+        # Target mode - find all commits with matching target id
+        _validate_target_id "$from_target"
+        [[ "$from_target" != "$to_id" ]] || die "--target and --to-target are the same: $from_target"
+        [[ "$from_target" != "all" ]] || die "Cannot retarget from 'all'. Shared commits cannot be moved."
+        from_id="$from_target"
+
+        while IFS= read -r _h; do
+            [[ -n "$_h" ]] || continue
+            local _pc
+            _pc=$(git rev-list --parents -n1 "$_h" | wc -w)
+            (( _pc > 2 )) && continue
+            git merge-base --is-ancestor "$_h" "$base" 2>/dev/null && continue
+            local _t
+            _t=$(_extract_dispatch_tid "$_h")
+            if [[ "$_t" == "$from_id" ]]; then
+                from_hashes+=("$_h")
+                from_subjects+=("$(git log -1 --format='%s' "$_h")")
+            fi
+        done < <(git log --reverse --format="%H" "$base..$source")
+
+        [[ ${#from_hashes[@]} -gt 0 ]] || die "No commits found with Dispatch-Target-Id: $from_id"
+    fi
 
     echo -e "${CYAN}Retarget ${#from_hashes[@]} commit(s) from target $from_id to target $to_id${NC}"
     echo ""
@@ -3103,7 +3121,7 @@ Dispatch-Target-Id: $from_id"
                 continue
             fi
             warn "Conflict reverting $(echo "$hash" | cut -c1-8): $subj"
-            warn "Resolve the conflict, then run: git dispatch retarget $from_id $to_id"
+            warn "Resolve the conflict, then run: git dispatch retarget --target $from_id --to-target $to_id"
             exit 1
         fi
 
@@ -3138,7 +3156,7 @@ Dispatch-Target-Id: $to_id"
                 continue
             fi
             warn "Conflict re-applying $(echo "$hash" | cut -c1-8): $subj"
-            warn "Resolve the conflict, then run: git dispatch retarget $from_id $to_id"
+            warn "Resolve the conflict, then run: git dispatch retarget --target $from_id --to-target $to_id"
             git cherry-pick --abort 2>/dev/null || git reset --merge 2>/dev/null || true
             exit 1
         fi
@@ -3280,7 +3298,8 @@ COMMANDS
   apply       Cherry-pick source commits to targets. apply <N> for one target.
               apply reset <N|all> to regenerate from scratch.
   retarget    Move commits between targets without rewriting history:
-                retarget <from-id> <to-id>  Creates revert + re-apply pairs
+                retarget --target <id> --to-target <id>   All commits from target
+                retarget --commit <hash> --to-target <id> Single commit
                 --apply to run apply automatically after retargeting
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
