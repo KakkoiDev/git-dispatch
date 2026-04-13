@@ -16,7 +16,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | Command | Description |
 |---------|-------------|
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts interactively when args omitted) |
-| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch commit "message" [--target N] [--source-keep]` | Commit with auto-managed trailers |
 | `git dispatch sync [--dry-run] [--resolve]` | Merge base into source and existing targets |
 | `git dispatch apply [<N>] [--dry-run] [--resolve] [--force] [--yes]` | Cherry-pick source commits to targets |
 | `git dispatch apply reset <N\|all> [--yes]` | Regenerate one or all targets from scratch |
@@ -24,7 +24,8 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
-| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
+| `git dispatch retarget --target <id> --to-target <id> [--dry-run] [--apply]` | Move all commits from one target to another |
+| `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence, merged |
@@ -34,17 +35,17 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 
 ## Trailers
 
-Every commit needs a `Dispatch-Target-Id` trailer:
+Use `dispatch commit` to tag commits with trailers:
 ```bash
-git commit -m "Add user model" --trailer "Dispatch-Target-Id=1"
-git commit -m "Update CI config" --trailer "Dispatch-Target-Id=all"
-git commit -m "Regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "Add user model" --target 1
+git dispatch commit "Update CI config" --target all
+git dispatch commit "Regen swagger" --target 3 --source-keep
 ```
 
 - Numeric: integer or decimal (1, 2, 1.5). Decimals enable mid-stack insertion.
 - `all`: commit included in every target during apply.
-- `Dispatch-Source-Keep: true`: auto-resolve conflicts with incoming version (--theirs). Used for generated files. Works during both apply (source->target) and checkin (checkout->source).
-- Hook auto-carries Dispatch-Target-Id from previous commit.
+- `--source-keep`: auto-resolve conflicts with incoming version (--theirs). Used for generated files. Works during both apply (source->target) and checkin (checkout->source).
+- On checkout branches, `--target` is auto-detected from branch name.
 
 ## Workflows
 
@@ -52,9 +53,9 @@ git commit -m "Regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispat
 ```bash
 git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
 # or just: git dispatch init  (prompts interactively)
-git commit -m "Add user model" --trailer "Dispatch-Target-Id=1"
-git commit -m "Add auth middleware" --trailer "Dispatch-Target-Id=2"
-git commit -m "Add login endpoint" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Add user model" --target 1
+git dispatch commit "Add auth middleware" --target 2
+git dispatch commit "Add login endpoint" --target 2
 git dispatch apply
 git dispatch push all
 ```
@@ -70,7 +71,8 @@ git dispatch checkout clear       # remove test branch
 ### Fix during integration
 ```bash
 git dispatch checkout 3
-# fix bug, commit with Dispatch-Target-Id
+# fix bug
+git dispatch commit "Fix"         # auto-detects target from checkout branch
 git dispatch checkin              # picks fix to source
 git dispatch checkout source
 git dispatch apply                # propagates to targets
@@ -82,13 +84,13 @@ git dispatch checkout clear
 ```bash
 # Option A: regen on source with Source-Keep
 pnpm openapi
-git commit -m "regen" --trailer "Dispatch-Target-Id=all" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen" --target all --source-keep
 git dispatch apply
 
 # Option B: regen for failing target via checkout
 git dispatch checkout 3
 pnpm openapi
-git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen swagger" --source-keep    # auto-detects target 3
 git dispatch checkin             # Source-Keep auto-resolves conflict
 git dispatch checkout source
 git dispatch apply
@@ -97,13 +99,14 @@ git dispatch push 3
 
 ### Retarget commits (change Dispatch-Target-Id)
 ```bash
-git dispatch retarget 8 15       # moves commits from target 8 to 15
-git dispatch apply               # updates both targets
+git dispatch retarget --target 8 --to-target 15       # moves all commits from target 8 to 15
+git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
+git dispatch apply                                     # updates both targets
 ```
 
 ### Review feedback
 ```bash
-git commit -m "Rename field per review" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Rename field per review" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -194,9 +197,9 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base | `git dispatch sync` |
-| Move commit to different target | `git dispatch retarget <from> <to>` then `apply` |
+| Move commit to different target | `git dispatch retarget --target <from> --to-target <to>` then `apply` |
 | Stale target after tid reassignment (rebase) | `git dispatch apply --force` |
-| Generated file conflict | Add `Dispatch-Source-Keep=true` trailer |
+| Generated file conflict | `dispatch commit --source-keep` |
 | Target CI fails (missing swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Use decimal: `Dispatch-Target-Id=1.5` |
 | All targets need regeneration | `git dispatch apply reset all --yes` |

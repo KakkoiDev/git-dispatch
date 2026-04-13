@@ -44,7 +44,7 @@ Source is the single point of truth. Targets never touch base directly. Checkout
 
 ```
 git dispatch init [--base <branch>] [--target-pattern <pattern>]
-git dispatch init --hooks
+git dispatch commit "message" [--target N] [--source-keep]
 git dispatch apply [<N>] [--base] [--dry-run] [--resolve|--continue] [--force] [-y|--yes]
 git dispatch apply reset <N|all> [--force] [-y|--yes]
 git dispatch checkout <N> [--dry-run] [--resolve|--continue]
@@ -71,7 +71,9 @@ git dispatch reset [--force] [-y|--yes]
 
 ### Command Reference
 
-**init** - Configure dispatch on current source branch. Stores config in branch-scoped git config. Installs hooks. Prompts interactively when `--base` or `--target-pattern` are omitted.
+**init** - Configure dispatch on current source branch. Stores config in branch-scoped git config. Prompts interactively when `--base` or `--target-pattern` are omitted.
+
+**commit** - Commit with auto-managed `Dispatch-Target-Id` trailer. On checkout branches, auto-detects target from branch name. On source branches, `--target N` is required. `--source-keep` adds `Dispatch-Source-Keep: true`.
 
 **apply** - Create or update target branches from source commits grouped by Dispatch-Target-Id. Idempotent. Detects stale targets via patch-id matching after Dispatch-Target-Id reassignment. With `--base`, merges base into source AND existing targets (no force-push needed).
 
@@ -87,7 +89,7 @@ git dispatch reset [--force] [-y|--yes]
 
 **push** - Push branches. Positional arg: `push all`, `push source`, `push 3`.
 
-**delete** - Delete target branches. `delete 3` deletes one target, `delete all` deletes all targets, `delete --prune` auto-detects and deletes targets whose tid no longer exists in source. Unlike `reset`, does not touch dispatch config or hooks.
+**delete** - Delete target branches. `delete 3` deletes one target, `delete all` deletes all targets, `delete --prune` auto-detects and deletes targets whose tid no longer exists in source. Unlike `reset`, does not touch dispatch config.
 
 **status** - Show mode, base, source, all targets with sync state, divergence, stale detection. Shows `merged` for targets whose content is already in base.
 
@@ -95,16 +97,16 @@ git dispatch reset [--force] [-y|--yes]
 
 **abort** - Cancel in-progress operation. Aborts cherry-pick/merge in dispatch worktrees, removes temp worktrees, cleans up checkout branches, returns to source.
 
-**reset** - Delete all targets and config. Prompts for confirmation (skip with `--force` or `--yes`). Preserves hooks when other dispatch sessions are active.
+**reset** - Delete all targets and config. Prompts for confirmation (skip with `--force` or `--yes`).
 
 ## Dispatch-Target-Id Trailer
 
-Mandatory on every commit. Enforced by commit-msg hook.
+Mandatory on every commit. Managed by `dispatch commit`.
 
 ```bash
-git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
-git commit -m "Shared config" --trailer "Dispatch-Target-Id=all"
-git commit -m "Regen files" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "Add feature" --target 1
+git dispatch commit "Shared config" --target all
+git dispatch commit "Regen files" --target 3 --source-keep
 ```
 
 Rules:
@@ -112,8 +114,8 @@ Rules:
 - `all`: included in every target during apply (shared infra, CI configs, merge-from-main)
 - Determines target branch and stack order (numeric sort)
 - Decimals enable mid-stack insertion
-- Hook auto-carries from previous commit
-- `Dispatch-Source-Keep: true`: auto-resolve conflicts with incoming version (--strategy-option theirs). Works in both apply (source->target) and checkin (checkout->source).
+- On checkout branches, `--target` is auto-detected from branch name
+- `--source-keep`: auto-resolve conflicts with incoming version (--strategy-option theirs). Works in both apply (source->target) and checkin (checkout->source).
 
 ## Config
 
@@ -130,8 +132,7 @@ Config is branch-scoped (per-source-branch) to avoid collisions across worktrees
 
 When multiple worktrees are detected:
 - `extensions.worktreeConfig` is enabled automatically
-- `core.hooksPath` is scoped per-worktree (avoids collision)
-- `reset` preserves hooks and global config when other dispatch sessions are active
+- Config is branch-scoped per-worktree (avoids collision)
 
 ## Safety System
 
@@ -188,10 +189,10 @@ git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
 ## 2. Develop
 
 ```bash
-git commit -m "Add user model"      --trailer "Dispatch-Target-Id=1"
-git commit -m "Add auth middleware"  --trailer "Dispatch-Target-Id=2"
-git commit -m "Add login endpoint"   --trailer "Dispatch-Target-Id=2"
-git commit -m "Update CI config"    --trailer "Dispatch-Target-Id=all"
+git dispatch commit "Add user model"      --target 1
+git dispatch commit "Add auth middleware"  --target 2
+git dispatch commit "Add login endpoint"   --target 2
+git dispatch commit "Update CI config"    --target all
 ```
 
 ## 3. Create PRs
@@ -215,7 +216,7 @@ git dispatch checkout clear       # cleanup
 ```bash
 git dispatch checkout 3
 # fix bug
-git commit -m "Fix auth race" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix auth race"       # auto-detects target from checkout branch
 git dispatch checkin              # picks fix to source
 git dispatch checkout source
 git dispatch apply                # propagates to target-2
@@ -229,8 +230,7 @@ git dispatch checkout clear
 # Regen for failing target
 git dispatch checkout 3
 pnpm openapi
-git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" \
-  --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen swagger" --source-keep    # auto-detects target 3
 git dispatch checkin             # Source-Keep auto-resolves
 git dispatch checkout source
 git dispatch apply
@@ -238,15 +238,14 @@ git dispatch push 3
 
 # Or regen on source for all targets
 pnpm openapi
-git commit -m "regen" --trailer "Dispatch-Target-Id=all" \
-  --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen" --target all --source-keep
 git dispatch apply
 ```
 
 ## 7. Review feedback
 
 ```bash
-git commit -m "Rename field" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Rename field" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -262,7 +261,7 @@ git dispatch push all
 ## 9. Iterate
 
 ```bash
-git commit -m "Fix edge case" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix edge case" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -276,7 +275,7 @@ git dispatch reset --yes          # or --force
 ## 11. Insert task mid-stack
 
 ```bash
-git commit -m "Add migration" --trailer "Dispatch-Target-Id=1.5"
+git dispatch commit "Add migration" --target 1.5
 git dispatch apply    # creates target between 1 and 2
 ```
 
@@ -300,7 +299,7 @@ git dispatch abort
 ```bash
 git checkout -b feat/auth master
 git dispatch init     # interactive prompts
-# code with Dispatch-Target-Id trailers
+# code with dispatch commit
 git dispatch apply
 git dispatch push all
 ```
@@ -312,7 +311,7 @@ git dispatch init --base origin/master --target-pattern "feat/auth-{id}" --yes
 
 ### Daily iteration
 ```bash
-git commit -m "Fix edge case" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix edge case" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -329,7 +328,7 @@ git dispatch checkout clear
 ```bash
 git dispatch checkout 3
 # fix bug
-git commit -m "Fix" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix"         # auto-detects target from checkout branch
 git dispatch checkin
 git dispatch checkout source
 git dispatch apply
@@ -341,7 +340,7 @@ git dispatch checkout clear
 ```bash
 git dispatch checkout 3
 pnpm openapi
-git commit -m "regen" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen" --source-keep    # auto-detects target 3
 git dispatch checkin
 git dispatch checkout source
 git dispatch apply

@@ -31,11 +31,11 @@ git dispatch init
 # Or with explicit flags
 git dispatch init --base origin/master --target-pattern "feature/auth-{id}"
 
-# Code with Dispatch-Target-Id trailers (hook auto-carries from previous commit)
-git commit -m "Add user model"        --trailer "Dispatch-Target-Id=1"
-git commit -m "Add auth middleware"   --trailer "Dispatch-Target-Id=2"
-git commit -m "Add login endpoint"    --trailer "Dispatch-Target-Id=2"
-git commit -m "Add validation"        --trailer "Dispatch-Target-Id=3"
+# Code with dispatch commit
+git dispatch commit "Add user model"        --target 1
+git dispatch commit "Add auth middleware"   --target 2
+git dispatch commit "Add login endpoint"    --target 2
+git dispatch commit "Add validation"        --target 3
 
 # Create target branches and push
 git dispatch apply
@@ -50,7 +50,7 @@ git dispatch push all
 | Command | Description |
 |---------|-------------|
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts when args omitted) |
-| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch commit "message" [--target N] [--source-keep]` | Commit with auto-managed trailers |
 | `git dispatch sync [--dry-run] [--resolve]` | Merge base into source and existing targets |
 | `git dispatch apply [<N>] [--dry-run] [--resolve] [--force] [--yes]` | Cherry-pick source commits to targets |
 | `git dispatch apply reset <N\|all> [--yes]` | Regenerate one or all targets from scratch |
@@ -58,7 +58,8 @@ git dispatch push all
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (--force discards unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
-| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
+| `git dispatch retarget --target <id> --to-target <id> [--dry-run] [--apply]` | Move all commits from one target to another |
+| `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
 | `git dispatch status` | Show sync state, divergence, merged targets |
@@ -68,21 +69,21 @@ git dispatch push all
 
 ## Trailers
 
-Every commit needs a `Dispatch-Target-Id` trailer:
+Use `dispatch commit` to tag commits with trailers:
 
 ```bash
-git commit -m "Add feature" --trailer "Dispatch-Target-Id=3"
-git commit -m "Update CI config" --trailer "Dispatch-Target-Id=all"
-git commit -m "Regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "Add feature" --target 3
+git dispatch commit "Update CI config" --target all
+git dispatch commit "Regen swagger" --target 3 --source-keep
 ```
 
 | Value | Meaning |
 |-------|---------|
 | Numeric (1, 2, 1.5) | Assigns commit to target N. Decimals for mid-stack insertion. |
 | `all` | Included in every target during apply. For shared infra, CI configs. |
-| `Dispatch-Source-Keep: true` | Auto-resolve conflicts with incoming version. For generated files. |
+| `--source-keep` | Auto-resolve conflicts with incoming version. For generated files. |
 
-Hook auto-carries `Dispatch-Target-Id` from previous commit. Hook rejects commits without it.
+On checkout branches, `--target` is optional - auto-detected from branch name.
 
 ## Workflow: Develop and Create PRs
 
@@ -91,10 +92,10 @@ Hook auto-carries `Dispatch-Target-Id` from previous commit. Hook rejects commit
 git dispatch init
 # or: git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
 
-# 2. Code with trailers
-git commit -m "Add user model"      --trailer "Dispatch-Target-Id=1"
-git commit -m "Add auth middleware"  --trailer "Dispatch-Target-Id=2"
-git commit -m "Add login endpoint"   --trailer "Dispatch-Target-Id=2"
+# 2. Code with dispatch commit
+git dispatch commit "Add user model"      --target 1
+git dispatch commit "Add auth middleware"  --target 2
+git dispatch commit "Add login endpoint"   --target 2
 
 # 3. Apply and push
 git dispatch apply
@@ -117,7 +118,7 @@ git dispatch checkout clear       # remove test branch
 ```bash
 git dispatch checkout 3
 # fix bug
-git commit -m "Fix auth race" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix auth race"       # auto-detects target from checkout branch
 git dispatch checkin              # cherry-picks fix to source
 git dispatch checkout source
 git dispatch apply                # propagates to target-2
@@ -133,8 +134,7 @@ Generated files need the combined codebase. Two approaches:
 
 ```bash
 pnpm openapi
-git commit -m "regen" --trailer "Dispatch-Target-Id=all" \
-  --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen" --target all --source-keep
 git dispatch apply               # Source-Keep forces through per-target
 ```
 
@@ -143,8 +143,7 @@ git dispatch apply               # Source-Keep forces through per-target
 ```bash
 git dispatch checkout 3
 pnpm openapi                     # correct swagger for targets 1..3
-git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" \
-  --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen swagger" --source-keep    # auto-detects target 3
 git dispatch checkin             # Source-Keep auto-resolves conflict
 git dispatch checkout source
 git dispatch apply
@@ -156,9 +155,9 @@ git dispatch push 3
 When a commit was assigned to the wrong target (e.g., reviewer says "this belongs in task-15, not task-8"), use `retarget` instead of interactive rebase:
 
 ```bash
-git dispatch retarget 8 15            # moves commits from target 8 to 15
-git dispatch apply                    # updates both targets
-git dispatch push 8 && git dispatch push 15
+git dispatch retarget --target 8 --to-target 15    # moves all commits from target 8 to 15
+git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
+git dispatch apply                                  # updates both targets
 ```
 
 No history rewrite. No force-push. The original commit stays on source, paired with a revert (on old target) and re-apply (on new target).
@@ -166,7 +165,7 @@ No history rewrite. No force-push. The original commit stays on source, paired w
 ## Workflow: Review Feedback
 
 ```bash
-git commit -m "Rename field per review" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Rename field per review" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -315,7 +314,7 @@ git dispatch apply --force      # rebuilds them
 Preferred alternative: use `retarget` instead of interactive rebase to avoid stale targets entirely:
 
 ```bash
-git dispatch retarget 8 15      # no history rewrite, no force-push needed
+git dispatch retarget --target 8 --to-target 15   # no history rewrite, no force-push needed
 git dispatch apply
 ```
 
@@ -330,7 +329,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
-When multiple worktrees are detected, `extensions.worktreeConfig` is enabled automatically and `core.hooksPath` is scoped per-worktree.
+When multiple worktrees are detected, `extensions.worktreeConfig` is enabled automatically.
 
 ## AI Integration
 
@@ -370,7 +369,7 @@ bash install.sh
 ## Testing
 
 ```bash
-bash test.sh    # 242 tests
+bash test.sh    # 365 tests
 ```
 
 ## Requirements

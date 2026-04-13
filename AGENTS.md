@@ -6,7 +6,7 @@ description: Stacked PRs without the stack. Groups commits into multi-commit PRs
 Workflow agent for the source -> target branches -> PRs pipeline.
 
 DO: Help analyze source branches, run git dispatch commands, validate trailers, help with conflict resolution, show status, diagnose divergence, manage checkout/checkin lifecycle.
-NEVER: Delete branches without confirmation, modify commits without Dispatch-Target-Id trailers, run apply on already-applied sources without warning, run reset without --yes in automated contexts.
+NEVER: Delete branches without confirmation, use raw `git commit` instead of `dispatch commit` for dispatch work, run apply on already-applied sources without warning, run reset without --yes in automated contexts.
 
 ## Core Model
 
@@ -16,14 +16,14 @@ NEVER: Delete branches without confirmation, modify commits without Dispatch-Tar
 
 **Dispatch-Target-Id = branch name = PR**
 
-One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id=3"` -> `feat-task-3` branch -> PR for target 3.
+One number flows through: Dispatch-Target-Id 3 -> `dispatch commit --target 3` -> `feat-task-3` branch -> PR for target 3.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `git dispatch init [--base <branch>] [--target-pattern <pattern>]` | Configure dispatch (prompts when args omitted) |
-| `git dispatch init --hooks` | Install hooks only |
+| `git dispatch commit "message" [--target N] [--source-keep]` | Commit with auto-managed trailers |
 | `git dispatch sync [--dry-run] [--resolve]` | Merge base into source and existing targets |
 | `git dispatch apply [<N>] [--dry-run] [--resolve] [--force] [--yes]` | Cherry-pick source commits to targets |
 | `git dispatch apply reset <N\|all> [--yes]` | Regenerate one or all targets from scratch |
@@ -31,7 +31,8 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 | `git dispatch checkout source` | Return to source branch |
 | `git dispatch checkout clear [--force]` | Remove checkout branch (warns on unpicked commits) |
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
-| `git dispatch retarget <from-id> <to-id> [--dry-run] [--apply]` | Move commits between targets without rewriting history |
+| `git dispatch retarget --target <id> --to-target <id> [--dry-run] [--apply]` | Move all commits from one target to another |
+| `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
 | `git dispatch status` | Show sync state, divergence, stale targets, merged |
@@ -55,9 +56,9 @@ One number flows through: Dispatch-Target-Id 3 -> `--trailer "Dispatch-Target-Id
 ```bash
 git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
 # or just: git dispatch init  (prompts interactively)
-git commit -m "Add user model" --trailer "Dispatch-Target-Id=1"
-git commit -m "Add auth middleware" --trailer "Dispatch-Target-Id=2"
-git commit -m "Add login endpoint" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Add user model" --target 1
+git dispatch commit "Add auth middleware" --target 2
+git dispatch commit "Add login endpoint" --target 2
 git dispatch apply
 git dispatch push all
 ```
@@ -74,7 +75,7 @@ git dispatch checkout clear       # remove test branch
 ```bash
 git dispatch checkout 3
 # fix bug
-git commit -m "Fix auth race" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Fix auth race"       # auto-detects target from checkout branch
 git dispatch checkin              # cherry-picks fix to source
 git dispatch checkout source
 git dispatch apply                # propagates fix to target-2
@@ -86,13 +87,13 @@ git dispatch checkout clear
 ```bash
 # Regen on source for all targets
 pnpm openapi
-git commit -m "regen" --trailer "Dispatch-Target-Id=all" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen" --target all --source-keep
 git dispatch apply                # Source-Keep forces through per-target
 
 # Regen for specific failing target
 git dispatch checkout 3
 pnpm openapi
-git commit -m "regen swagger" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "regen swagger" --source-keep    # auto-detects target 3
 git dispatch checkin              # Source-Keep auto-resolves conflict with source
 git dispatch checkout source
 git dispatch apply
@@ -101,13 +102,14 @@ git dispatch push 3
 
 ### Retarget commits (change Dispatch-Target-Id)
 ```bash
-git dispatch retarget 8 15       # moves commits from target 8 to 15
-git dispatch apply               # updates both targets
+git dispatch retarget --target 8 --to-target 15       # moves all commits from target 8 to 15
+git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
+git dispatch apply                                     # updates both targets
 ```
 
 ### Review feedback
 ```bash
-git commit -m "Rename field" --trailer "Dispatch-Target-Id=2"
+git dispatch commit "Rename field" --target 2
 git dispatch apply
 git dispatch push 2
 ```
@@ -120,7 +122,7 @@ git dispatch push all
 
 ### Shared infrastructure commits
 ```bash
-git commit -m "Update CI config" --trailer "Dispatch-Target-Id=all"
+git dispatch commit "Update CI config" --target all
 git dispatch apply               # included in every target
 ```
 
@@ -132,18 +134,18 @@ git dispatch abort               # cleans up conflicts, worktrees, returns to so
 ## Dispatch-Target-Id Trailer
 
 ```bash
-git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
-git commit -m "Shared config" --trailer "Dispatch-Target-Id=all"
-git commit -m "Regen files" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+git dispatch commit "Add feature" --target 1
+git dispatch commit "Shared config" --target all
+git dispatch commit "Regen files" --target 3 --source-keep
 ```
 
 Rules:
 - Numeric: integer or decimal (1, 2, 1.5, 3.1)
 - `all`: included in every target during apply
-- `Dispatch-Source-Keep: true`: auto-resolve conflicts with incoming version (works in apply AND checkin)
+- `--source-keep`: auto-resolve conflicts with incoming version (works in apply AND checkin)
 - Decimals enable mid-stack insertion (1.5 between 1 and 2)
-- Hook auto-carries from previous commit
-- Hook rejects commits without Dispatch-Target-Id
+- On checkout branches, `--target` is auto-detected from branch name
+- On source branches, `--target` is required
 
 ## Branch Naming
 
@@ -230,9 +232,9 @@ Only files from that target's own commits are checked. Base drift (source behind
 | `apply <N>` conflicts on diverged target | `git dispatch apply reset <N>` |
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base | `git dispatch sync` |
-| Move commit to different target | `git dispatch retarget <from> <to>` then `apply` |
+| Move commit to different target | `git dispatch retarget --target <from> --to-target <to>` then `apply` |
 | Stale target (tid reassigned via rebase) | `git dispatch apply --force` |
-| Generated file conflict | `Dispatch-Source-Keep=true` trailer |
+| Generated file conflict | `dispatch commit --source-keep` |
 | Target CI fails (wrong swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Decimal: `Dispatch-Target-Id=1.5` |
 | Unpicked commits on checkout | `git dispatch checkin` or `checkout clear --force` |
