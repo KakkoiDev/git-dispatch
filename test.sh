@@ -186,247 +186,225 @@ test_init_reinit_warns() {
     teardown
 }
 
-test_init_installs_hooks() {
-    echo "=== test: init installs hooks ==="
+test_init_removes_legacy_hooks() {
+    echo "=== test: init removes legacy hooks ==="
     setup
 
     git checkout -b source/feature master -q
+
+    # Simulate legacy hooks
+    local hook_dir
+    hook_dir="$(git rev-parse --git-dir)/hooks"
+    mkdir -p "$hook_dir"
+    echo "#!/bin/bash
+# git-dispatch commit-msg hook" > "$hook_dir/commit-msg"
+    echo "#!/bin/bash
+# git-dispatch prepare-commit-msg hook" > "$hook_dir/prepare-commit-msg"
+    git config core.hooksPath "$hook_dir"
 
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
 
-    local hook_dir
-    hook_dir="$(git rev-parse --git-dir)/hooks"
-
-    if [[ -f "$hook_dir/commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} commit-msg hook installed"
+    if [[ ! -f "$hook_dir/commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} legacy commit-msg hook removed"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} commit-msg hook not found"
+        echo -e "  ${RED}FAIL${NC} legacy commit-msg hook should be removed"
         FAIL=$((FAIL + 1))
     fi
 
-    if [[ -f "$hook_dir/prepare-commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} prepare-commit-msg hook installed"
+    if [[ ! -f "$hook_dir/prepare-commit-msg" ]]; then
+        echo -e "  ${GREEN}PASS${NC} legacy prepare-commit-msg hook removed"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} prepare-commit-msg hook not found"
+        echo -e "  ${RED}FAIL${NC} legacy prepare-commit-msg hook should be removed"
         FAIL=$((FAIL + 1))
     fi
-
-    if [[ -f "$hook_dir/post-merge" ]]; then
-        echo -e "  ${RED}FAIL${NC} post-merge hook should not be installed"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} post-merge hook correctly absent"
-        PASS=$((PASS + 1))
-    fi
-
-    teardown
-}
-
-test_init_hooks_only() {
-    echo "=== test: init --hooks installs hooks without config ==="
-    setup
-
-    bash "$DISPATCH" init --hooks >/dev/null 2>&1
 
     local hooks_path
     hooks_path=$(git config core.hooksPath 2>/dev/null || echo "")
-    if [[ -n "$hooks_path" ]] && [[ -f "$hooks_path/commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} hooks installed via --hooks"
+    if [[ -z "$hooks_path" ]]; then
+        echo -e "  ${GREEN}PASS${NC} core.hooksPath unset"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} hooks not installed"
-        FAIL=$((FAIL + 1))
-    fi
-
-    # No dispatch config should exist
-    local base
-    base=$(git config branch.$(git symbolic-ref --short HEAD).dispatchbase 2>/dev/null || echo "")
-    if [[ -z "$base" ]]; then
-        echo -e "  ${GREEN}PASS${NC} no dispatch config created"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} dispatch config should not exist"
+        echo -e "  ${RED}FAIL${NC} core.hooksPath should be unset"
         FAIL=$((FAIL + 1))
     fi
 
     teardown
 }
 
-# ---------- hook tests ----------
+# ---------- commit tests ----------
 
-test_hook_rejects_missing_trailer() {
-    echo "=== test: hook rejects commit without Dispatch-Target-Id ==="
+test_commit_with_target() {
+    echo "=== test: commit with --target adds trailer ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    if git commit -m "no trailer" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject commit without Dispatch-Target-Id"
+    bash "$DISPATCH" commit "Add feature" --target 1 -q
+
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "1" "$tid" "Dispatch-Target-Id trailer set to 1"
+
+    teardown
+}
+
+test_commit_without_target_on_source_errors() {
+    echo "=== test: commit without --target on source branch errors ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "x" > x.txt; git add x.txt
+    if bash "$DISPATCH" commit "no target" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} commit should error without --target on source"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects commit without Dispatch-Target-Id"
+        echo -e "  ${GREEN}PASS${NC} commit errors without --target on source"
         PASS=$((PASS + 1))
     fi
 
     teardown
 }
 
-test_hook_allows_valid_trailer() {
-    echo "=== test: hook allows commit with Dispatch-Target-Id ==="
+test_commit_auto_detect_on_checkout() {
+    echo "=== test: commit auto-detects target on checkout branch ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" checkout 3 >/dev/null 2>&1
+
+    echo "fix" > fix.txt; git add fix.txt
+    bash "$DISPATCH" commit "Fix bug on checkout" -q
+
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$tid" "Dispatch-Target-Id auto-detected as 3 from checkout branch"
+
+    bash "$DISPATCH" checkout source >/dev/null 2>&1
+    teardown
+}
+
+test_commit_with_source_keep() {
+    echo "=== test: commit with --source-keep adds both trailers ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    git commit -m "with trailer$(printf '\n\nDispatch-Target-Id: 1')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows commit with Dispatch-Target-Id"
-        PASS=$((PASS + 1))
-    fi
+    bash "$DISPATCH" commit "Regen files" --target 3 --source-keep -q
+
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "3" "$tid" "Dispatch-Target-Id set to 3"
+
+    local sk
+    sk=$(git log -1 --format="%(trailers:key=Dispatch-Source-Keep,valueonly)" | tr -d '[:space:]')
+    assert_eq "true" "$sk" "Dispatch-Source-Keep set to true"
 
     teardown
 }
 
-test_hook_rejects_non_numeric_target_id() {
-    echo "=== test: hook rejects non-numeric Dispatch-Target-Id ==="
+test_commit_validates_target_id() {
+    echo "=== test: commit rejects invalid target IDs ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    if git commit -m "bad id$(printf '\n\nDispatch-Target-Id: task-3')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject non-numeric Dispatch-Target-Id"
+    if bash "$DISPATCH" commit "bad" --target "task-3" 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} commit should reject non-numeric target"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects non-numeric Dispatch-Target-Id"
+        echo -e "  ${GREEN}PASS${NC} commit rejects non-numeric target"
         PASS=$((PASS + 1))
     fi
 
-    teardown
-}
-
-test_hook_allows_decimal_target_id() {
-    echo "=== test: hook allows decimal Dispatch-Target-Id ==="
-    setup
-
-    git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
-
-    echo "x" > x.txt; git add x.txt
-    git commit -m "decimal$(printf '\n\nDispatch-Target-Id: 1.5')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook allows decimal Dispatch-Target-Id"
-        PASS=$((PASS + 1))
-    fi
-
-    teardown
-}
-
-test_hook_auto_carry_target_id() {
-    echo "=== test: hook auto-carries Dispatch-Target-Id from previous commit ==="
-    setup
-
-    git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
-
-    echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nDispatch-Target-Id: 3')" -q
-
-    echo "b" > b.txt; git add b.txt
-    git commit -m "second" -q
-
-    local carried
-    carried=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "3" "$carried" "Dispatch-Target-Id auto-carried from previous commit"
-
-    teardown
-}
-
-test_hook_auto_carry_no_override() {
-    echo "=== test: hook does not override explicit Dispatch-Target-Id ==="
-    setup
-
-    git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
-
-    echo "a" > a.txt; git add a.txt
-    git commit -m "first$(printf '\n\nDispatch-Target-Id: 3')" -q
-
-    echo "b" > b.txt; git add b.txt
-    git commit -m "second" --trailer "Dispatch-Target-Id=4" -q
-
-    local target_id
-    target_id=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "4" "$target_id" "explicit Dispatch-Target-Id not overridden by auto-carry"
-
-    teardown
-}
-
-test_hook_rejects_duplicate_target_id() {
-    echo "=== test: hook rejects duplicate Dispatch-Target-Id ==="
-    setup
-
-    git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
-
-    echo "x" > x.txt; git add x.txt
-    # Craft a commit message with two Dispatch-Target-Id trailers
-    if git commit -m "dual target$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject duplicate Dispatch-Target-Id"
+    if bash "$DISPATCH" commit "bad" --target 0 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} commit should reject zero target"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects duplicate Dispatch-Target-Id"
+        echo -e "  ${GREEN}PASS${NC} commit rejects zero target"
         PASS=$((PASS + 1))
     fi
 
     teardown
 }
 
-test_hook_rejects_duplicate_source_keep() {
-    echo "=== test: hook rejects duplicate Dispatch-Source-Keep ==="
+test_commit_allows_decimal_target() {
+    echo "=== test: commit allows decimal target ID ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    # Craft a commit message with two Dispatch-Source-Keep trailers
-    if git commit -m "dual keep$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Source-Keep: true\nDispatch-Source-Keep: false')" 2>/dev/null; then
-        echo -e "  ${RED}FAIL${NC} hook should reject duplicate Dispatch-Source-Keep"
+    bash "$DISPATCH" commit "decimal" --target 1.5 -q
+
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "1.5" "$tid" "Dispatch-Target-Id set to 1.5"
+
+    teardown
+}
+
+test_commit_allows_target_all() {
+    echo "=== test: commit allows --target all ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "x" > x.txt; git add x.txt
+    bash "$DISPATCH" commit "shared change" --target all -q
+
+    local tid
+    tid=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
+    assert_eq "all" "$tid" "Dispatch-Target-Id set to all"
+
+    teardown
+}
+
+test_commit_missing_message_errors() {
+    echo "=== test: commit without message errors ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    if bash "$DISPATCH" commit --target 1 2>/dev/null; then
+        echo -e "  ${RED}FAIL${NC} commit should error without message"
         FAIL=$((FAIL + 1))
     else
-        echo -e "  ${GREEN}PASS${NC} hook rejects duplicate Dispatch-Source-Keep"
+        echo -e "  ${GREEN}PASS${NC} commit errors without message"
         PASS=$((PASS + 1))
     fi
 
     teardown
 }
 
-test_hook_ignores_legacy_target_id() {
-    echo "=== test: hook ignores legacy Target-Id trailer ==="
+test_plain_git_commit_no_hooks() {
+    echo "=== test: plain git commit works without dispatch hooks ==="
     setup
 
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
     echo "x" > x.txt; git add x.txt
-    # Legacy Target-Id alongside valid Dispatch-Target-Id should be accepted (Target-Id is dead)
-    git commit -m "legacy mix$(printf '\n\nTarget-Id: 9\nDispatch-Target-Id: 3')" -q
-    if [[ $? -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC} hook ignores legacy Target-Id"
+    if git commit -m "plain commit without trailer" -q 2>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC} plain git commit works without hooks"
         PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} plain git commit should work without hooks"
+        FAIL=$((FAIL + 1))
     fi
-
-    # Verify only Dispatch-Target-Id is read
-    local target_id
-    target_id=$(git log -1 --format="%(trailers:key=Dispatch-Target-Id,valueonly)" | tr -d '[:space:]')
-    assert_eq "3" "$target_id" "only Dispatch-Target-Id is used (not legacy Target-Id)"
 
     teardown
 }
@@ -438,58 +416,13 @@ test_apply_rejects_duplicate_target_id() {
     git checkout -b source/feature master -q
     bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
 
-    # Bypass the hook by committing directly with git (no hooks)
     echo "a" > a.txt; git add a.txt
-    git commit --no-verify -m "dual trailer$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" -q
+    git commit -m "dual trailer$(printf '\n\nDispatch-Target-Id: 3\nDispatch-Target-Id: all')" -q
 
     local output
     output=$(bash "$DISPATCH" apply --yes 2>&1 || true)
     assert_contains "$output" "Dispatch-Target-Id trailers" "apply rejects duplicate Dispatch-Target-Id"
 
-    teardown
-}
-
-test_worktree_shares_hooks_via_hookspath() {
-    echo "=== test: worktree shares hooks via core.hooksPath ==="
-    setup
-    create_source
-
-    # Verify core.hooksPath is set to an absolute path
-    local hooks_path
-    hooks_path=$(git config core.hooksPath 2>/dev/null || echo "")
-    if [[ -n "$hooks_path" ]] && [[ "$hooks_path" == /* ]] && [[ -f "$hooks_path/commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} core.hooksPath is absolute with hooks"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} core.hooksPath not absolute or hooks missing (got: $hooks_path)"
-        FAIL=$((FAIL + 1))
-    fi
-
-    # Create worktree from master (no Dispatch-Target-Id on HEAD) to test rejection
-    local wt_path="$TMPDIR/worktree-test"
-    git worktree add "$wt_path" -b wt-branch master -q 2>/dev/null
-
-    # Verify commit without Dispatch-Target-Id is rejected from the worktree
-    (cd "$wt_path" && echo "wt" > wt.txt && git add wt.txt)
-    local wt_err
-    if wt_err=$(git -C "$wt_path" commit -m "no trailer" 2>&1); then
-        echo -e "  ${RED}FAIL${NC} worktree should reject commit without Dispatch-Target-Id"
-        FAIL=$((FAIL + 1))
-    else
-        echo -e "  ${GREEN}PASS${NC} worktree rejects commit without Dispatch-Target-Id"
-        PASS=$((PASS + 1))
-    fi
-
-    # Verify commit with Dispatch-Target-Id works from the worktree
-    if git -C "$wt_path" commit -m "with trailer" --trailer "Dispatch-Target-Id=1" -q 2>/dev/null; then
-        echo -e "  ${GREEN}PASS${NC} worktree allows commit with Dispatch-Target-Id"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} worktree should allow commit with Dispatch-Target-Id"
-        FAIL=$((FAIL + 1))
-    fi
-
-    git worktree remove --force "$wt_path" 2>/dev/null || true
     teardown
 }
 
@@ -3272,8 +3205,8 @@ test_worktree_config_isolation() {
     teardown
 }
 
-test_reset_preserves_other_session_hooks() {
-    echo "=== test: reset preserves hooks when other sessions exist ==="
+test_reset_preserves_other_session_config() {
+    echo "=== test: reset preserves other session config ==="
     setup
 
     git checkout -b source/feature-a master -q
@@ -3285,38 +3218,14 @@ test_reset_preserves_other_session_hooks() {
     # Reset feature-b
     bash "$DISPATCH" reset --yes
 
-    # Hooks should still exist (feature-a still active)
-    local hook_dir
-    hook_dir="$(git rev-parse --git-dir)/hooks"
-    if [[ -f "$hook_dir/commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} hooks preserved after partial reset"
+    # Feature-a config should still exist
+    local base_a
+    base_a=$(git config branch.source/feature-a.dispatchbase 2>/dev/null || echo "")
+    if [[ -n "$base_a" ]]; then
+        echo -e "  ${GREEN}PASS${NC} other session config preserved after partial reset"
         PASS=$((PASS + 1))
     else
-        echo -e "  ${RED}FAIL${NC} hooks deleted despite other active session"
-        FAIL=$((FAIL + 1))
-    fi
-
-    teardown
-}
-
-test_reset_removes_hooks_when_last_session() {
-    echo "=== test: reset removes hooks when last session ==="
-    setup
-
-    git checkout -b source/feature master -q
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
-
-    # Reset the only session
-    bash "$DISPATCH" reset --yes
-
-    # Hooks should be deleted
-    local hook_dir
-    hook_dir="$(git rev-parse --git-dir)/hooks"
-    if [[ ! -f "$hook_dir/commit-msg" ]]; then
-        echo -e "  ${GREEN}PASS${NC} hooks removed after last session reset"
-        PASS=$((PASS + 1))
-    else
-        echo -e "  ${RED}FAIL${NC} hooks not removed after last session reset"
+        echo -e "  ${RED}FAIL${NC} other session config deleted during reset"
         FAIL=$((FAIL + 1))
     fi
 
@@ -4104,19 +4013,17 @@ test_init_requires_base
 test_init_requires_target_pattern
 test_init_custom_pattern
 test_init_reinit_warns
-test_init_installs_hooks
-test_init_hooks_only
-test_hook_rejects_missing_trailer
-test_hook_allows_valid_trailer
-test_hook_rejects_non_numeric_target_id
-test_hook_allows_decimal_target_id
-test_hook_auto_carry_target_id
-test_hook_auto_carry_no_override
-test_hook_rejects_duplicate_target_id
-test_hook_rejects_duplicate_source_keep
-test_hook_ignores_legacy_target_id
+test_init_removes_legacy_hooks
+test_commit_with_target
+test_commit_without_target_on_source_errors
+test_commit_auto_detect_on_checkout
+test_commit_with_source_keep
+test_commit_validates_target_id
+test_commit_allows_decimal_target
+test_commit_allows_target_all
+test_commit_missing_message_errors
+test_plain_git_commit_no_hooks
 test_apply_rejects_duplicate_target_id
-test_worktree_shares_hooks_via_hookspath
 test_apply_creates_targets
 test_apply_dry_run
 test_apply_incremental
@@ -4218,8 +4125,7 @@ test_reset_y_instead_of_force
 test_apply_force_only_for_stale
 test_init_interactive_missing_target_pattern
 test_worktree_config_isolation
-test_reset_preserves_other_session_hooks
-test_reset_removes_hooks_when_last_session
+test_reset_preserves_other_session_config
 test_no_legacy_fallback
 test_sync_merges_into_existing_targets
 test_sync_no_force_push_needed
@@ -4798,42 +4704,6 @@ test_checkout_clear_after_checkin_mixed_picked_and_unpicked() {
 test_checkout_clear_after_checkin_no_false_unpicked
 test_checkout_clear_after_checkin_mixed_picked_and_unpicked
 
-# ---------- improvement #6: checkout branch auto-carry skip ----------
-
-test_checkout_branch_no_auto_carry() {
-    echo "=== test: prepare-commit-msg skips auto-carry on checkout branches ==="
-    setup
-
-    git checkout -b source/feature master -q
-    echo "a" > a.txt; git add a.txt
-    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
-    echo "b" > b.txt; git add b.txt
-    git commit -m "tid2$(printf '\n\nDispatch-Target-Id: 2')" -q
-
-    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
-    bash "$DISPATCH" apply >/dev/null 2>&1
-    bash "$DISPATCH" checkout 2 >/dev/null 2>&1
-
-    # On checkout branch, commit without explicit trailer - hook should NOT auto-carry
-    echo "fix" > fix.txt; git add fix.txt
-    # Use --no-verify to skip commit-msg (which requires trailer) but test prepare-commit-msg
-    local msg_file
-    msg_file=$(mktemp)
-    echo "Fix on checkout" > "$msg_file"
-    # Simulate prepare-commit-msg hook
-    local checkout_branch
-    checkout_branch=$(git symbolic-ref --short HEAD)
-    local hook_output
-    bash "$SCRIPT_DIR/hooks/prepare-commit-msg" "$msg_file" "message" 2>&1 || true
-    local has_trailer
-    has_trailer=$(grep -c "^Dispatch-Target-Id:" "$msg_file" || true)
-    assert_eq "0" "$has_trailer" "no auto-carried trailer on checkout branch"
-    rm -f "$msg_file"
-
-    teardown
-}
-
-test_checkout_branch_no_auto_carry
 
 # ---------- improvement #2: auto-sync before apply reset ----------
 

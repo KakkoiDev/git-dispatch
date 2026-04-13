@@ -320,27 +320,34 @@ _refresh_base() {
     return 0
 }
 
-# Install hooks to the main repo .git/hooks and set core.hooksPath
-# so all worktrees share the same hooks.
-_install_hooks() {
+# Remove legacy dispatch hooks from .git/hooks and core.hooksPath if present.
+_remove_hooks() {
+    local dir removed=false
+    # Check both common hooks dir and core.hooksPath target
     local common_dir
     common_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/hooks"
-    mkdir -p "$common_dir"
-    cp "$SCRIPT_DIR/hooks/prepare-commit-msg" "$common_dir/prepare-commit-msg"
-    chmod +x "$common_dir/prepare-commit-msg"
-    cp "$SCRIPT_DIR/hooks/commit-msg" "$common_dir/commit-msg"
-    chmod +x "$common_dir/commit-msg"
-    # core.hooksPath ensures worktrees use the main repo's hooks
-    # Use --worktree scope when available to avoid cross-worktree collision
-    _ensure_worktree_config
-    local wt_enabled
-    wt_enabled=$(git config extensions.worktreeConfig 2>/dev/null || true)
-    if [[ "$wt_enabled" == "true" ]]; then
-        git config --worktree core.hooksPath "$common_dir"
-    else
-        git config core.hooksPath "$common_dir"
+    local hooks_path
+    hooks_path=$(git config core.hooksPath 2>/dev/null || true)
+
+    for dir in "$common_dir" "$hooks_path"; do
+        [[ -n "$dir" ]] || continue
+        for hook in prepare-commit-msg commit-msg; do
+            if [[ -f "$dir/$hook" ]] && grep -q "git-dispatch" "$dir/$hook" 2>/dev/null; then
+                rm "$dir/$hook"
+                removed=true
+            fi
+        done
+    done
+
+    if $removed && [[ -n "$hooks_path" ]]; then
+        _ensure_worktree_config
+        local wt_enabled
+        wt_enabled=$(git config extensions.worktreeConfig 2>/dev/null || true)
+        if [[ "$wt_enabled" == "true" ]]; then
+            git config --worktree --unset core.hooksPath 2>/dev/null || true
+        fi
+        git config --unset core.hooksPath 2>/dev/null || true
     fi
-    info "Installed hooks to $common_dir"
 }
 
 # Check if a branch's content has been merged (e.g. squash-merged) into base
@@ -449,6 +456,23 @@ _extract_dispatch_source_keep() {
         sed 's/^Dispatch-Source-Keep:[[:space:]]*//' | tr -d '[:space:]')
     [[ -n "$val" ]] && echo "$val"
     return 0
+}
+
+# Validate a Dispatch-Target-Id value. Dies with descriptive error if invalid.
+# Valid: positive integer, positive decimal, "all"
+_validate_target_id() {
+    local tid="$1"
+    [[ -n "$tid" ]] || die "Dispatch-Target-Id is empty."
+    [[ "$tid" == "all" ]] && return 0
+    if ! echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+        if echo "$tid" | grep -Eq '^0[0-9]'; then
+            die "Dispatch-Target-Id '$tid' has a leading zero. Use '${tid#0}' instead."
+        elif [[ "$tid" == "0" ]]; then
+            die "Dispatch-Target-Id '0' is not valid. Use a positive integer."
+        else
+            die "Dispatch-Target-Id '$tid' is not numeric. Use integer or decimal (e.g., 1, 2, 1.5) or 'all'."
+        fi
+    fi
 }
 
 # Find source commits not yet on a target branch.
@@ -1008,11 +1032,10 @@ _target_branch_name() {
 # ---------- init ----------
 
 cmd_init() {
-    local base="" target_pattern="" hooks_only=false
+    local base="" target_pattern=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --hooks)  hooks_only=true; shift ;;
             --base)   base="$2"; shift 2 ;;
             --target-pattern) target_pattern="$2"; shift 2 ;;
             --mode)   shift 2 ;;  # deprecated, ignored
@@ -1022,11 +1045,6 @@ cmd_init() {
             *)        die "Unexpected argument: $1" ;;
         esac
     done
-
-    if $hooks_only; then
-        _install_hooks
-        return
-    fi
 
     local source
     source=$(current_branch)
@@ -1070,7 +1088,7 @@ cmd_init() {
     _set_config base "$base" "$source"
     _set_config targetPattern "$target_pattern" "$source"
 
-    _install_hooks
+    _remove_hooks 2>/dev/null || true
 
     echo ""
     info "Initialized dispatch on '$source'"
@@ -2284,7 +2302,7 @@ cmd_reset() {
     if [[ ${#targets[@]} -gt 0 ]]; then
         echo "  - target branches: ${targets[*]}"
     fi
-    echo "  - hooks and core.hooksPath config"
+    echo "  - legacy hooks and core.hooksPath config (if present)"
 
     echo ""
     _confirm "Proceed?" || { echo "Aborted."; exit 0; }
@@ -3171,6 +3189,50 @@ Dispatch-Target-Id: $to_id"
     fi
 }
 
+# ---------- commit ----------
+
+cmd_commit() {
+    _require_init
+
+    local message="" target_id="" source_keep=false
+    local -a git_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target)      [[ -n "${2:-}" ]] || die "--target requires a value"; target_id="$2"; shift 2 ;;
+            --source-keep) source_keep=true; shift ;;
+            -*)            git_args+=("$1"); shift ;;
+            *)
+                [[ -z "$message" ]] || die "Unexpected argument: $1"
+                message="$1"; shift
+                ;;
+        esac
+    done
+
+    [[ -n "$message" ]] || die "Missing commit message. Usage: dispatch commit \"message\" [--target N] [--source-keep]"
+
+    # Auto-detect target ID on checkout branches
+    if [[ -z "$target_id" ]]; then
+        local cur
+        cur=$(current_branch)
+        if [[ "$cur" == dispatch-checkout/* ]]; then
+            local rest="${cur#dispatch-checkout/}"
+            target_id="${rest##*/}"
+        else
+            die "Missing --target. Usage: dispatch commit \"message\" --target N"
+        fi
+    fi
+
+    _validate_target_id "$target_id"
+
+    local -a trailer_args=(--trailer "Dispatch-Target-Id=$target_id")
+    if $source_keep; then
+        trailer_args+=(--trailer "Dispatch-Source-Keep=true")
+    fi
+
+    git commit -m "$message" "${trailer_args[@]}" "${git_args[@]}"
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -3179,17 +3241,14 @@ git-dispatch: Create target branches from a source branch and keep them in sync.
 
 SETUP
   git dispatch init [--base <branch>] [--target-pattern <pattern>]
-  git dispatch init --hooks
 
-  Initialize dispatch on the current branch. Stores config, installs hooks.
+  Initialize dispatch on the current branch. Stores config.
   When --base or --target-pattern are omitted, prompts interactively.
   Recommended: --base "origin/master", --target-pattern "user/feat/task-{id}".
 
-  --hooks installs only the commit hooks (useful in worktrees).
-
 WORKFLOW
-  1. Tag every commit with a Dispatch-Target-Id trailer:
-       git commit -m "Add feature" --trailer "Dispatch-Target-Id=1"
+  1. Commit with a target trailer:
+       git dispatch commit "Add feature" --target 1
 
   2. Create target branches and push:
        git dispatch apply
@@ -3197,7 +3256,8 @@ WORKFLOW
 
   3. Integration testing:
        git dispatch checkout 3                          # branch with targets 1..3
-       # run tests, fix bugs, commit with Dispatch-Target-Id
+       # run tests, fix bugs
+       git dispatch commit "fix bug"                    # auto-detects target from branch
        git dispatch checkin                             # pick fixes back to source
        git dispatch checkout source                     # return to source
        git dispatch apply                               # propagate to targets
@@ -3212,6 +3272,10 @@ WORKFLOW
 
 COMMANDS
   init        Configure dispatch on current source branch
+  commit      Commit with auto-managed Dispatch-Target-Id trailer:
+                commit "message" --target N    Explicit target
+                commit "message"               Auto-detect from checkout branch
+                commit "message" --source-keep  Add Source-Keep trailer
   sync        Merge base into source and existing targets. Run before apply.
   apply       Cherry-pick source commits to targets. apply <N> for one target.
               apply reset <N|all> to regenerate from scratch.
@@ -3255,14 +3319,14 @@ FLAGS
 
 TRAILERS
   Dispatch-Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "all"
-    git commit -m "message" --trailer "Dispatch-Target-Id=1"
-    git commit -m "shared change" --trailer "Dispatch-Target-Id=all"
+    git dispatch commit "message" --target 1
+    git dispatch commit "shared change" --target all
 
   "all" includes the commit in every target during apply.
-  Hook auto-carries Dispatch-Target-Id from previous commit when absent.
+  On checkout branches, the target is auto-detected from the branch name.
 
   Dispatch-Source-Keep (optional): force-accept source version on conflict
-    git commit -m "regen files" --trailer "Dispatch-Target-Id=3" --trailer "Dispatch-Source-Keep=true"
+    git dispatch commit "regen files" --target 3 --source-keep
 
   When a cherry-pick conflicts on a commit with this trailer, the source
   version is auto-accepted with --strategy-option theirs.
@@ -3280,6 +3344,7 @@ main() {
     local cmd="$1"; shift
     case "$cmd" in
         init)         cmd_init "$@" ;;
+        commit)       cmd_commit "$@" ;;
         sync)         cmd_sync "$@" ;;
         apply)        cmd_apply "$@" ;;
         push)         cmd_push "$@" ;;
