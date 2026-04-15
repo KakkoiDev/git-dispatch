@@ -645,6 +645,7 @@ _target_content_diverged() {
 }
 
 # Extract Dispatch-Target-Id from a branch name by reversing the target-pattern.
+# Falls back to scanning aliases if pattern match fails.
 _extract_tid_from_branch() {
     local branch="$1"
     local pattern
@@ -652,14 +653,30 @@ _extract_tid_from_branch() {
     local prefix="${pattern%%\{id\}*}"
     local suffix="${pattern#*\{id\}}"
     # Use literal string removal to avoid glob interpretation of [ ] * ? in pattern
-    local tid
+    local tid=""
     if [[ "$branch" == "${prefix}"*"${suffix}" ]]; then
         tid="${branch#"$prefix"}"
         [[ -n "$suffix" ]] && tid="${tid%"$suffix"}"
-    else
-        return 1
     fi
-    echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$' && echo "$tid"
+    if [[ -n "$tid" ]] && echo "$tid" | grep -Eq '^[1-9][0-9]*(\.[0-9]+)?$'; then
+        echo "$tid"; return 0
+    fi
+    # Fallback: check aliases for a match
+    local source_branch
+    source_branch=$(_resolve_config_branch 2>/dev/null || true)
+    if [[ -n "$source_branch" ]]; then
+        local alias_line akey aval atid
+        while IFS= read -r alias_line; do
+            [[ -n "$alias_line" ]] || continue
+            akey="${alias_line%% *}"
+            aval="${alias_line#* }"
+            if [[ "$aval" == "$branch" ]]; then
+                atid="${akey##*dispatchtargetalias-}"
+                echo "$atid"; return 0
+            fi
+        done < <(git config --get-regexp "^branch\.${source_branch}\.dispatchtargetalias-" 2>/dev/null || true)
+    fi
+    return 1
 }
 
 # Build a patch-id map from source commits (batched - single pipe instead of N+1 processes).
@@ -1019,8 +1036,24 @@ find_dispatch_targets() {
     [[ ${#found[@]} -gt 0 ]] && printf '%s\n' "${found[@]}" || true
 }
 
-# Derive target branch name from configured pattern and target id
+# Derive target branch name from configured pattern and target id.
+# Checks for a per-tid alias first; falls back to pattern substitution.
 _target_branch_name() {
+    local tid="$1"
+    local alias_name
+    alias_name=$(_get_config "targetalias-${tid}")
+    if [[ -n "$alias_name" ]]; then
+        echo "$alias_name"; return
+    fi
+    local pattern
+    pattern=$(_get_config targetPattern)
+    [[ -n "$pattern" ]] || die "Missing dispatch.targetPattern. Re-run: git dispatch init"
+    [[ "$pattern" == *"{id}"* ]] || die "Invalid dispatch.targetPattern (missing {id})"
+    echo "${pattern//\{id\}/$tid}"
+}
+
+# Compute the pattern-based branch name (ignoring aliases).
+_target_branch_name_pattern() {
     local tid="$1"
     local pattern
     pattern=$(_get_config targetPattern)
@@ -1279,7 +1312,7 @@ cmd_apply() {
     _refresh_base "$base" || true
     _spinner_stop
 
-    # Auto-sync before apply reset, or warn for regular apply
+    # Auto-sync before apply reset; die for regular apply unless --force, --no-sync, or --dry-run
     local _drift_count
     _drift_count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
     if [[ "$_drift_count" -gt 0 ]]; then
@@ -1290,8 +1323,10 @@ cmd_apply() {
             else
                 cmd_sync
             fi
-        else
+        elif $dry_run || $force || $no_sync; then
             warn "Source is $_drift_count commit(s) behind $base. Run: git dispatch sync"
+        else
+            die "Source is $_drift_count commit(s) behind $base. Run: git dispatch sync (or use --force to override)"
         fi
     fi
 
@@ -1370,6 +1405,22 @@ cmd_apply() {
     while IFS= read -r tid; do
         target_ids+=("$tid")
     done < <(awk '$2 != "all" && !seen[$2]++ {print $2}' "$commit_file" | sort -t. -k1,1n -k2,2n)
+
+    # Validate apply_target: if user requested a specific target, ensure commits exist for it
+    # (unless the target branch already exists and might need "all" commit propagation)
+    if [[ -n "$apply_target" && "$apply_target" != "all" ]]; then
+        local _target_in_source=false
+        for _t in "${target_ids[@]}"; do
+            [[ "$_t" == "$apply_target" ]] && { _target_in_source=true; break; }
+        done
+        if ! $_target_in_source; then
+            local _target_branch
+            _target_branch=$(_target_branch_name "$apply_target")
+            if ! git rev-parse --verify "refs/heads/$_target_branch" &>/dev/null; then
+                die "No commits on source have Dispatch-Target-Id: $apply_target. Target cannot be created."
+            fi
+        fi
+    fi
 
     # --- Stale target detection ---
     _build_source_patch_id_map "$patch_map_file" "$commit_file"
@@ -1808,8 +1859,19 @@ cmd_push() {
         # Numeric target id
         local target_branch
         target_branch=$(_target_branch_name "$target")
-        git rev-parse --verify "refs/heads/$target_branch" &>/dev/null || \
-            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply"
+        if ! git rev-parse --verify "refs/heads/$target_branch" &>/dev/null; then
+            # Diagnose why the target is missing to give an actionable suggestion
+            local _drift _has_commits
+            _drift=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
+            if [[ "$_drift" -gt 0 ]]; then
+                die "Target branch '$target_branch' does not exist. Source is $_drift commit(s) behind $base. Run: git dispatch sync, then git dispatch apply $target"
+            fi
+            _has_commits=$(git log "$base..$source" --format="%B" 2>/dev/null | grep -c "^Dispatch-Target-Id: $target$" || true)
+            if [[ "$_has_commits" -eq 0 ]]; then
+                die "Target branch '$target_branch' does not exist. No commits on source have Dispatch-Target-Id: $target"
+            fi
+            die "Target branch '$target_branch' does not exist locally. Run: git dispatch apply $target"
+        fi
         branches=("$target_branch")
     fi
 
@@ -1971,6 +2033,11 @@ cmd_status() {
         local branch_name
         branch_name=$(_target_branch_name "$tid")
 
+        local alias_tag=""
+        local _alias_check
+        _alias_check=$(_get_config "targetalias-${tid}")
+        [[ -n "$_alias_check" ]] && alias_tag=" ${CYAN}(aliased)${NC}"
+
         local pr_suffix=""
         if [[ -n "$pr_cache" ]]; then
             local pr_num
@@ -1979,13 +2046,13 @@ cmd_status() {
         fi
 
         if ! git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
-            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created\n" "$tid" "$branch_name"
+            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  not created${alias_tag}\n" "$tid" "$branch_name"
             continue
         fi
 
         # Check if target content is already merged into base
         if _is_content_merged "$branch_name" "$base"; then
-            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  ${GREEN}merged${NC}${pr_suffix}\n" "$tid" "$branch_name"
+            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  ${GREEN}merged${NC}${alias_tag}${pr_suffix}\n" "$tid" "$branch_name"
             continue
         fi
 
@@ -1995,7 +2062,7 @@ cmd_status() {
         local stale_count=0
         [[ -n "$stale_out" ]] && stale_count=$(echo "$stale_out" | wc -l | tr -d ' ')
         if [[ $stale_count -gt 0 ]]; then
-            printf "  ${RED}%-${max_tid}s${NC}  %-${max_branch}s  ${RED}stale (%d commit(s) reassigned)${NC}${pr_suffix}\n" "$tid" "$branch_name" "$stale_count"
+            printf "  ${RED}%-${max_tid}s${NC}  %-${max_branch}s  ${RED}stale (%d commit(s) reassigned)${NC}${alias_tag}${pr_suffix}\n" "$tid" "$branch_name" "$stale_count"
             has_stale=true
             continue
         fi
@@ -2112,13 +2179,13 @@ cmd_status() {
         fi
 
         if [[ $source_to_target -eq 0 && $untracked -eq 0 && -z "$diverge_tag" ]]; then
-            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${pr_suffix}\n" "$tid" "$branch_name"
+            printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  in sync${alias_tag}${pr_suffix}\n" "$tid" "$branch_name"
         else
             local status_parts=""
             [[ $source_to_target -gt 0 ]] && status_parts="${source_to_target} behind source"
             [[ $untracked -gt 0 ]] && status_parts="${status_parts:+$status_parts, }${CYAN}${untracked} untracked${NC}"
 
-            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${diverge_tag}${pr_suffix}\n" "$tid" "$branch_name"
+            printf "  ${YELLOW}%-${max_tid}s${NC}  %-${max_branch}s  $status_parts${diverge_tag}${alias_tag}${pr_suffix}\n" "$tid" "$branch_name"
         fi
     done > "$_status_outfile"
 
@@ -2265,6 +2332,13 @@ cmd_delete() {
             git worktree remove --force "$_wt_path" 2>/dev/null || true
         fi
 
+        # Clean up alias config if this branch has one
+        local _del_tid
+        _del_tid=$(_extract_tid_from_branch "$branch") || true
+        if [[ -n "$_del_tid" ]]; then
+            git config --unset "branch.${source}.dispatchtargetalias-${_del_tid}" 2>/dev/null || true
+        fi
+
         git config --unset "branch.${branch}.dispatchsource" 2>/dev/null || true
         git branch -D "$branch" 2>/dev/null || true
         info "  Deleted $branch"
@@ -2322,6 +2396,14 @@ cmd_reset() {
             info "  Deleted $target"
         fi
     done
+
+    # Delete alias configs
+    local _alias_line _alias_key
+    while IFS= read -r _alias_line; do
+        [[ -n "$_alias_line" ]] || continue
+        _alias_key="${_alias_line%% *}"
+        git config --unset "$_alias_key" 2>/dev/null || true
+    done < <(git config --get-regexp "^branch\.${source}\.dispatchtargetalias-" 2>/dev/null || true)
 
     # Delete dispatch config (branch-scoped)
     git config --unset "branch.${source}.dispatchbase" 2>/dev/null || true
@@ -3251,6 +3333,201 @@ cmd_commit() {
     git commit -m "$message" "${trailer_args[@]}" "${git_args[@]}"
 }
 
+# ---------- alias ----------
+
+cmd_alias() {
+    _require_init
+
+    local tid="" branch_name="" subcmd=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            clear)
+                subcmd="clear"; shift ;;
+            -*)
+                die "Unknown flag: $1" ;;
+            *)
+                if [[ -z "$tid" ]]; then
+                    tid="$1"
+                elif [[ -z "$branch_name" ]]; then
+                    branch_name="$1"
+                else
+                    die "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    local source
+    source=$(resolve_source "")
+    [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
+
+    # List mode: no args
+    if [[ -z "$tid" && "$subcmd" != "clear" ]]; then
+        _alias_list "$source"
+        return
+    fi
+
+    if [[ "$subcmd" == "clear" ]]; then
+        [[ -n "$tid" ]] || die "Usage: git dispatch alias clear <N>"
+        _validate_target_id "$tid"
+        [[ "$tid" != "all" ]] || die "Cannot alias the 'all' pseudo-target"
+        _alias_clear "$source" "$tid"
+    else
+        [[ -n "$branch_name" ]] || die "Usage: git dispatch alias <N> <branch-name>"
+        _validate_target_id "$tid"
+        [[ "$tid" != "all" ]] || die "Cannot alias the 'all' pseudo-target"
+        _alias_set "$source" "$tid" "$branch_name"
+    fi
+}
+
+_alias_list() {
+    local source="$1"
+    local found=false
+    local alias_line akey aval atid
+    while IFS= read -r alias_line; do
+        [[ -n "$alias_line" ]] || continue
+        akey="${alias_line%% *}"
+        aval="${alias_line#* }"
+        atid="${akey##*dispatchtargetalias-}"
+        local pattern_name
+        pattern_name=$(_target_branch_name_pattern "$atid")
+        if ! $found; then
+            echo -e "${CYAN}Aliases:${NC}"
+            found=true
+        fi
+        echo -e "  ${YELLOW}${atid}${NC}  ${pattern_name} -> ${GREEN}${aval}${NC}"
+    done < <(git config --get-regexp "^branch\.${source}\.dispatchtargetalias-" 2>/dev/null || true)
+    $found || info "No aliases configured."
+}
+
+_alias_set() {
+    local source="$1" tid="$2" new_name="$3"
+
+    # Check for collision with another alias
+    local alias_line akey aval atid
+    while IFS= read -r alias_line; do
+        [[ -n "$alias_line" ]] || continue
+        akey="${alias_line%% *}"
+        aval="${alias_line#* }"
+        atid="${akey##*dispatchtargetalias-}"
+        if [[ "$aval" == "$new_name" && "$atid" != "$tid" ]]; then
+            die "Branch '$new_name' is already aliased to target $atid"
+        fi
+    done < <(git config --get-regexp "^branch\.${source}\.dispatchtargetalias-" 2>/dev/null || true)
+
+    # Check for collision with a pattern-generated name of another target
+    local reverse_tid
+    reverse_tid=$(_extract_tid_from_branch "$new_name") || true
+    if [[ -n "$reverse_tid" && "$reverse_tid" != "$tid" ]]; then
+        die "Branch '$new_name' matches target $reverse_tid (pattern collision)"
+    fi
+
+    local old_name
+    old_name=$(_target_branch_name_pattern "$tid")
+
+    # Store the alias first (so _target_branch_name returns the alias)
+    _set_config "targetalias-${tid}" "$new_name" "$source"
+
+    # Rename existing branch if it exists under the old pattern name
+    if git rev-parse --verify "refs/heads/$old_name" &>/dev/null; then
+        local cur
+        cur=$(current_branch)
+        if [[ "$cur" == "$old_name" ]]; then
+            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            die "Cannot rename '$old_name' (currently checked out)"
+        fi
+
+        # Check worktree
+        local _wt_path
+        _wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$old_name" '
+            /^worktree / { wt=$2 }
+            /^branch refs\/heads\// { br=substr($2,12); if (br == b) print wt }
+        ')
+        if [[ -n "$_wt_path" ]]; then
+            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            die "Cannot rename '$old_name' (checked out in worktree: $_wt_path)"
+        fi
+
+        if git rev-parse --verify "refs/heads/$new_name" &>/dev/null; then
+            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            die "Branch '$new_name' already exists"
+        fi
+
+        git branch -m "$old_name" "$new_name"
+        git config "branch.${new_name}.dispatchsource" "$source"
+        git config --unset "branch.${old_name}.dispatchsource" 2>/dev/null || true
+
+        info "Renamed $old_name -> $new_name"
+
+        # Check if remote tracking exists for old name
+        local remote_ref
+        remote_ref=$(git config "branch.${new_name}.merge" 2>/dev/null || true)
+        if [[ -n "$remote_ref" ]] || git ls-remote --heads origin "$old_name" 2>/dev/null | grep -q .; then
+            warn "Note: Remote branch 'origin/$old_name' still exists."
+            warn "  Push new:    git push -u origin $new_name"
+            warn "  Delete old:  git push origin --delete $old_name"
+        fi
+    else
+        info "Alias set: target $tid -> $new_name"
+    fi
+}
+
+_alias_clear() {
+    local source="$1" tid="$2"
+
+    local alias_name
+    alias_name=$(_get_config "targetalias-${tid}")
+    if [[ -z "$alias_name" ]]; then
+        die "No alias configured for target $tid"
+    fi
+
+    local pattern_name
+    pattern_name=$(_target_branch_name_pattern "$tid")
+
+    # Remove alias config first
+    git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+
+    # Rename branch back to pattern name if it exists
+    if git rev-parse --verify "refs/heads/$alias_name" &>/dev/null; then
+        local cur
+        cur=$(current_branch)
+        if [[ "$cur" == "$alias_name" ]]; then
+            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            die "Cannot rename '$alias_name' (currently checked out)"
+        fi
+
+        local _wt_path
+        _wt_path=$(git worktree list --porcelain 2>/dev/null | awk -v b="$alias_name" '
+            /^worktree / { wt=$2 }
+            /^branch refs\/heads\// { br=substr($2,12); if (br == b) print wt }
+        ')
+        if [[ -n "$_wt_path" ]]; then
+            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            die "Cannot rename '$alias_name' (checked out in worktree: $_wt_path)"
+        fi
+
+        if git rev-parse --verify "refs/heads/$pattern_name" &>/dev/null; then
+            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            die "Branch '$pattern_name' already exists"
+        fi
+
+        git branch -m "$alias_name" "$pattern_name"
+        git config "branch.${pattern_name}.dispatchsource" "$source"
+        git config --unset "branch.${alias_name}.dispatchsource" 2>/dev/null || true
+
+        info "Renamed $alias_name -> $pattern_name"
+
+        if git ls-remote --heads origin "$alias_name" 2>/dev/null | grep -q .; then
+            warn "Note: Remote branch 'origin/$alias_name' still exists."
+            warn "  Push new:    git push -u origin $pattern_name"
+            warn "  Delete old:  git push origin --delete $alias_name"
+        fi
+    else
+        info "Alias cleared for target $tid"
+    fi
+}
+
 # ---------- help ----------
 
 cmd_help() {
@@ -3315,6 +3592,11 @@ COMMANDS
                 verify <N> --fix    On failure, leave worktree for fixing
               Configure: git config branch.<source>.dispatchverify "<command>"
   delete      Delete target branches: delete <N|all|--prune>
+  alias       Manage target branch aliases:
+                alias                          List all aliases
+                alias <N> <branch-name>        Alias target N to custom branch name
+                alias clear <N>                Remove alias for target N
+              Existing branches are renamed. Remote push/delete is manual.
   status      Show base, source, and all targets with sync state
   continue    Resume after conflict resolution
   abort       Cancel in-progress operation, clean up worktrees, return to source
@@ -3376,6 +3658,7 @@ main() {
         retarget)     cmd_retarget "$@" ;;
         delete)       cmd_delete "$@" ;;
         reset)        cmd_reset "$@" ;;
+        alias)        cmd_alias "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
     esac

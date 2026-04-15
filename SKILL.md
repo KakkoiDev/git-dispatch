@@ -28,6 +28,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch alias [<N> <branch-name>\|clear <N>]` | List/set/clear per-target branch aliases |
 | `git dispatch status` | Show mode, base, targets, sync state, divergence, merged |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up, return to source |
@@ -104,6 +105,14 @@ git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
 git dispatch apply                                     # updates both targets
 ```
 
+### Alias target branch names (map target-id to custom branch name)
+```bash
+git dispatch alias 17 kakkoidev/fix/Ticket-1234    # target 17 -> ticket branch
+git dispatch alias                                 # list all aliases
+git dispatch alias clear 17                        # revert to pattern name
+```
+Existing local branches are renamed. Remote push/delete is manual. Aliases survive `apply reset`; `delete`/`reset` clear them.
+
 ### Review feedback
 ```bash
 git dispatch commit "Rename field per review" --target 2
@@ -140,6 +149,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 |-----|-------------|
 | `branch.<source>.dispatchbase` | Base branch (e.g., origin/master) |
 | `branch.<source>.dispatchtargetpattern` | Target branch pattern (must include `{id}`) |
+| `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
@@ -207,6 +217,7 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | Clean up merged targets | `git dispatch delete <N>` or `delete --prune` |
 | Merged PR reverted on base | `git dispatch apply reset <N>` then `apply` |
 | Force sync/apply on merged targets | `--all` flag |
+| PR branch needs a ticket-based name | `git dispatch alias <N> <team>/fix/Ticket-1234` |
 
 ## Installation
 

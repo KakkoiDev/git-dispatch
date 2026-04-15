@@ -35,6 +35,7 @@ One number flows through: Dispatch-Target-Id 3 -> `dispatch commit --target 3` -
 | `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch alias [<N> <branch-name>\|clear <N>]` | List/set/clear per-target branch aliases |
 | `git dispatch status` | Show sync state, divergence, stale targets, merged |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up, return to source |
@@ -107,6 +108,14 @@ git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
 git dispatch apply                                     # updates both targets
 ```
 
+### Alias target branch names (custom name for a specific target)
+```bash
+git dispatch alias 17 kakkoidev/fix/Ticket-1234   # override pattern name for target 17
+git dispatch alias                                # list all aliases
+git dispatch alias clear 17                       # revert to pattern name
+```
+Set before `apply` and the branch is created with the alias name. Set after `apply` and the existing branch is renamed via `git branch -m`. Remote push/delete is manual. Aliases survive `apply reset`; `delete N` and `reset` clear them.
+
 ### Review feedback
 ```bash
 git dispatch commit "Rename field" --target 2
@@ -151,6 +160,7 @@ Rules:
 
 - Targets: `<pattern>` with `{id}` replaced - e.g., `feat/auth-{id}` + id 3 = `feat/auth-3`
 - Checkout: `dispatch-checkout/<source>/<N>` - e.g., `dispatch-checkout/feat/auth/3`
+- Aliased targets: `git dispatch alias <N> <custom-branch-name>` overrides the pattern for a specific target (e.g., ticket-based naming `team/fix/Ticket-1234`). `status` tags aliased targets as `(aliased)`.
 
 ## Config
 
@@ -160,6 +170,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 |-----|-------------|
 | `branch.<source>.dispatchbase` | Base branch |
 | `branch.<source>.dispatchtargetpattern` | Target branch pattern (must include `{id}`) |
+| `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
@@ -243,4 +254,5 @@ Only files from that target's own commits are checked. Base drift (source behind
 | Clean up merged/orphaned targets | `git dispatch delete <N>` or `delete --prune` |
 | Merged PR reverted on base | `git dispatch apply reset <N>` then `apply` |
 | Force sync/apply on merged targets | `--all` flag |
+| PR branch needs a ticket-based name | `git dispatch alias <N> <team>/fix/Ticket-1234` |
 | Worktree config collision | Fixed: config is branch-scoped per-worktree |

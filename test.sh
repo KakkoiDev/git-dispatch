@@ -578,8 +578,9 @@ test_apply_conflict_aborts() {
     git checkout source/feature -q
 
     # Apply in independent mode - target-2 will conflict (it modifies file.txt that doesn't exist on base in same state)
+    # --force overrides the base drift check
     local output
-    output=$(bash "$DISPATCH" apply 2>&1) || true
+    output=$(bash "$DISPATCH" apply --force 2>&1) || true
 
     # target-1 should still be created
     assert_branch_exists "source/feature-1" "target-1 created before conflict"
@@ -614,8 +615,9 @@ test_apply_create_auto_resolves_with_theirs() {
     git checkout source/feature -q
 
     # Apply - target branches from master, cherry-pick will conflict on generated.txt
+    # --force overrides the base drift check
     local output
-    output=$(bash "$DISPATCH" apply 2>&1) || true
+    output=$(bash "$DISPATCH" apply --force 2>&1) || true
 
     # Should auto-resolve with --theirs and create the branch
     assert_contains "$output" "Auto-resolved conflict" "reports auto-resolution"
@@ -1022,7 +1024,8 @@ test_status_no_false_diverged_base_drift() {
     bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
 
     # Apply: cherry-picks onto current master (clean merge, different regions)
-    bash "$DISPATCH" apply >/dev/null 2>&1
+    # --force overrides the base drift check
+    bash "$DISPATCH" apply --force >/dev/null 2>&1
 
     # Verify target has merged content (both feature and master changes)
     local target_content
@@ -1239,8 +1242,9 @@ test_refresh_base_fetches_remote() {
     stale_sha=$(git rev-parse origin/master)
 
     # Apply should fetch and use updated origin/master
+    # --force overrides the base drift check (source becomes behind after fetch)
     local output
-    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    output=$(bash "$DISPATCH" apply --force 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     # Verify origin/master was updated
     local fresh_sha
@@ -1298,8 +1302,9 @@ test_refresh_base_local_branch_with_remote() {
     cd "$TMPDIR/repo"
 
     # Apply should pull --rebase master and use updated base
+    # --force overrides the base drift check (source becomes behind after pull)
     local output
-    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+    output=$(bash "$DISPATCH" apply --force 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
 
     assert_contains "$output" "Base master updated" "apply informs about local base update"
 
@@ -1886,8 +1891,8 @@ test_resolve_warns_about_dangling_stash() {
     teardown
 }
 
-test_apply_warns_base_drift() {
-    echo "=== test: apply warns when source is behind base ==="
+test_apply_errors_on_base_drift() {
+    echo "=== test: apply errors when source is behind base ==="
     setup
 
     git checkout -b source/feature master -q
@@ -1907,11 +1912,109 @@ test_apply_warns_base_drift() {
     echo "b" > b.txt; git add b.txt
     git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
 
+    local output exit_code=0
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || exit_code=$?
+
+    assert_eq "1" "$exit_code" "apply exits with error on base drift"
+    assert_contains "$output" "behind" "reports source is behind base"
+    assert_contains "$output" "git dispatch sync" "suggests sync command"
+
+    teardown
+}
+
+test_apply_force_overrides_base_drift() {
+    echo "=== test: apply --force proceeds despite base drift ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null
+
+    # Add commits to base so source falls behind
+    git checkout master -q
+    echo "new" > new.txt; git add new.txt
+    git commit --no-verify -m "New base commit" -q
+    git checkout source/feature -q
+
+    # Add a new source commit to trigger the update path
+    echo "b" > b.txt; git add b.txt
+    git commit -m "Add b$(printf '\n\nDispatch-Target-Id: 1')" -q
+
     local output
-    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+    output=$(bash "$DISPATCH" apply --force 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
     assert_contains "$output" "behind" "warns source is behind base"
-    assert_contains "$output" "git dispatch sync" "suggests sync command"
+
+    teardown
+}
+
+test_apply_errors_when_no_commits_for_target() {
+    echo "=== test: apply <N> errors when no commits target N ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" apply 17 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || exit_code=$?
+
+    assert_eq "1" "$exit_code" "apply 17 exits with error"
+    assert_contains "$output" "No commits on source have Dispatch-Target-Id: 17" "reports missing target"
+
+    teardown
+}
+
+test_push_diagnoses_drift() {
+    echo "=== test: push <N> diagnoses base drift ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # Advance master so source falls behind
+    git checkout master -q
+    echo "new" > new.txt; git add new.txt
+    git commit --no-verify -m "Master advance" -q
+    git checkout source/feature -q
+
+    # push 17 on a non-existent target - should diagnose drift
+    local output exit_code=0
+    output=$(bash "$DISPATCH" push 17 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || exit_code=$?
+
+    assert_eq "1" "$exit_code" "push 17 exits with error"
+    assert_contains "$output" "does not exist" "push reports missing target"
+    assert_contains "$output" "behind" "push diagnoses drift"
+    assert_contains "$output" "git dispatch sync" "push suggests sync"
+
+    teardown
+}
+
+test_push_diagnoses_missing_trailer() {
+    echo "=== test: push <N> diagnoses missing trailer ==="
+    setup
+
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "Add a$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-{id}" >/dev/null 2>&1
+
+    # push 17 - no commits target 17 and no drift - should diagnose missing trailer
+    local output exit_code=0
+    output=$(bash "$DISPATCH" push 17 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || exit_code=$?
+
+    assert_eq "1" "$exit_code" "push 17 exits with error"
+    assert_contains "$output" "does not exist" "push reports missing target"
+    assert_contains "$output" "No commits on source have Dispatch-Target-Id: 17" "push diagnoses missing trailer"
 
     teardown
 }
@@ -4154,7 +4257,11 @@ test_source_keep_force_accepts_conflict
 test_source_keep_no_conflict_normal_pick
 test_no_source_keep_conflict_still_fails
 test_resolve_warns_about_dangling_stash
-test_apply_warns_base_drift
+test_apply_errors_on_base_drift
+test_apply_force_overrides_base_drift
+test_apply_errors_when_no_commits_for_target
+test_push_diagnoses_drift
+test_push_diagnoses_missing_trailer
 test_status_shows_untracked_commits
 test_stash_pop_conflict_warns
 test_continue_cleans_completed_worktree
@@ -4254,8 +4361,9 @@ test_merged_target_skipped_in_apply() {
     git commit --no-verify -m "merge target 1" -q
     git checkout source -q
 
+    # --force overrides base drift check (source is behind after squash-merge)
     local output
-    output=$(bash "$DISPATCH" apply 2>&1)
+    output=$(bash "$DISPATCH" apply --force 2>&1)
     assert_contains "$output" "merged" "apply reports merged target"
 
     teardown
@@ -4312,8 +4420,9 @@ test_apply_all_includes_merged() {
     echo "feature v2" > a.txt; git add a.txt
     git commit -m "Feature v2$(printf '\n\nDispatch-Target-Id: 1')" -q
 
+    # --all + --force: include merged targets AND override drift check
     local output
-    output=$(bash "$DISPATCH" apply --all 2>&1)
+    output=$(bash "$DISPATCH" apply --all --force 2>&1)
     assert_not_contains "$output" "merged" "apply --all does not skip merged"
 
     teardown
@@ -4393,8 +4502,9 @@ test_merged_target_resumes_after_revert() {
     git checkout source -q
 
     # Target is no longer merged - apply should not skip it
+    # --force overrides base drift check (the squash-merge + revert leaves master ahead)
     local output
-    output=$(bash "$DISPATCH" apply 2>&1)
+    output=$(bash "$DISPATCH" apply --force 2>&1)
     assert_not_contains "$output" "merged" "reverted target not reported as merged"
 
     teardown
@@ -4877,8 +4987,9 @@ test_source_keep_warns_non_generated() {
     git checkout source/feature -q
 
     # Apply without sync - cherry-pick will conflict, Source-Keep auto-resolves
+    # --force overrides base drift check (master advanced, source behind)
     local output
-    output=$(bash "$DISPATCH" apply --yes 2>&1)
+    output=$(bash "$DISPATCH" apply --force --yes 2>&1)
     assert_contains "$output" "Source-Keep overwrote non-generated file" "warns about non-generated file"
 
     teardown
@@ -5013,6 +5124,238 @@ test_verify_no_config() {
 test_verify_basic
 test_verify_failure
 test_verify_no_config
+
+# ---------- alias tests ----------
+
+test_alias_set_before_apply() {
+    echo "=== test: alias set before apply creates branch with alias name ==="
+    setup
+    create_source
+
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    assert_branch_exists "source/fix/Ticket-1234" "aliased branch created"
+    assert_branch_not_exists "source/feature-3" "pattern-named branch not created"
+
+    src=$(git config branch.source/fix/Ticket-1234.dispatchsource)
+    assert_eq "source/feature" "$src" "aliased branch has dispatchsource"
+
+    teardown
+}
+
+test_alias_set_after_apply_renames_existing() {
+    echo "=== test: alias set after apply renames existing branch ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    assert_branch_exists "source/feature-3" "pattern-named branch exists initially"
+
+    output=$(bash "$DISPATCH" alias 3 source/fix/Ticket-1234 2>&1)
+    assert_contains "$output" "Renamed" "rename message shown"
+
+    assert_branch_exists "source/fix/Ticket-1234" "aliased branch exists after rename"
+    assert_branch_not_exists "source/feature-3" "pattern-named branch removed"
+
+    src=$(git config branch.source/fix/Ticket-1234.dispatchsource)
+    assert_eq "source/feature" "$src" "dispatchsource migrated to new name"
+
+    old_src=$(git config branch.source/feature-3.dispatchsource 2>/dev/null || echo "unset")
+    assert_eq "unset" "$old_src" "old dispatchsource unset"
+
+    teardown
+}
+
+test_alias_clear_renames_back() {
+    echo "=== test: alias clear renames back to pattern name ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    output=$(bash "$DISPATCH" alias clear 3 2>&1)
+    assert_contains "$output" "Renamed" "rename message shown"
+
+    assert_branch_exists "source/feature-3" "pattern-named branch restored"
+    assert_branch_not_exists "source/fix/Ticket-1234" "aliased branch removed"
+
+    cfg=$(git config branch.source/feature.dispatchtargetalias-3 2>/dev/null || echo "unset")
+    assert_eq "unset" "$cfg" "alias config cleared"
+
+    teardown
+}
+
+test_alias_list() {
+    echo "=== test: alias list shows configured aliases ==="
+    setup
+    create_source
+
+    output=$(bash "$DISPATCH" alias 2>&1)
+    assert_contains "$output" "No aliases" "empty list message"
+
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+    bash "$DISPATCH" alias 4 source/feat/Ticket-5678 >/dev/null 2>&1
+
+    output=$(bash "$DISPATCH" alias 2>&1)
+    assert_contains "$output" "source/fix/Ticket-1234" "lists alias 3"
+    assert_contains "$output" "source/feat/Ticket-5678" "lists alias 4"
+
+    teardown
+}
+
+test_alias_survives_apply_reset() {
+    echo "=== test: alias survives apply reset ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    bash "$DISPATCH" apply reset 3 --yes >/dev/null 2>&1
+
+    assert_branch_exists "source/fix/Ticket-1234" "aliased branch recreated after reset"
+    assert_branch_not_exists "source/feature-3" "pattern-named branch not recreated"
+
+    teardown
+}
+
+test_alias_extract_tid_from_aliased_branch() {
+    echo "=== test: status recognizes aliased branches ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    output=$(bash "$DISPATCH" status 2>&1)
+    output=$(echo "$output" | sed $'s/\033\\[[0-9;]*m//g')
+    assert_contains "$output" "source/fix/Ticket-1234" "status shows aliased branch"
+    assert_contains "$output" "aliased" "status shows aliased marker"
+    assert_not_contains "$output" "source/feature-3" "status does not show old pattern name"
+
+    teardown
+}
+
+test_alias_collision_with_existing_alias() {
+    echo "=== test: alias rejects collision with another alias ==="
+    setup
+    create_source
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    exit_code=0
+    output=$(bash "$DISPATCH" alias 4 source/fix/Ticket-1234 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "rejects duplicate alias"
+    assert_contains "$output" "already aliased" "reports collision"
+
+    teardown
+}
+
+test_alias_collision_with_pattern_name() {
+    echo "=== test: alias rejects pattern collision ==="
+    setup
+    create_source
+
+    exit_code=0
+    output=$(bash "$DISPATCH" alias 3 source/feature-4 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "rejects alias that matches another target's pattern name"
+    assert_contains "$output" "pattern collision" "reports pattern collision"
+
+    teardown
+}
+
+test_alias_delete_cleans_config() {
+    echo "=== test: delete target clears alias config ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    bash "$DISPATCH" delete 3 --yes >/dev/null 2>&1
+
+    cfg=$(git config branch.source/feature.dispatchtargetalias-3 2>/dev/null || echo "unset")
+    assert_eq "unset" "$cfg" "alias config cleaned on delete"
+
+    teardown
+}
+
+test_alias_reset_cleans_all_configs() {
+    echo "=== test: reset clears all alias configs ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+    bash "$DISPATCH" alias 4 source/feat/Ticket-5678 >/dev/null 2>&1
+
+    bash "$DISPATCH" reset --yes >/dev/null 2>&1
+
+    cfg3=$(git config branch.source/feature.dispatchtargetalias-3 2>/dev/null || echo "unset")
+    cfg4=$(git config branch.source/feature.dispatchtargetalias-4 2>/dev/null || echo "unset")
+    assert_eq "unset" "$cfg3" "alias 3 cleaned on reset"
+    assert_eq "unset" "$cfg4" "alias 4 cleaned on reset"
+
+    teardown
+}
+
+test_alias_validates_tid() {
+    echo "=== test: alias rejects invalid target IDs ==="
+    setup
+    create_source
+
+    exit_code=0
+    output=$(bash "$DISPATCH" alias 0 some-branch 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "rejects tid 0"
+
+    exit_code=0
+    output=$(bash "$DISPATCH" alias all some-branch 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "rejects 'all'"
+    assert_contains "$output" "all" "reports all rejection"
+
+    teardown
+}
+
+test_alias_clear_without_existing_fails() {
+    echo "=== test: alias clear without existing alias fails ==="
+    setup
+    create_source
+
+    exit_code=0
+    output=$(bash "$DISPATCH" alias clear 3 2>&1) || exit_code=$?
+    assert_eq "1" "$exit_code" "fails when no alias exists"
+    assert_contains "$output" "No alias" "reports no alias"
+
+    teardown
+}
+
+test_alias_incremental_apply_works() {
+    echo "=== test: apply after alias picks up new commits correctly ==="
+    setup
+    create_source
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+    bash "$DISPATCH" alias 3 source/fix/Ticket-1234 >/dev/null 2>&1
+
+    # Add a new commit targeting 3
+    echo "new" > new.txt; git add new.txt
+    git commit -m "New commit$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" apply --yes >/dev/null 2>&1
+
+    count=$(git log --oneline master..source/fix/Ticket-1234 | wc -l | tr -d ' ')
+    assert_eq "2" "$count" "aliased branch has 2 commits after incremental apply"
+
+    teardown
+}
+
+test_alias_set_before_apply
+test_alias_set_after_apply_renames_existing
+test_alias_clear_renames_back
+test_alias_list
+test_alias_survives_apply_reset
+test_alias_extract_tid_from_aliased_branch
+test_alias_collision_with_existing_alias
+test_alias_collision_with_pattern_name
+test_alias_delete_cleans_config
+test_alias_reset_cleans_all_configs
+test_alias_validates_tid
+test_alias_clear_without_existing_fails
+test_alias_incremental_apply_works
 
 echo ""
 echo "======================="

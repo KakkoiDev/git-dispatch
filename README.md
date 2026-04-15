@@ -62,6 +62,7 @@ git dispatch push all
 | `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
+| `git dispatch alias [<N> <branch-name>\|clear <N>]` | List/set/clear per-target branch aliases |
 | `git dispatch status` | Show sync state, divergence, merged targets |
 | `git dispatch continue` | Resume after conflict resolution |
 | `git dispatch abort` | Cancel in-progress operation, clean up |
@@ -210,6 +211,21 @@ Handles cherry-pick conflicts, merge conflicts, checkout branches, and dispatch 
 
 Checkout branches: `dispatch-checkout/<source>/<N>`
 
+### Aliases
+
+Override the pattern-generated name for specific targets. Useful for tying PR branches to ticket numbers instead of numeric ids.
+
+```bash
+git dispatch alias 17 kakkoidev/fix/Ticket-1234    # alias target 17
+git dispatch alias                                 # list all aliases
+git dispatch alias clear 17                        # remove alias
+```
+
+- Existing local branches are renamed via `git branch -m`. Remote push/delete is manual.
+- Set before `apply` creates the target with the alias name directly.
+- Aliases survive `apply reset`. `delete <N>` and `reset` clear them.
+- `status` shows `(aliased)` next to aliased targets.
+
 ## Flags
 
 | Flag | Meaning |
@@ -326,6 +342,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 |-----|-------------|
 | `branch.<source>.dispatchbase` | Base branch |
 | `branch.<source>.dispatchtargetpattern` | Target branch pattern (must include `{id}`) |
+| `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
