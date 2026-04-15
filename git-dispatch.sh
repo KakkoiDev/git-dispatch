@@ -475,6 +475,19 @@ _validate_target_id() {
     fi
 }
 
+# Encode a target id for use in a git config variable name.
+# git config vars allow only alphanumeric and '-' (no '.' or '_'), but decimal
+# tids (e.g., 17.1) contain '.'. We map '.' -> '-' on write and reverse when
+# parsing the key back. Safe because _validate_target_id restricts tids to
+# digits and a single '.' (never contain '-' already).
+_tid_cfg_encode() {
+    printf '%s' "$1" | tr '.' '-'
+}
+
+_tid_cfg_decode() {
+    printf '%s' "$1" | tr '-' '.'
+}
+
 # Find source commits not yet on a target branch.
 # Primary: subject-line matching (handles cosmetic divergence from different cherry-pick contexts).
 # Fallback: patch-id matching (handles amended subjects with identical diffs).
@@ -671,7 +684,7 @@ _extract_tid_from_branch() {
             akey="${alias_line%% *}"
             aval="${alias_line#* }"
             if [[ "$aval" == "$branch" ]]; then
-                atid="${akey##*dispatchtargetalias-}"
+                atid=$(_tid_cfg_decode "${akey##*dispatchtargetalias-}")
                 echo "$atid"; return 0
             fi
         done < <(git config --get-regexp "^branch\.${source_branch}\.dispatchtargetalias-" 2>/dev/null || true)
@@ -1041,7 +1054,7 @@ find_dispatch_targets() {
 _target_branch_name() {
     local tid="$1"
     local alias_name
-    alias_name=$(_get_config "targetalias-${tid}")
+    alias_name=$(_get_config "targetalias-$(_tid_cfg_encode "${tid}")")
     if [[ -n "$alias_name" ]]; then
         echo "$alias_name"; return
     fi
@@ -2035,7 +2048,7 @@ cmd_status() {
 
         local alias_tag=""
         local _alias_check
-        _alias_check=$(_get_config "targetalias-${tid}")
+        _alias_check=$(_get_config "targetalias-$(_tid_cfg_encode "${tid}")")
         [[ -n "$_alias_check" ]] && alias_tag=" ${CYAN}(aliased)${NC}"
 
         local pr_suffix=""
@@ -2336,7 +2349,7 @@ cmd_delete() {
         local _del_tid
         _del_tid=$(_extract_tid_from_branch "$branch") || true
         if [[ -n "$_del_tid" ]]; then
-            git config --unset "branch.${source}.dispatchtargetalias-${_del_tid}" 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchtargetalias-$(_tid_cfg_encode "${_del_tid}")" 2>/dev/null || true
         fi
 
         git config --unset "branch.${branch}.dispatchsource" 2>/dev/null || true
@@ -3389,7 +3402,7 @@ _alias_list() {
         [[ -n "$alias_line" ]] || continue
         akey="${alias_line%% *}"
         aval="${alias_line#* }"
-        atid="${akey##*dispatchtargetalias-}"
+        atid=$(_tid_cfg_decode "${akey##*dispatchtargetalias-}")
         local pattern_name
         pattern_name=$(_target_branch_name_pattern "$atid")
         if ! $found; then
@@ -3410,7 +3423,7 @@ _alias_set() {
         [[ -n "$alias_line" ]] || continue
         akey="${alias_line%% *}"
         aval="${alias_line#* }"
-        atid="${akey##*dispatchtargetalias-}"
+        atid=$(_tid_cfg_decode "${akey##*dispatchtargetalias-}")
         if [[ "$aval" == "$new_name" && "$atid" != "$tid" ]]; then
             die "Branch '$new_name' is already aliased to target $atid"
         fi
@@ -3427,14 +3440,16 @@ _alias_set() {
     old_name=$(_target_branch_name_pattern "$tid")
 
     # Store the alias first (so _target_branch_name returns the alias)
-    _set_config "targetalias-${tid}" "$new_name" "$source"
+    local tid_safe
+    tid_safe=$(_tid_cfg_encode "${tid}")
+    _set_config "targetalias-${tid_safe}" "$new_name" "$source"
 
     # Rename existing branch if it exists under the old pattern name
     if git rev-parse --verify "refs/heads/$old_name" &>/dev/null; then
         local cur
         cur=$(current_branch)
         if [[ "$cur" == "$old_name" ]]; then
-            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchtargetalias-${tid_safe}" 2>/dev/null || true
             die "Cannot rename '$old_name' (currently checked out)"
         fi
 
@@ -3445,12 +3460,12 @@ _alias_set() {
             /^branch refs\/heads\// { br=substr($2,12); if (br == b) print wt }
         ')
         if [[ -n "$_wt_path" ]]; then
-            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchtargetalias-${tid_safe}" 2>/dev/null || true
             die "Cannot rename '$old_name' (checked out in worktree: $_wt_path)"
         fi
 
         if git rev-parse --verify "refs/heads/$new_name" &>/dev/null; then
-            git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+            git config --unset "branch.${source}.dispatchtargetalias-${tid_safe}" 2>/dev/null || true
             die "Branch '$new_name' already exists"
         fi
 
@@ -3476,8 +3491,11 @@ _alias_set() {
 _alias_clear() {
     local source="$1" tid="$2"
 
+    local tid_safe
+    tid_safe=$(_tid_cfg_encode "${tid}")
+
     local alias_name
-    alias_name=$(_get_config "targetalias-${tid}")
+    alias_name=$(_get_config "targetalias-${tid_safe}")
     if [[ -z "$alias_name" ]]; then
         die "No alias configured for target $tid"
     fi
@@ -3486,14 +3504,14 @@ _alias_clear() {
     pattern_name=$(_target_branch_name_pattern "$tid")
 
     # Remove alias config first
-    git config --unset "branch.${source}.dispatchtargetalias-${tid}" 2>/dev/null || true
+    git config --unset "branch.${source}.dispatchtargetalias-${tid_safe}" 2>/dev/null || true
 
     # Rename branch back to pattern name if it exists
     if git rev-parse --verify "refs/heads/$alias_name" &>/dev/null; then
         local cur
         cur=$(current_branch)
         if [[ "$cur" == "$alias_name" ]]; then
-            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            _set_config "targetalias-${tid_safe}" "$alias_name" "$source"
             die "Cannot rename '$alias_name' (currently checked out)"
         fi
 
@@ -3503,12 +3521,12 @@ _alias_clear() {
             /^branch refs\/heads\// { br=substr($2,12); if (br == b) print wt }
         ')
         if [[ -n "$_wt_path" ]]; then
-            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            _set_config "targetalias-${tid_safe}" "$alias_name" "$source"
             die "Cannot rename '$alias_name' (checked out in worktree: $_wt_path)"
         fi
 
         if git rev-parse --verify "refs/heads/$pattern_name" &>/dev/null; then
-            _set_config "targetalias-${tid}" "$alias_name" "$source"
+            _set_config "targetalias-${tid_safe}" "$alias_name" "$source"
             die "Branch '$pattern_name' already exists"
         fi
 
