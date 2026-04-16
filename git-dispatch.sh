@@ -3340,7 +3340,7 @@ cmd_commit() {
         trailer_args+=(--trailer "Dispatch-Source-Keep=true")
     fi
 
-    git commit -m "$message" "${trailer_args[@]}" "${git_args[@]}"
+    git commit -m "$message" "${trailer_args[@]}" ${git_args[@]+"${git_args[@]}"}
 }
 
 # ---------- alias ----------
