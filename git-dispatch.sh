@@ -1178,11 +1178,8 @@ cmd_sync() {
     local base_count
     base_count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
     if [[ "$base_count" -eq 0 ]]; then
-        info "Already in sync. Source is up to date with $base."
-        return
-    fi
-
-    if $dry_run; then
+        info "Source is up to date with $base."
+    elif $dry_run; then
         echo -e "${YELLOW}[dry-run]${NC} merge $base ($base_count commits) into $source"
     else
         _spinner_start "Merging $base into $source..."

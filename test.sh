@@ -3487,7 +3487,50 @@ test_sync_skips_up_to_date_targets() {
     local output
     output=$(bash "$DISPATCH" sync 2>&1)
 
-    assert_contains "$output" "Already in sync" "no merge when base unchanged"
+    assert_contains "$output" "up to date" "no merge when base unchanged"
+
+    teardown
+}
+
+test_sync_merges_targets_when_source_up_to_date() {
+    echo "=== test: sync merges targets even when source is already up to date ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}"
+
+    echo "a" > a.txt
+    git add a.txt
+    git commit -m "add a" --trailer "Dispatch-Target-Id=1" -q
+
+    bash "$DISPATCH" apply
+
+    # Advance master
+    git checkout master -q
+    echo "master-change" > master.txt
+    git add master.txt
+    git -c core.hooksPath= commit -m "master: add master.txt" -q
+    git checkout source/feature -q
+
+    # Manually merge master into source only (simulate partial sync)
+    git merge master --no-edit -q
+
+    # Source is now up to date, but target is behind
+    local target_behind
+    target_behind=$(git rev-list --count "source/feature-task-1..master" 2>/dev/null)
+    assert_eq "1" "$target_behind" "target is behind master before sync"
+
+    # Sync should still merge into target
+    local output
+    output=$(bash "$DISPATCH" sync 2>&1)
+
+    assert_contains "$output" "up to date" "reports source up to date"
+    assert_not_contains "$output" "Already in sync" "does not early-return"
+
+    # Target should now have master's change
+    local t1_master
+    t1_master=$(git show "source/feature-task-1:master.txt" 2>/dev/null || echo "MISSING")
+    assert_eq "master-change" "$t1_master" "target has master change after sync"
 
     teardown
 }
@@ -4315,6 +4358,7 @@ test_sync_merges_into_existing_targets
 test_sync_no_force_push_needed
 test_sync_target_merge_dry_run
 test_sync_skips_up_to_date_targets
+test_sync_merges_targets_when_source_up_to_date
 test_sync_conflict_on_target_merge
 test_sync_does_not_create_new_targets
 test_apply_reset_does_not_cascade
