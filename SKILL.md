@@ -170,7 +170,17 @@ All propagation commands support `--resolve` (or `--continue`) to leave conflict
 - **Default**: aborts cleanly, prints re-run hint
 - **`--resolve`/`--continue`**: leaves conflict active in worktree, shows remaining work
 - **`git dispatch abort`**: cancel operation, clean up, return to source
-- **Dispatch-Source-Keep**: auto-resolves with `--strategy-option theirs`
+- **Dispatch-Source-Keep**: auto-resolves keeping the source-originated version (apply/checkin: `--strategy-option theirs`; sync: file-scoped `--ours` on target)
+
+### Sync conflict flow
+
+1. `git dispatch sync --resolve` hits conflict, leaves worktree at printed path.
+2. Resolve files there (`git -C <wt> checkout --ours <file>`, `--theirs <file>`, or edit).
+3. `git -C <wt> add <resolved>` - staging is enough; no `git commit` needed.
+4. `git dispatch continue` - auto-commits the merge, then resumes any remaining targets.
+
+`Dispatch-Source-Keep: true` on a target commit auto-resolves sync conflicts on files
+that commit touched (keeps the target's side, same intent as apply/checkin: "source owns this file").
 
 ## Divergence Detection
 

@@ -222,6 +222,23 @@ _set_config() {
     git config "branch.${branch}.dispatch${key}" "$value"
 }
 
+# Sync queue: remaining target branches to merge base into after a conflict pause.
+# Stored as newline-separated list in branch.<source>.dispatchsyncqueue so it
+# survives worktree teardown between `continue` calls.
+_sync_queue_get() {
+    local source="$1"
+    git config "branch.${source}.dispatchsyncqueue" 2>/dev/null || true
+}
+
+_sync_queue_set() {
+    local source="$1" value="$2"
+    if [[ -z "$value" ]]; then
+        git config --unset "branch.${source}.dispatchsyncqueue" 2>/dev/null || true
+    else
+        git config "branch.${source}.dispatchsyncqueue" "$value"
+    fi
+}
+
 # Require dispatch init has been run
 _require_init() {
     local base
@@ -455,6 +472,52 @@ _extract_dispatch_source_keep() {
         (grep -m1 "^Dispatch-Source-Keep:" || true) | \
         sed 's/^Dispatch-Source-Keep:[[:space:]]*//' | tr -d '[:space:]')
     [[ -n "$val" ]] && echo "$val"
+    return 0
+}
+
+# Attempt to auto-resolve a sync merge conflict in $wt by honoring
+# Dispatch-Source-Keep trailers on target commits. For each conflicted path,
+# if any commit in <merge-base..target> that touches that path has
+# Source-Keep=true, keep the target's version (file-scoped --ours; sync merges
+# base INTO target so target = ours, base = theirs). Returns 0 iff all
+# conflicts were resolved and a merge commit was produced.
+_sync_try_source_keep_resolve() {
+    local wt="$1" target="$2" base="$3"
+    local -a unmerged=()
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && unmerged+=("$p")
+    done < <(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)
+
+    [[ ${#unmerged[@]} -gt 0 ]] || return 1
+
+    local mb
+    mb=$(git merge-base "$target" "$base" 2>/dev/null) || return 1
+
+    local resolved=0
+    for p in "${unmerged[@]}"; do
+        local hashes
+        hashes=$(git log "$mb..$target" --format="%H" -- "$p" 2>/dev/null)
+        [[ -n "$hashes" ]] || continue
+        while IFS= read -r h; do
+            [[ -n "$h" ]] || continue
+            local sk
+            sk=$(_extract_dispatch_source_keep "$h")
+            if [[ -n "$sk" ]]; then
+                git -C "$wt" checkout --ours -- "$p" >/dev/null 2>&1 || return 1
+                git -C "$wt" add -- "$p" >/dev/null 2>&1 || return 1
+                info "  Source-Keep auto-resolved: $p (kept target version)"
+                resolved=$((resolved + 1))
+                break
+            fi
+        done <<< "$hashes"
+    done
+
+    local remaining
+    remaining=$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)
+    [[ -z "$remaining" ]] || return 1
+    [[ $resolved -gt 0 ]] || return 1
+
+    git -C "$wt" commit --no-edit --no-verify >/dev/null 2>&1 || return 1
     return 0
 }
 
@@ -1174,6 +1237,9 @@ cmd_sync() {
     _refresh_base "$base" || true
     _spinner_stop
 
+    # Fresh sync run: drop any stale queue from a previous aborted session
+    $dry_run || _sync_queue_set "$source" ""
+
     # Merge base into source
     local base_count
     base_count=$(git rev-list --count "$source..$base" 2>/dev/null || echo 0)
@@ -1192,8 +1258,9 @@ cmd_sync() {
             _show_conflict_diff "$_DISPATCH_WT_PATH"
             if $resolve; then
                 echo ""
-                warn "Resolve conflicts in worktree, then run: git -C $_DISPATCH_WT_PATH commit"
-                warn "Then run: git dispatch continue"
+                warn "Resolve conflicts in worktree: $_DISPATCH_WT_PATH"
+                warn "Then:       git -C $_DISPATCH_WT_PATH add <resolved-files>"
+                warn "Then run:   git dispatch continue"
                 _DISPATCH_WT_CREATED=false
                 exit 1
             fi
@@ -1216,7 +1283,9 @@ cmd_sync() {
 
         local target_merged_skipped=0
 
-        for _et_branch in "${existing_targets[@]}"; do
+        local _et_idx
+        for _et_idx in "${!existing_targets[@]}"; do
+            local _et_branch="${existing_targets[$_et_idx]}"
             # Skip targets whose content is already merged into base
             if ! $include_merged && _is_content_merged "$_et_branch" "$base"; then
                 target_merged_skipped=$((target_merged_skipped + 1))
@@ -1245,14 +1314,28 @@ cmd_sync() {
             local -a _et_gcmd=(git -C "$_DISPATCH_WT_PATH")
             _spinner_stop
             if ! "${_et_gcmd[@]}" merge "$base" --no-edit 2>/dev/null; then
+                # Try Source-Keep auto-resolution before surfacing conflict
+                if _sync_try_source_keep_resolve "$_DISPATCH_WT_PATH" "$_et_branch" "$base"; then
+                    info "  Merged $base into $_et_branch ($_et_behind commits, Source-Keep auto-resolved)"
+                    _leave_branch
+                    merged_targets=$((merged_targets + 1))
+                    continue
+                fi
                 if $resolve; then
+                    local -a _remaining=("${existing_targets[@]:$((_et_idx+1))}")
+                    if [[ ${#_remaining[@]} -gt 0 ]]; then
+                        _sync_queue_set "$source" "$(printf '%s\n' "${_remaining[@]}")"
+                    fi
                     echo ""
                     warn "Merge conflict on $_et_branch from $base"
                     _show_conflict_diff "$_DISPATCH_WT_PATH"
                     echo ""
                     warn "Resolve conflicts in worktree: $_DISPATCH_WT_PATH"
-                    warn "Then run: git -C $_DISPATCH_WT_PATH commit"
-                    warn "Then run: git dispatch continue"
+                    warn "Then:       git -C $_DISPATCH_WT_PATH add <resolved-files>"
+                    warn "Then run:   git dispatch continue"
+                    if [[ ${#_remaining[@]} -gt 0 ]]; then
+                        warn "${#_remaining[@]} target(s) remaining after this one."
+                    fi
                     _DISPATCH_WT_CREATED=false
                     _DISPATCH_WT_STASHED=false
                     exit 1
@@ -2475,11 +2558,29 @@ cmd_continue() {
             warn "Cherry-pick conflict pending on $branch"
             warn "  Resolve in: $wt"
             warn "  Then run:   git -C $wt cherry-pick --continue"
-        elif git -C "$wt" rev-parse --verify MERGE_HEAD &>/dev/null; then
-            warn "Merge conflict pending on $branch"
-            warn "  Resolve in: $wt"
-            warn "  Then run:   git -C $wt commit"
-        else
+            continue
+        fi
+
+        if git -C "$wt" rev-parse --verify MERGE_HEAD &>/dev/null; then
+            local _unmerged
+            _unmerged=$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)
+            if [[ -n "$_unmerged" ]]; then
+                warn "Merge conflict pending on $branch"
+                warn "  Resolve in: $wt"
+                warn "  Then:       git -C $wt add <resolved-files>"
+                warn "  Then run:   git dispatch continue"
+                continue
+            fi
+            info "All conflicts resolved. Creating merge commit on $branch."
+            if ! git -C "$wt" commit --no-edit --no-verify >/dev/null 2>&1; then
+                warn "Failed to create merge commit on $branch."
+                warn "  Run: git -C $wt commit"
+                continue
+            fi
+            # Fall through to post-merge processing (queue resume / cleanup)
+        fi
+
+        {
             # Merge-queue resolved (from merge-based checkout). Check for remaining merges.
             if [[ -f "$wt/.dispatch-merge-queue" ]]; then
                 local -a mq_tids=() mq_branches=()
@@ -2582,9 +2683,100 @@ cmd_continue() {
             fi
             info "Operation complete on $branch. Cleaning up $wt"
             git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+        }
+
+        # Resume pending sync queue, if any. The queue is keyed on the source
+        # branch (not on the worktree), so it survives the cleanup above.
+        local _src=""
+        if git config "branch.${branch}.dispatchbase" >/dev/null 2>&1; then
+            _src="$branch"   # branch is itself a dispatch source
+        else
+            _src=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
+        fi
+        if [[ -n "$_src" ]]; then
+            local _queue
+            _queue=$(_sync_queue_get "$_src")
+            if [[ -n "$_queue" ]]; then
+                _dispatch_resume_sync "$_src" "$_queue" || return $?
+            fi
         fi
     done
     git worktree prune 2>/dev/null || true
+}
+
+# Resume `sync` over a queue of target branches persisted in
+# branch.<source>.dispatchsyncqueue. Mirrors the target-merge loop in cmd_sync,
+# including Source-Keep auto-resolve and conflict re-pause.
+_dispatch_resume_sync() {
+    local source="$1" queue="$2"
+    local base
+    base=$(git config "branch.${source}.dispatchbase" 2>/dev/null)
+    [[ -n "$base" ]] || { _sync_queue_set "$source" ""; return 0; }
+
+    local -a pending=()
+    while IFS= read -r _qt; do
+        [[ -n "$_qt" ]] && pending+=("$_qt")
+    done <<< "$queue"
+
+    [[ ${#pending[@]} -gt 0 ]] || { _sync_queue_set "$source" ""; return 0; }
+
+    info "Resuming sync on ${#pending[@]} remaining target(s)"
+    local _merged=0
+    local _qi
+    for _qi in "${!pending[@]}"; do
+        local _qb="${pending[$_qi]}"
+        git show-ref --verify --quiet "refs/heads/${_qb}" || continue
+
+        local _qbehind
+        _qbehind=$(git rev-list --count "${_qb}..${base}" 2>/dev/null || echo 0)
+        if [[ "$_qbehind" -eq 0 ]]; then
+            continue
+        fi
+
+        _spinner_start "Merging $base into $_qb..."
+        _enter_branch "$_qb" || {
+            _spinner_stop
+            warn "  Cannot access $_qb for base merge (worktree conflict?)"
+            continue
+        }
+        local -a _qcmd=(git -C "$_DISPATCH_WT_PATH")
+        _spinner_stop
+        if ! "${_qcmd[@]}" merge "$base" --no-edit 2>/dev/null; then
+            if _sync_try_source_keep_resolve "$_DISPATCH_WT_PATH" "$_qb" "$base"; then
+                info "  Merged $base into $_qb ($_qbehind commits, Source-Keep auto-resolved)"
+                _leave_branch
+                _merged=$((_merged + 1))
+                continue
+            fi
+            local -a _rest=("${pending[@]:$((_qi+1))}")
+            if [[ ${#_rest[@]} -gt 0 ]]; then
+                _sync_queue_set "$source" "$(printf '%s\n' "${_rest[@]}")"
+            else
+                _sync_queue_set "$source" ""
+            fi
+            echo ""
+            warn "Merge conflict on $_qb from $base"
+            _show_conflict_diff "$_DISPATCH_WT_PATH"
+            echo ""
+            warn "Resolve conflicts in worktree: $_DISPATCH_WT_PATH"
+            warn "Then:       git -C $_DISPATCH_WT_PATH add <resolved-files>"
+            warn "Then run:   git dispatch continue"
+            if [[ ${#_rest[@]} -gt 0 ]]; then
+                warn "${#_rest[@]} target(s) remaining after this one."
+            fi
+            info "Resumed: $_merged merged before conflict"
+            _DISPATCH_WT_CREATED=false
+            _DISPATCH_WT_STASHED=false
+            return 1
+        fi
+        info "  Merged $base into $_qb ($_qbehind commits)"
+        _leave_branch
+        _merged=$((_merged + 1))
+    done
+
+    _sync_queue_set "$source" ""
+    info "Sync resumed: $_merged target(s) merged"
+    return 0
 }
 
 # ---------- checkout ----------
@@ -3052,8 +3244,17 @@ cmd_abort() {
             aborted=true
         fi
 
-        # Remove queue file
-        rm -f "$wt/.dispatch-queue"
+        # Remove queue files
+        rm -f "$wt/.dispatch-queue" "$wt/.dispatch-merge-queue"
+
+        # Clear any sync queue persisted on this branch's source
+        local _abort_src=""
+        if git config "branch.${branch}.dispatchbase" >/dev/null 2>&1; then
+            _abort_src="$branch"
+        else
+            _abort_src=$(git config "branch.${branch}.dispatchsource" 2>/dev/null || true)
+        fi
+        [[ -n "$_abort_src" ]] && _sync_queue_set "$_abort_src" ""
 
         # Clean up temp worktree
         git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"

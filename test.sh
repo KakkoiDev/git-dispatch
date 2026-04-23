@@ -3578,6 +3578,176 @@ test_sync_conflict_on_target_merge() {
     teardown
 }
 
+# Helper: build a dispatch state where target-N has an extra commit on file <file>
+# that master also modifies, so source-merge is clean but target-merge conflicts.
+_setup_target_conflict_scenario() {
+    local target_tid="$1" extra_file="$2" target_content="$3" master_content="$4"
+    shift 4
+    local -a tids=("$@")
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    local tid
+    for tid in "${tids[@]}"; do
+        echo "src-${tid}" > "file-${tid}.txt"; git add "file-${tid}.txt"
+        git commit -m "add file-${tid}$(printf '\n\nDispatch-Target-Id: %s' "$tid")" -q
+    done
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Directly add a target-only commit on target-N touching $extra_file
+    local wt_path
+    wt_path=$(mktemp -d)
+    git worktree add -q "$wt_path" "source/feature-task-${target_tid}"
+    echo "$target_content" > "$wt_path/$extra_file"
+    git -C "$wt_path" add "$extra_file"
+    git -C "$wt_path" commit --no-verify -m "target ${target_tid} adds ${extra_file}" -q
+    git worktree remove --force "$wt_path"
+    git worktree prune
+
+    # Master adds/modifies the same file with divergent content
+    git checkout master -q
+    echo "$master_content" > "$extra_file"; git add "$extra_file"
+    git -c core.hooksPath= commit -m "master change ${extra_file}" -q
+    git checkout source/feature -q
+}
+
+test_sync_continue_add_hint_in_message() {
+    echo "=== test: sync --resolve hints at git add (not commit) ==="
+    setup
+
+    _setup_target_conflict_scenario 1 "extra.txt" "target-extra" "master-extra" 1
+
+    local output
+    output=$(bash "$DISPATCH" sync --resolve 2>&1) || true
+
+    assert_contains "$output" "add <resolved" "conflict hint mentions git add"
+    bash "$DISPATCH" abort >/dev/null 2>&1 || true
+
+    teardown
+}
+
+test_sync_continue_auto_commits_staged_resolution() {
+    echo "=== test: continue auto-commits a staged sync resolution ==="
+    setup
+
+    _setup_target_conflict_scenario 1 "extra.txt" "target-extra" "master-extra" 1
+
+    bash "$DISPATCH" sync --resolve >/dev/null 2>&1 || true
+
+    local pending_wt
+    pending_wt=$(git worktree list --porcelain | awk '/^worktree.*git-dispatch-wt/ { print substr($0, 10); exit }')
+    [[ -n "$pending_wt" ]] || { echo "  FAIL: expected pending worktree"; FAIL=$((FAIL + 1)); teardown; return; }
+
+    git -C "$pending_wt" checkout --ours -- extra.txt
+    git -C "$pending_wt" add extra.txt
+
+    local output
+    output=$(bash "$DISPATCH" continue 2>&1) || true
+
+    assert_contains "$output" "All conflicts resolved" "continue auto-commits staged resolution"
+
+    # Target-1 should now have the master commit in its ancestry (merged in)
+    if git merge-base --is-ancestor master source/feature-task-1; then
+        echo -e "  ${GREEN}PASS${NC} target-1 contains master after auto-commit"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} target-1 missing master in ancestry"
+        FAIL=$((FAIL + 1))
+    fi
+
+    teardown
+}
+
+test_sync_continue_cascades_remaining_targets() {
+    echo "=== test: continue cascades to remaining sync targets ==="
+    setup
+
+    _setup_target_conflict_scenario 2 "shared.txt" "target-shared" "master-shared" 1 2 3
+
+    local sync_out
+    sync_out=$(bash "$DISPATCH" sync --resolve 2>&1) || true
+    assert_contains "$sync_out" "target(s) remaining after this one" "sync hints remaining targets"
+
+    local queue_after_sync
+    queue_after_sync=$(git config branch.source/feature.dispatchsyncqueue 2>/dev/null || true)
+    if [[ -n "$queue_after_sync" ]]; then
+        echo -e "  ${GREEN}PASS${NC} sync queue persisted"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} sync queue missing"
+        FAIL=$((FAIL + 1))
+    fi
+
+    local pending_wt
+    pending_wt=$(git worktree list --porcelain | awk '/^worktree.*git-dispatch-wt/ { print substr($0, 10); exit }')
+    [[ -n "$pending_wt" ]] || { echo "  FAIL: expected pending worktree"; FAIL=$((FAIL + 1)); teardown; return; }
+
+    git -C "$pending_wt" checkout --ours -- shared.txt
+    git -C "$pending_wt" add shared.txt
+    git -C "$pending_wt" commit --no-verify -m "resolve" -q
+
+    local cont_out
+    cont_out=$(bash "$DISPATCH" continue 2>&1) || true
+    assert_contains "$cont_out" "Resuming sync" "continue resumes remaining targets"
+
+    # Target-3 should now have master in its ancestry
+    if git merge-base --is-ancestor master source/feature-task-3; then
+        echo -e "  ${GREEN}PASS${NC} target-3 has master content after cascaded sync"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${NC} target-3 missing master in ancestry"
+        FAIL=$((FAIL + 1))
+    fi
+
+    local queue_after_cont
+    queue_after_cont=$(git config branch.source/feature.dispatchsyncqueue 2>/dev/null || true)
+    assert_eq "" "$queue_after_cont" "sync queue cleared after completion"
+
+    teardown
+}
+
+test_sync_source_keep_auto_resolves() {
+    echo "=== test: sync auto-resolves Source-Keep target conflict ==="
+    setup
+
+    git checkout -b source/feature master -q
+    bash "$DISPATCH" init --base master --target-pattern "source/feature-task-{id}" >/dev/null 2>&1
+
+    echo "src-1" > file-1.txt; git add file-1.txt
+    git commit -m "add file-1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Directly add a Source-Keep commit on target-1 that touches generated.txt.
+    # Source has no generated.txt, so source merge stays clean when master adds it.
+    local wt_path
+    wt_path=$(mktemp -d)
+    git worktree add -q "$wt_path" "source/feature-task-1"
+    echo "gen-v1" > "$wt_path/generated.txt"
+    git -C "$wt_path" add generated.txt
+    git -C "$wt_path" commit --no-verify -m "regen$(printf '\n\nDispatch-Target-Id: 1\nDispatch-Source-Keep: true')" -q
+    git worktree remove --force "$wt_path"
+    git worktree prune
+
+    git checkout master -q
+    echo "gen-from-master" > generated.txt; git add generated.txt
+    git -c core.hooksPath= commit -m "master regen" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" sync 2>&1) || true
+
+    assert_contains "$output" "Source-Keep auto-resolved" "sync auto-resolves via Source-Keep"
+
+    local target_content
+    target_content=$(git show "source/feature-task-1:generated.txt" 2>/dev/null || echo MISSING)
+    assert_eq "gen-v1" "$target_content" "target retains its own generated version"
+
+    teardown
+}
+
 test_sync_does_not_create_new_targets() {
     echo "=== test: sync does not create new targets ==="
     setup
@@ -4360,6 +4530,10 @@ test_sync_target_merge_dry_run
 test_sync_skips_up_to_date_targets
 test_sync_merges_targets_when_source_up_to_date
 test_sync_conflict_on_target_merge
+test_sync_continue_add_hint_in_message
+test_sync_continue_auto_commits_staged_resolution
+test_sync_continue_cascades_remaining_targets
+test_sync_source_keep_auto_resolves
 test_sync_does_not_create_new_targets
 test_apply_reset_does_not_cascade
 test_apply_reset_all
