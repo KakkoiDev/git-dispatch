@@ -60,6 +60,7 @@ git dispatch push all
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
 | `git dispatch retarget --target <id> --to-target <id> [--dry-run] [--apply]` | Move all commits from one target to another |
 | `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
+| `git dispatch lint` | Flag `all`-tagged commits whose files only belong to one target |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin (--force uses force-with-lease) |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
 | `git dispatch alias [<N> <branch-name>\|clear <N>]` | List/set/clear per-target branch aliases |
@@ -85,6 +86,34 @@ git dispatch commit "Regen swagger" --target 3 --source-keep
 | `--source-keep` | Auto-resolve conflicts with incoming version. For generated files. |
 
 On checkout branches, `--target` is optional - auto-detected from branch name.
+
+### When to use `--target all`
+
+Use for genuinely shared changes: CI config, root package manifests, generated clients everyone consumes. **Do not** use for formatting or lint fixes scoped to one target's files - those must carry that target's numeric id.
+
+Why it bites: after any target in the stack is squash-merged into base, an `all`-tagged commit that semantically belonged to that target starts conflicting during `apply` on the remaining targets. The commit's patch no longer matches the post-merge base content, forcing `apply reset` plus a force-push. Recovery: `git dispatch retarget --commit <hash> --to-target <N>` rewrites the trailer on source. See `SKILL.md` for the full runbook.
+
+## Ownership Config (`.git-dispatch-targets`)
+
+Optional repo-root file mapping paths to targets. Powers `git dispatch lint`:
+
+```
+# .git-dispatch-targets
+1: apps/server/**
+2: apps/web/**
+shared: docs/**
+shared: .github/**
+```
+
+Format: `<tid-or-"shared">: <glob>` per line, `#` for comments. Globs support `**` (span directories), `*`, and `?`. Multiple globs per target allowed.
+
+```bash
+git dispatch lint
+# a7529a53a0 [all] touches only target-1 paths
+#   suggested: git dispatch retarget --commit a7529a53a0 --to-target 1
+```
+
+Exit 1 if any commits are flagged, 0 when clean. Missing file prints a hint and exits 0.
 
 ## Workflow: Develop and Create PRs
 

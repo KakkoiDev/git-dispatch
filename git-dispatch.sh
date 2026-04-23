@@ -799,6 +799,82 @@ _find_stale_commits() {
     done <<< "$pid_output"
 }
 
+# Path to the ownership config at repo root.
+_dispatch_targets_file_path() {
+    local top
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+    echo "$top/.git-dispatch-targets"
+}
+
+# Load ownership pairings. Emits "key<TAB>glob" per line on stdout.
+# Returns 1 if file missing.
+_load_ownership_globs() {
+    local path
+    path=$(_dispatch_targets_file_path) || return 1
+    [[ -f "$path" ]] || return 1
+    local line key glob
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        key="${line%%:*}"
+        glob="${line#*:}"
+        key="${key%"${key##*[![:space:]]}"}"
+        glob="${glob#"${glob%%[![:space:]]*}"}"
+        [[ -n "$key" && -n "$glob" && "$key" != "$line" ]] || continue
+        printf '%s\t%s\n' "$key" "$glob"
+    done < "$path"
+}
+
+# Bash-3-compatible glob matcher. Handles ** (span-directories), * (single segment),
+# and ? (single char), without depending on shopt globstar.
+_glob_match() {
+    local path="$1" pat="$2"
+    [[ "$path" == "$pat" ]] && return 0
+    local re="" ch next i=0
+    while (( i < ${#pat} )); do
+        ch="${pat:i:1}"
+        next="${pat:i+1:1}"
+        case "$ch" in
+            '*')
+                if [[ "$next" == '*' ]]; then
+                    re+=".*"
+                    (( i += 2 ))
+                    continue
+                fi
+                re+='[^/]*'
+                ;;
+            '?')
+                re+='[^/]'
+                ;;
+            '.'|'+'|'('|')'|'['|']'|'{'|'}'|'|'|'^'|'$'|'\\')
+                re+='\'"$ch"
+                ;;
+            *)
+                re+="$ch"
+                ;;
+        esac
+        (( i++ ))
+    done
+    [[ "$path" =~ ^${re}$ ]]
+}
+
+# Match a file path against ownership globs. Echoes the key (tid or "shared")
+# of the first matching glob. Empty output means unmatched.
+_match_file_owner() {
+    local path="$1" globs="$2"
+    local key glob
+    while IFS=$'\t' read -r key glob; do
+        [[ -n "$glob" ]] || continue
+        if _glob_match "$path" "$glob"; then
+            echo "$key"
+            return 0
+        fi
+    done <<< "$globs"
+    return 0
+}
+
 # Best-effort PR detection. Outputs "branch pr_number" lines. Returns 1 if gh unavailable.
 _get_open_prs() {
     local source="$1"
@@ -1805,12 +1881,22 @@ cmd_apply() {
         if $dry_run; then
             if git rev-parse --verify "refs/heads/$branch_name" &>/dev/null; then
                 # Check for new commits (subject-line matching with patch-id fallback)
-                local new_count=0
+                local -a _new_all=() _new_specific=()
                 while IFS= read -r _nh; do
-                    [[ -n "$_nh" ]] && new_count=$((new_count + 1))
+                    [[ -n "$_nh" ]] || continue
+                    local _nt
+                    _nt=$(_extract_dispatch_tid "$_nh")
+                    if [[ "$_nt" == "all" ]]; then
+                        _new_all+=("$_nh")
+                    else
+                        _new_specific+=("$_nh")
+                    fi
                 done < <(_find_new_commits_for_target "$base" "$branch_name" "${hashes[@]}")
-                if [[ $new_count -gt 0 ]]; then
-                    echo -e "  ${YELLOW}cherry-pick${NC} $new_count commit(s) to target $tid  $branch_name"
+                local _new_total=$(( ${#_new_all[@]} + ${#_new_specific[@]} ))
+                if [[ $_new_total -gt 0 ]]; then
+                    echo -e "  ${YELLOW}cherry-pick${NC} $_new_total commit(s) to target $tid  $branch_name"
+                    [[ ${#_new_specific[@]} -gt 0 ]] && echo -e "    ${GREEN}${#_new_specific[@]} tagged target $tid${NC}"
+                    [[ ${#_new_all[@]} -gt 0 ]] && echo -e "    ${CYAN}${#_new_all[@]} tagged 'all'${NC}"
                 else
                     echo -e "  ${GREEN}skip${NC} target $tid  $branch_name  in sync"
                 fi
@@ -2146,6 +2232,7 @@ cmd_status() {
         # Check if target content is already merged into base
         if _is_content_merged "$branch_name" "$base"; then
             printf "  ${GREEN}%-${max_tid}s${NC}  %-${max_branch}s  ${GREEN}merged${NC}${alias_tag}${pr_suffix}\n" "$tid" "$branch_name"
+            has_merged_target=true
             continue
         fi
 
@@ -2320,6 +2407,16 @@ cmd_status() {
     if [[ "${has_stale:-}" == "true" ]]; then
         echo ""
         warn "Run: git dispatch apply --force  to rebuild stale targets."
+    fi
+
+    if [[ "${has_merged_target:-}" == "true" ]]; then
+        local _all_count
+        _all_count=$(awk '$2 == "all"' "$status_commit_file" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$_all_count" -gt 0 ]]; then
+            echo ""
+            warn "$_all_count source commit(s) tagged 'all' may now live on base."
+            warn "  Run 'git dispatch lint' to check for mis-tagged commits."
+        fi
     fi
 
 }
@@ -3500,6 +3597,73 @@ Dispatch-Target-Id: $to_id"
     fi
 }
 
+# ---------- lint ----------
+
+cmd_lint() {
+    _require_init
+    local base source
+    base=$(_get_config base)
+    source=$(_resolve_config_branch 2>/dev/null || current_branch)
+    [[ -n "$base" ]] || die "Missing base config. Run: git dispatch init"
+    [[ -n "$source" ]] || die "Could not resolve dispatch source branch."
+
+    local globs
+    if ! globs=$(_load_ownership_globs); then
+        local _path
+        _path=$(_dispatch_targets_file_path 2>/dev/null || echo ".git-dispatch-targets")
+        info "No ownership config at $_path"
+        info "Create one to enable ownership lint. See SKILL.md."
+        return 0
+    fi
+
+    local warnings=0
+    while IFS= read -r hash; do
+        [[ -n "$hash" ]] || continue
+        local pc
+        pc=$(git rev-list --parents -n1 "$hash" | wc -w)
+        (( pc > 2 )) && continue
+        local tid
+        tid=$(_extract_dispatch_tid "$hash")
+        [[ "$tid" == "all" ]] || continue
+
+        local sole_owner="" has_shared=false has_unmatched=false empty=true
+        local f owner
+        while IFS= read -r f; do
+            [[ -n "$f" ]] || continue
+            empty=false
+            owner=$(_match_file_owner "$f" "$globs")
+            if [[ -z "$owner" ]]; then
+                has_unmatched=true
+            elif [[ "$owner" == "shared" ]]; then
+                has_shared=true
+            elif [[ -z "$sole_owner" ]]; then
+                sole_owner="$owner"
+            elif [[ "$sole_owner" != "$owner" ]]; then
+                sole_owner="__MULTI__"
+            fi
+        done < <(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
+
+        $empty && continue
+        $has_shared && continue
+        $has_unmatched && continue
+        [[ -n "$sole_owner" && "$sole_owner" != "__MULTI__" ]] || continue
+
+        local short
+        short=$(echo "$hash" | cut -c1-10)
+        warn "$short [all] touches only target-$sole_owner paths"
+        echo "  suggested: git dispatch retarget --commit $short --to-target $sole_owner"
+        warnings=$((warnings + 1))
+    done < <(git log --reverse --format="%H" "$base..$source" 2>/dev/null)
+
+    if [[ $warnings -gt 0 ]]; then
+        echo ""
+        warn "$warnings commit(s) flagged. Re-tag with 'git dispatch retarget' before applying."
+        return 1
+    fi
+    info "Lint clean. No 'all' commits mis-tagged by ownership rules."
+    return 0
+}
+
 # ---------- commit ----------
 
 cmd_commit() {
@@ -3794,6 +3958,8 @@ COMMANDS
                 retarget --target <id> --to-target <id>   All commits from target
                 retarget --commit <hash> --to-target <id> Single commit
                 --apply to run apply automatically after retargeting
+  lint        Check for 'all'-tagged commits whose files only belong to one
+              target. Requires .git-dispatch-targets at repo root. See SKILL.md.
   checkout    Integration testing and navigation:
                 checkout <N>       Create test branch with targets 1..N
                 checkout source    Return to source branch
@@ -3850,6 +4016,20 @@ TRAILERS
   Warns when non-generated files are overwritten. Configure patterns:
     git config branch.<source>.dispatchgeneratedpatterns "*/gen/*,*.gen.*"
 
+OWNERSHIP CONFIG
+  Optional .git-dispatch-targets at repo root maps paths to targets. Used by
+  'git dispatch lint' to flag 'all'-tagged commits that semantically belong to
+  one target (a common footgun that breaks apply after squash-merge).
+
+    # .git-dispatch-targets
+    1: apps/server/**
+    2: apps/web/**
+    shared: docs/**
+    shared: .github/**
+
+  Lines are "<tid-or-shared>: <glob>". Globs support **, *, ?.
+  Lint exits 1 if any 'all' commit is flagged, 0 otherwise.
+
 HELP
 }
 
@@ -3872,6 +4052,7 @@ main() {
         continue)     cmd_continue "$@" ;;
         abort)        cmd_abort "$@" ;;
         retarget)     cmd_retarget "$@" ;;
+        lint)         cmd_lint "$@" ;;
         delete)       cmd_delete "$@" ;;
         reset)        cmd_reset "$@" ;;
         alias)        cmd_alias "$@" ;;

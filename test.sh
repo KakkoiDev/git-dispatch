@@ -5575,6 +5575,202 @@ test_alias_validates_tid
 test_alias_clear_without_existing_fails
 test_alias_incremental_apply_works
 
+# ---------- lint / ownership config tests ----------
+
+test_lint_no_config_exits_zero() {
+    echo "=== test: lint with no config exits 0 ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" lint 2>&1) || exit_code=$?
+
+    assert_eq "0" "$exit_code" "lint exits 0 without config"
+    assert_contains "$output" "No ownership config" "reports missing config"
+
+    teardown
+}
+
+test_lint_flags_single_owner_all_commit() {
+    echo "=== test: lint flags 'all' commit owned by single target ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    printf '1: apps/server/**\n2: apps/web/**\nshared: docs/**\n' > .git-dispatch-targets
+    git add .git-dispatch-targets
+    git commit -m "ownership$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    mkdir -p apps/server apps/web
+    echo "a" > apps/server/a.ts; git add apps/server/a.ts
+    git commit -m "BE add$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    echo "b" > apps/server/b.ts; git add apps/server/b.ts
+    git commit -m "BE misrouted$(printf '\n\nDispatch-Target-Id: all')" -q
+    local bad_hash
+    bad_hash=$(git rev-parse HEAD)
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" lint 2>&1) || exit_code=$?
+
+    assert_eq "1" "$exit_code" "lint exits 1 when flagged"
+    assert_contains "$output" "[all] touches only target-1 paths" "flags single owner"
+    assert_contains "$output" "suggested: git dispatch retarget --commit" "suggests retarget"
+    assert_contains "$output" "$(echo "$bad_hash" | cut -c1-10)" "includes commit hash"
+
+    teardown
+}
+
+test_lint_passes_when_shared_glob_matches() {
+    echo "=== test: lint passes when 'all' commit touches a shared path ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    printf '1: apps/server/**\nshared: docs/**\n' > .git-dispatch-targets
+    git add .git-dispatch-targets
+    git commit -m "ownership$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    mkdir -p apps/server docs
+    echo "a" > apps/server/a.ts
+    echo "d" > docs/readme.md
+    git add apps/server/a.ts docs/readme.md
+    git commit -m "shared+BE$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" lint 2>&1) || exit_code=$?
+
+    assert_eq "0" "$exit_code" "lint exits 0 when shared matches"
+    assert_contains "$output" "Lint clean" "reports clean"
+
+    teardown
+}
+
+test_lint_passes_when_multi_owner() {
+    echo "=== test: lint passes when 'all' commit spans multiple targets ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    printf '1: apps/server/**\n2: apps/web/**\n' > .git-dispatch-targets
+    git add .git-dispatch-targets
+    git commit -m "ownership$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    mkdir -p apps/server apps/web
+    echo "a" > apps/server/a.ts
+    echo "b" > apps/web/b.tsx
+    git add apps/server/a.ts apps/web/b.tsx
+    git commit -m "BE+FE$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" lint 2>&1) || exit_code=$?
+
+    assert_eq "0" "$exit_code" "lint exits 0 for multi-owner"
+    assert_contains "$output" "Lint clean" "reports clean"
+
+    teardown
+}
+
+test_lint_passes_when_unmatched_files() {
+    echo "=== test: lint passes when 'all' commit touches unmatched file ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    printf '1: apps/server/**\n' > .git-dispatch-targets
+    git add .git-dispatch-targets
+    git commit -m "ownership$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    mkdir -p apps/server
+    echo "a" > apps/server/a.ts
+    echo "x" > random.txt
+    git add apps/server/a.ts random.txt
+    git commit -m "BE+unmatched$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    local output exit_code=0
+    output=$(bash "$DISPATCH" lint 2>&1) || exit_code=$?
+
+    assert_eq "0" "$exit_code" "lint exits 0 when unmatched file present"
+    assert_contains "$output" "Lint clean" "reports clean"
+
+    teardown
+}
+
+test_apply_dry_run_highlights_all_breakdown() {
+    echo "=== test: apply --dry-run shows 'all' commit breakdown ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "target-1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    echo "s" > shared.txt; git add shared.txt
+    git commit -m "shared$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Add a new commit of each type so dry-run has something to report
+    echo "a2" > a2.txt; git add a2.txt
+    git commit -m "target-1 again$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    echo "s2" > shared2.txt; git add shared2.txt
+    git commit -m "shared again$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    local output
+    output=$(bash "$DISPATCH" apply --dry-run 2>&1)
+
+    assert_contains "$output" "tagged target 1" "breakdown shows target-1 count"
+    assert_contains "$output" "tagged 'all'" "breakdown shows all count"
+
+    teardown
+}
+
+test_status_warns_after_merge_with_all_commits() {
+    echo "=== test: status hints about 'all' commits after merge ==="
+    setup
+
+    git checkout -b source -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    echo "a" > a.txt; git add a.txt
+    git commit -m "target-1$(printf '\n\nDispatch-Target-Id: 1')" -q
+
+    echo "s" > shared.txt; git add shared.txt
+    git commit -m "shared$(printf '\n\nDispatch-Target-Id: all')" -q
+
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Simulate squash-merge of target-1 into master
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "squash target 1" -q
+    git checkout source -q
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1)
+
+    assert_contains "$output" "may now live on base" "status warns about 'all' after merge"
+    assert_contains "$output" "git dispatch lint" "points at lint command"
+
+    teardown
+}
+
+test_lint_no_config_exits_zero
+test_lint_flags_single_owner_all_commit
+test_lint_passes_when_shared_glob_matches
+test_lint_passes_when_multi_owner
+test_lint_passes_when_unmatched_files
+test_apply_dry_run_highlights_all_breakdown
+test_status_warns_after_merge_with_all_commits
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

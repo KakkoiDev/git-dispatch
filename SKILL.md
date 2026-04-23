@@ -26,6 +26,7 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 | `git dispatch checkin [<N>] [--dry-run] [--resolve\|--continue]` | Cherry-pick checkout commits back to source |
 | `git dispatch retarget --target <id> --to-target <id> [--dry-run] [--apply]` | Move all commits from one target to another |
 | `git dispatch retarget --commit <hash> --to-target <id> [--dry-run] [--apply]` | Move a single commit to another target |
+| `git dispatch lint` | Flag `all`-tagged commits whose files only belong to one target (requires `.git-dispatch-targets`) |
 | `git dispatch push <all\|source\|N> [--dry-run] [--force]` | Push branches to origin |
 | `git dispatch delete <N\|all\|--prune> [--dry-run] [--yes]` | Delete target branches |
 | `git dispatch alias [<N> <branch-name>\|clear <N>]` | List/set/clear per-target branch aliases |
@@ -47,6 +48,51 @@ git dispatch commit "Regen swagger" --target 3 --source-keep
 - `all`: commit included in every target during apply.
 - `--source-keep`: auto-resolve conflicts with incoming version (--theirs). Used for generated files. Works during both apply (source->target) and checkin (checkout->source).
 - On checkout branches, `--target` is auto-detected from branch name.
+
+### When to use `Dispatch-Target-Id: all`
+
+USE for:
+- Shared config changes (`.github/`, root `package.json`, `CLAUDE.md`)
+- Utilities genuinely consumed by every target's code
+- Generated files (OpenAPI clients, protobuf) that every target rebuilds against
+
+DO NOT USE for:
+- Formatting/lint fixes to one target's files (tag the target explicitly)
+- Test-file changes for tests that only exist in one target
+- "It felt easier" - if unsure, tag the specific target
+
+**Why it matters.** Once any target in the stack is squash-merged into base, `all`-tagged
+commits that semantically belonged to that target start conflicting when `apply` re-cherry-picks
+them onto the remaining targets. Remaining targets have the post-merge base content, which no
+longer diff-matches the original commit. Result: forced `apply reset <N>` (history rewrite + force-push).
+
+**Recovery.** `git dispatch retarget --commit <hash> --to-target <N>` rewrites the trailer.
+Safe while the target PR is still open. For an already-pushed target, requires `--force` push.
+
+### Ownership config (`.git-dispatch-targets`)
+
+Optional file at repo root. Maps paths to targets; powers `git dispatch lint` and informs the
+`git dispatch status` post-merge hint.
+
+```
+# .git-dispatch-targets
+1: apps/server/**
+1: packages/api/**
+2: apps/web/**
+shared: docs/**
+shared: .github/**
+shared: package.json
+```
+
+- One `<tid-or-"shared">: <glob>` pairing per line.
+- `#` starts a comment.
+- Globs support `**` (span directories), `*` (single segment), `?` (single char).
+- Multiple globs per target allowed (repeat the `tid:` prefix).
+- Missing file: `lint` reports "No ownership config" and exits 0.
+
+`git dispatch lint` walks every `all`-tagged source commit and flags those whose
+changed files all belong to a single target (and touch nothing shared or unmatched).
+It suggests the exact `git dispatch retarget` command to fix each.
 
 ## Workflows
 
