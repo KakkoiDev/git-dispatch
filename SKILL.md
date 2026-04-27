@@ -172,6 +172,25 @@ git dispatch apply --base        # merges base into source AND existing targets
 git dispatch push all
 ```
 
+### Post-merge: continue work after a target merges
+
+When `git dispatch status` reports a target as `merged`, run this before editing other targets:
+```bash
+git dispatch status                                       # confirm merged target + any 'all' warning
+git dispatch sync                                         # pull base into source + remaining targets
+git dispatch lint                                         # flag 'all'-tagged commits whose content now lives on base
+git dispatch retarget --commit <hash> --to-target <N>     # fix each flagged commit, then re-apply
+git dispatch checkout <N>                                 # integration branch for the target you'll edit
+# make edits, run tests
+git dispatch commit "fix: ..."                            # auto-detects target N
+git dispatch checkin                                      # picks fixes back to source
+git dispatch checkout source
+git dispatch apply <N>                                    # incremental, fast-forward-friendly
+git dispatch checkout clear
+git dispatch push <N>
+```
+Use `apply <N>`, not `apply reset <N>` - reset rewrites history and forces `push --force`.
+
 ### Abort a stuck operation
 ```bash
 git dispatch abort               # cleans up conflicts, worktrees, returns to source
@@ -186,6 +205,8 @@ git dispatch abort               # cleans up conflicts, worktrees, returns to so
 | Regenerate one target from scratch | `git dispatch apply reset <N>` |
 | Regenerate all targets from scratch | `git dispatch apply reset all` |
 | Merge base into source and targets | `git dispatch apply --base` |
+
+**Default to `apply <N>`** (incremental, fast-forward push). Reach for `apply reset <N>` only when `apply <N>` itself conflicts and neither `retarget` nor `--source-keep` resolves it - reset rewrites history and forces `push --force`. Never preemptively reset.
 
 ## Config
 
@@ -264,7 +285,7 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | DIVERGED (real) | `checkout`, reconcile, `checkin`, `apply` |
 | Source behind base | `git dispatch sync` |
 | Move commit to different target | `git dispatch retarget --target <from> --to-target <to>` then `apply` |
-| Stale target after tid reassignment (rebase) | `git dispatch apply --force` |
+| Stale target after tid reassignment (rebase) | `git dispatch apply --force` (rebuilds stale target from scratch) |
 | Generated file conflict | `dispatch commit --source-keep` |
 | Target CI fails (missing swagger) | `checkout <N>`, regen, `checkin`, `apply` |
 | Insert task between existing | Use decimal: `Dispatch-Target-Id=1.5` |
