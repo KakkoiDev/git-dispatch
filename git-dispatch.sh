@@ -1589,7 +1589,7 @@ cmd_apply() {
     _acquire_lock
     _audit_log_truncate
 
-    local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false
+    local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false strict=false
     local -a positional=()
 
     while [[ $# -gt 0 ]]; do
@@ -1600,6 +1600,7 @@ cmd_apply() {
             --all)      include_merged=true; shift ;;
             --no-sync)  no_sync=true; shift ;;
             --no-replay) no_replay=true; shift ;;
+            --strict)   strict=true; shift ;;
             --base)     die "--base removed. Use: git dispatch sync" ;;
             --yes)      DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
@@ -1624,6 +1625,19 @@ cmd_apply() {
     base=$(_get_config base)
     source=$(resolve_source "")
     [[ -n "$source" ]] || die "Not on a branch and no dispatch source configured"
+
+    # Auto-resolve mode for `Dispatch-Target-Id: all` cherry-pick conflicts after a target merges.
+    local autoresolve_mode
+    if $strict; then
+        autoresolve_mode="off"
+    else
+        autoresolve_mode=$(_get_config autoresolveall)
+        [[ -z "$autoresolve_mode" ]] && autoresolve_mode="skip"
+    fi
+    case "$autoresolve_mode" in
+        skip|prompt|off) ;;
+        *) die "Invalid dispatchautoresolveall value: '$autoresolve_mode' (expected: skip, prompt, off)" ;;
+    esac
 
     # Ensure base ref is up-to-date before creating/updating targets (best-effort)
     _spinner_start "Refreshing base..."
@@ -2082,7 +2096,7 @@ cmd_apply() {
                     warn "  Source may have been rebased externally. Cherry-picking may conflict or duplicate."
                     warn "  If push fails (non-fast-forward), use: git dispatch push $tid --force"
                 fi
-                _cherry_pick_commits "$resolve" "$branch_name" "${new_hashes[@]}"
+                _cherry_pick_commits "$resolve" "$branch_name" --autoresolve-mode "$autoresolve_mode" --target "$tid" "${new_hashes[@]}"
                 info "  Updated $branch_name ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
                 updated=$((updated + 1))
             else
@@ -2097,7 +2111,7 @@ cmd_apply() {
             git config "branch.${branch_name}.dispatchsource" "$source"
 
             local cherry_pick_failed=false
-            if ! _cherry_pick_commits "$resolve" "$branch_name" --theirs-fallback "${hashes[@]}"; then
+            if ! _cherry_pick_commits "$resolve" "$branch_name" --theirs-fallback --autoresolve-mode "$autoresolve_mode" --target "$tid" "${hashes[@]}"; then
                 cherry_pick_failed=true
             fi
 
@@ -2115,7 +2129,7 @@ cmd_apply() {
                 done < "$replay_file"
                 if [[ ${#_replay_hashes[@]} -gt 0 ]]; then
                     info "  Replaying ${#_replay_hashes[@]} target-only commit(s)..."
-                    if ! _cherry_pick_commits "$resolve" "$branch_name" "${_replay_hashes[@]}"; then
+                    if ! _cherry_pick_commits "$resolve" "$branch_name" --autoresolve-mode "$autoresolve_mode" --target "$tid" "${_replay_hashes[@]}"; then
                         warn "  Some target-only commits could not be replayed"
                     fi
                 fi
