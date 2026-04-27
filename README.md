@@ -264,6 +264,7 @@ git dispatch alias clear 17                        # remove alias
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
 | `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
+| `--strict` | Disable auto-resolve of `all`-trailer conflicts for one apply (overrides config) |
 
 ## Conflict Handling
 
@@ -274,6 +275,7 @@ All commands show conflicted files and diff on failure.
 - **`git dispatch abort`**: cancel operation, clean up, return to source
 - **`Dispatch-Source-Keep`**: auto-resolves with `--strategy-option theirs`
 - **`git dispatch continue`**: checks for pending resolutions
+- **Auto-resolve `all`-trailer**: after a target merges, `apply` on remaining targets re-cherry-picks any `Dispatch-Target-Id: all` commit; if its content already lives on base, the resolution with `--ours` per conflicted file produces an empty diff and the commit is auto-skipped (or auto-committed if non-empty). Configurable per source via `branch.<source>.dispatchautoresolveall` (`skip` default / `prompt` / `off`); per-invocation override with `--strict`. Every auto-action is logged to `.git/dispatch-audit.log` (last 500 entries; trim runs on `apply` start) and surfaced as a footer in `git dispatch status`.
 
 ## Merged Target Detection
 
@@ -373,6 +375,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `branch.<source>.dispatchtargetpattern` | Target branch pattern (must include `{id}`) |
 | `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
+| `branch.<source>.dispatchautoresolveall` | Auto-resolve mode for `all`-trailer cherry-pick conflicts: `skip` (default), `prompt`, `off` |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
 When multiple worktrees are detected, `extensions.worktreeConfig` is enabled automatically.

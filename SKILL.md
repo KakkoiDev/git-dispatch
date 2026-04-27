@@ -218,6 +218,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `branch.<source>.dispatchtargetpattern` | Target branch pattern (must include `{id}`) |
 | `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
+| `branch.<source>.dispatchautoresolveall` | Auto-resolve mode for `all`-trailer cherry-pick conflicts: `skip` (default), `prompt`, `off` |
 | `branch.<target>.dispatchsource` | Source branch reference |
 
 ## Flags
@@ -229,6 +230,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
 | `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
+| `--strict` | apply: disable auto-resolve of `all`-trailer conflicts for one invocation |
 
 ## Conflict Handling
 
@@ -238,6 +240,7 @@ All propagation commands support `--resolve` (or `--continue`) to leave conflict
 - **`--resolve`/`--continue`**: leaves conflict active in worktree, shows remaining work
 - **`git dispatch abort`**: cancel operation, clean up, return to source
 - **Dispatch-Source-Keep**: auto-resolves keeping the source-originated version (apply/checkin: `--strategy-option theirs`; sync: file-scoped `--ours` on target)
+- **Auto-resolve `all`-trailer post-merge**: on `apply`, a `Dispatch-Target-Id: all` cherry-pick that conflicts only on its own files is resolved with `--ours` per file; empty result auto-skips the commit, non-empty result auto-commits. Per-source config: `branch.<source>.dispatchautoresolveall` (`skip` default / `prompt` / `off`). Per-invocation override: `--strict`. Audit: `.git/dispatch-audit.log` (last 500 entries; status footer summarises).
 
 ### Sync conflict flow
 

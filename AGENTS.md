@@ -183,6 +183,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
 | `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
+| `--strict` | Disable auto-resolve of `all`-trailer conflicts for one apply (overrides config) |
 
 ## Conflict Handling
 
@@ -193,6 +194,7 @@ All propagation commands support `--resolve`/`--continue` to leave conflicts act
 - **`git dispatch abort`**: cancel operation, clean up worktrees, return to source
 - **Dispatch-Source-Keep**: auto-resolves with `--strategy-option theirs`
 - **Continue**: `git dispatch continue` checks for pending resolutions
+- **Auto-resolve `all`-trailer post-merge**: when a `Dispatch-Target-Id: all` cherry-pick conflicts and `--ours` per conflicted file produces an empty diff vs target HEAD, the commit is auto-skipped; if non-empty it is auto-committed. Mode per source via `branch.<source>.dispatchautoresolveall` (`skip` default / `prompt` / `off`). Override with `--strict`. Audit log: `.git/dispatch-audit.log`.
 
 ### Resolve workflow
 1. Run command with `--resolve` (or `--continue`)
