@@ -5763,6 +5763,204 @@ test_status_warns_after_merge_with_all_commits() {
     teardown
 }
 
+# Helper: build a 3-commit source (X=all, Y=tid1, Z=tid2) and squash-merge target-1.
+_autoresolve_setup_squashed() {
+    git checkout -b source/feature master -q
+    echo "v1" > shared.txt; git add shared.txt
+    git commit -m "X add shared (all)$(printf '\n\nDispatch-Target-Id: all')" -q
+    echo "v2" > shared.txt; git add shared.txt
+    git commit -m "Y BE update shared$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "fe1" > fe.txt; git add fe.txt
+    git commit -m "Z FE add fe$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "squash target 1" -q
+    git checkout source/feature -q
+}
+
+test_autoresolve_skips_all_when_already_on_base() {
+    echo "=== test: auto-resolve skips all-trailer commit when content already on base ==="
+    setup
+    _autoresolve_setup_squashed
+
+    local output
+    output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "Auto-skipped (all-trailer)" "auto-skipped reported"
+
+    local actual
+    actual=$(git show target-2:shared.txt 2>/dev/null)
+    assert_eq "v2" "$actual" "target-2 shared.txt = v2 (X auto-skipped, kept master version)"
+
+    actual=$(git show target-2:fe.txt 2>/dev/null)
+    assert_eq "fe1" "$actual" "target-2 has fe.txt from Z"
+
+    local audit_log=".git/dispatch-audit.log"
+    if [[ -f "$audit_log" ]]; then
+        local skips
+        skips=$(grep -c "auto-skipped" "$audit_log" 2>/dev/null || echo 0)
+        skips="${skips//[^0-9]/}"
+        if [[ "${skips:-0}" -ge 1 ]]; then
+            echo -e "  ${GREEN}PASS${NC} audit log has auto-skipped entry"
+            PASS=$((PASS+1))
+        else
+            echo -e "  ${RED}FAIL${NC} audit log has no auto-skipped entry"
+            FAIL=$((FAIL+1))
+        fi
+    else
+        echo -e "  ${RED}FAIL${NC} audit log not created"
+        FAIL=$((FAIL+1))
+    fi
+
+    teardown
+}
+
+test_autoresolve_strict_flag_disables() {
+    echo "=== test: --strict disables auto-resolve ==="
+    setup
+    _autoresolve_setup_squashed
+
+    # With --strict, --theirs-fallback kicks in for fresh-target creation, applying X with theirs (=v1)
+    local output
+    output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync --strict 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_not_contains "$output" "Auto-skipped (all-trailer)" "no auto-skip when --strict"
+
+    # With --theirs-fallback applying X, target-2 ends up with X's v1 (NOT master's v2)
+    local actual
+    actual=$(git show target-2:shared.txt 2>/dev/null)
+    assert_eq "v1" "$actual" "target-2 shared.txt = v1 (X applied via --theirs-fallback)"
+
+    teardown
+}
+
+test_autoresolve_off_mode_disables() {
+    echo "=== test: dispatchautoresolveall=off disables auto-resolve ==="
+    setup
+    _autoresolve_setup_squashed
+
+    git config "branch.source/feature.dispatchautoresolveall" "off"
+
+    local output
+    output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_not_contains "$output" "Auto-skipped (all-trailer)" "no auto-skip when config off"
+
+    teardown
+}
+
+test_autoresolve_invalid_config_dies() {
+    echo "=== test: invalid dispatchautoresolveall config errors out ==="
+    setup
+    git checkout -b source/feature master -q
+    echo "a" > a.txt; git add a.txt
+    git commit -m "tid1$(printf '\n\nDispatch-Target-Id: 1')" -q
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+
+    git config "branch.source/feature.dispatchautoresolveall" "garbage"
+
+    local output exit_code
+    output=$(bash "$DISPATCH" apply 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || exit_code=$?
+    assert_contains "$output" "Invalid dispatchautoresolveall value" "rejects invalid mode"
+
+    teardown
+}
+
+test_autoresolve_status_footer_shows_summary() {
+    echo "=== test: status footer summarises auto-resolve activity ==="
+    setup
+    _autoresolve_setup_squashed
+    bash "$DISPATCH" apply reset 2 --yes --no-sync >/dev/null 2>&1 || true
+
+    local output
+    output=$(bash "$DISPATCH" status 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+
+    assert_contains "$output" "Auto-resolved entries" "status footer shows audit summary"
+    assert_contains "$output" "dispatch-audit.log" "status footer points at log"
+
+    teardown
+}
+
+test_autoresolve_source_keep_wins_over_all_trailer() {
+    echo "=== test: Source-Keep takes precedence over auto-resolve for all-trailer commits ==="
+    setup
+    git checkout -b source/feature master -q
+
+    # X: all-trailer + Source-Keep (forces --theirs strategy when conflict)
+    echo "v1" > shared.txt; git add shared.txt
+    git commit -m "X all + source-keep$(printf '\n\nDispatch-Target-Id: all\nDispatch-Source-Keep: true')" -q
+    echo "v2" > shared.txt; git add shared.txt
+    git commit -m "Y BE update$(printf '\n\nDispatch-Target-Id: 1')" -q
+    echo "fe1" > fe.txt; git add fe.txt
+    git commit -m "Z FE add$(printf '\n\nDispatch-Target-Id: 2')" -q
+
+    bash "$DISPATCH" init --base master --target-pattern "target-{id}" >/dev/null 2>&1
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    git checkout master -q
+    git merge --squash target-1 -q 2>/dev/null
+    git commit --no-verify -m "squash" -q
+    git checkout source/feature -q
+
+    local output
+    output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "Force-accepted (Source-Keep)" "Source-Keep path runs"
+    assert_not_contains "$output" "Auto-skipped (all-trailer)" "auto-resolve does not fire when Source-Keep set"
+
+    # Source-Keep uses --theirs, so X overwrites target's v2 with v1
+    local actual
+    actual=$(git show target-2:shared.txt 2>/dev/null)
+    assert_eq "v1" "$actual" "Source-Keep applied X's content (v1)"
+
+    teardown
+}
+
+test_autoresolve_dry_run_does_not_modify() {
+    echo "=== test: --dry-run does not write audit log ==="
+    setup
+    _autoresolve_setup_squashed
+
+    bash "$DISPATCH" apply reset 2 --dry-run 2>&1 >/dev/null
+
+    local audit_log=".git/dispatch-audit.log"
+    if [[ -f "$audit_log" ]]; then
+        local entries
+        entries=$(wc -l < "$audit_log" 2>/dev/null | tr -d ' ')
+        assert_eq "0" "${entries:-0}" "audit log not written for --dry-run"
+    else
+        echo -e "  ${GREEN}PASS${NC} audit log not created for --dry-run"
+        PASS=$((PASS+1))
+    fi
+
+    teardown
+}
+
+test_autoresolve_audit_log_truncates_to_500() {
+    echo "=== test: audit log truncates to last 500 lines on apply start ==="
+    setup
+    _autoresolve_setup_squashed
+
+    # Write 510 fake entries to the audit log
+    local log=".git/dispatch-audit.log"
+    for i in $(seq 1 510); do
+        echo "2026-01-01T00:00:00Z  auto-skipped  fakehash$i  target=1  reason=fake  files=fake.txt"
+    done > "$log"
+
+    # Run apply (which calls _audit_log_truncate at start)
+    bash "$DISPATCH" apply --dry-run >/dev/null 2>&1 || true
+
+    local lines
+    lines=$(wc -l < "$log" 2>/dev/null | tr -d ' ')
+    assert_eq "500" "${lines:-0}" "audit log truncated to 500"
+
+    teardown
+}
+
 test_lint_no_config_exits_zero
 test_lint_flags_single_owner_all_commit
 test_lint_passes_when_shared_glob_matches
@@ -5770,6 +5968,14 @@ test_lint_passes_when_multi_owner
 test_lint_passes_when_unmatched_files
 test_apply_dry_run_highlights_all_breakdown
 test_status_warns_after_merge_with_all_commits
+test_autoresolve_skips_all_when_already_on_base
+test_autoresolve_strict_flag_disables
+test_autoresolve_off_mode_disables
+test_autoresolve_invalid_config_dies
+test_autoresolve_status_footer_shows_summary
+test_autoresolve_source_keep_wins_over_all_trailer
+test_autoresolve_dry_run_does_not_modify
+test_autoresolve_audit_log_truncates_to_500
 
 echo ""
 echo "======================="
