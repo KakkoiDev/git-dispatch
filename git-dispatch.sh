@@ -1038,17 +1038,69 @@ _warn_source_keep_non_generated() {
     return 0
 }
 
+# Auto-resolve cherry-pick conflict for `Dispatch-Target-Id: all` commits whose
+# content already lives on target (e.g. delivered via squash-merge of another target).
+# Stages --ours per conflicted file and reports outcome.
+# Returns 0 with stdout "skip" (commit empty after --ours) or "continue" (non-empty).
+# Returns 1 silently when not eligible: mode off, non-all trailer, or conflicts spread
+# beyond the commit's own files. Sets _AUTO_RESOLVE_FILES (CSV) on success.
+_AUTO_RESOLVE_FILES=""
+_auto_resolve_all_check() {
+    local wt="$1" hash="$2" mode="$3"
+    _AUTO_RESOLVE_FILES=""
+
+    [[ "$mode" == "skip" || "$mode" == "prompt" ]] || return 1
+
+    local tid
+    tid=$(_extract_dispatch_tid "$hash")
+    [[ "$tid" == "all" ]] || return 1
+
+    local -a conflicted=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && conflicted+=("$f")
+    done < <(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null)
+    [[ ${#conflicted[@]} -gt 0 ]] || return 1
+
+    local commit_files
+    commit_files=$(git diff-tree --no-commit-id --name-only -r "$hash" 2>/dev/null)
+    [[ -n "$commit_files" ]] || return 1
+    local f
+    for f in "${conflicted[@]}"; do
+        printf '%s\n' "$commit_files" | grep -qxF -- "$f" || return 1
+    done
+
+    for f in "${conflicted[@]}"; do
+        git -C "$wt" checkout --ours -- "$f" >/dev/null 2>&1 || return 1
+        git -C "$wt" add -- "$f" >/dev/null 2>&1 || return 1
+    done
+
+    local _IFS_save="$IFS"
+    IFS=','
+    _AUTO_RESOLVE_FILES="${conflicted[*]}"
+    IFS="$_IFS_save"
+
+    if git -C "$wt" diff --cached --quiet 2>/dev/null; then
+        echo "skip"
+    else
+        echo "continue"
+    fi
+    return 0
+}
+
 # Unified cherry-pick into a branch via temp worktree (no main-worktree checkout).
-# Usage: _cherry_pick_commits resolve branch [--add-trailer tid] [--theirs-fallback] hash...
+# Usage: _cherry_pick_commits resolve branch [--add-trailer tid] [--theirs-fallback]
+#        [--autoresolve-mode <off|skip|prompt>] [--target <tid>] hash...
 # Sets DISPATCH_LAST_PICKED / DISPATCH_LAST_SKIPPED globals.
 _cherry_pick_commits() {
     local resolve="$1" branch="$2"; shift 2
-    local add_trailer="" theirs_fallback=false no_x=false
+    local add_trailer="" theirs_fallback=false no_x=false autoresolve_mode="off" target_tid=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --add-trailer) add_trailer="$2"; shift 2 ;;
             --no-x) no_x=true; shift ;;
             --theirs-fallback) theirs_fallback=true; shift ;;
+            --autoresolve-mode) autoresolve_mode="$2"; shift 2 ;;
+            --target) target_tid="$2"; shift 2 ;;
             *) break ;;
         esac
     done
@@ -1091,8 +1143,22 @@ _cherry_pick_commits() {
                         _conflict_leave "$resolve"; return 1
                     fi
                 else
-                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
-                    _conflict_leave "$resolve"; return 1
+                    local _ar_action=""
+                    _ar_action=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
+                    if [[ "$_ar_action" == "skip" ]]; then
+                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
+                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
+                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                        continue
+                    elif [[ "$_ar_action" == "continue" ]]; then
+                        warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                        _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
+                        # Fall through to commit (files staged via --ours)
+                    else
+                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        _conflict_leave "$resolve"; return 1
+                    fi
                 fi
             fi
             # Empty no-commit pick: skip
@@ -1128,8 +1194,22 @@ _cherry_pick_commits() {
                     warn "  Force-accepted (Source-Keep): $(git log -1 --oneline "$hash")"
                     _warn_source_keep_non_generated "$_DISPATCH_WT_PATH" "$hash"
                 else
-                    _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
-                    _conflict_leave "$resolve"; return 1
+                    local _ar_action_nx=""
+                    _ar_action_nx=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
+                    if [[ "$_ar_action_nx" == "skip" ]]; then
+                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
+                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
+                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                        continue
+                    elif [[ "$_ar_action_nx" == "continue" ]]; then
+                        warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                        _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
+                        # Fall through to commit (files staged via --ours)
+                    else
+                        _handle_cherry_pick_conflict "$_DISPATCH_WT_PATH" "$hash" "$_idx" "${#hashes[@]}" "$resolve" "$branch" "${hashes[@]:$((_idx+1))}"
+                        _conflict_leave "$resolve"; return 1
+                    fi
                 fi
             fi
             if "${gcmd[@]}" diff --cached --quiet; then
@@ -1164,6 +1244,24 @@ _cherry_pick_commits() {
                         _warn_source_keep_non_generated "$_DISPATCH_WT_PATH" "$hash"
                         DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
                         continue
+                    fi
+                else
+                    local _ar_action_x=""
+                    _ar_action_x=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
+                    if [[ "$_ar_action_x" == "skip" ]]; then
+                        "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
+                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
+                        DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
+                        continue
+                    elif [[ "$_ar_action_x" == "continue" ]]; then
+                        if GIT_EDITOR=true "${gcmd[@]}" cherry-pick --continue 2>/dev/null; then
+                            warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                            _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
+                            DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
+                            continue
+                        fi
+                        # cherry-pick --continue failed - fall through to fallback
                     fi
                 fi
                 # --theirs-fallback: retry with --theirs for fresh target creation
