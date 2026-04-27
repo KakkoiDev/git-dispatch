@@ -275,6 +275,56 @@ _release_lock() {
     [[ -n "${DISPATCH_LOCKFILE:-}" ]] && rm -f "$DISPATCH_LOCKFILE"
 }
 
+# ---------- audit log ----------
+# Track auto-resolved cherry-pick conflicts in .git/dispatch-audit.log so users
+# can see what was bypassed. Append-only; truncated to last 500 lines on apply start.
+
+_audit_log_path() {
+    local gd
+    gd=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+    [[ -n "$gd" ]] || return 1
+    echo "$gd/dispatch-audit.log"
+}
+
+_log_audit() {
+    local action="$1" sha="$2" target="$3" reason="$4" files="$5"
+    local log
+    log=$(_audit_log_path 2>/dev/null) || return 0
+    [[ -n "$log" ]] || return 0
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    printf '%s  %s  %s  target=%s  reason=%s  files=%s\n' \
+        "$ts" "$action" "$sha" "$target" "$reason" "$files" >> "$log" 2>/dev/null || true
+}
+
+_audit_log_truncate() {
+    local log
+    log=$(_audit_log_path 2>/dev/null) || return 0
+    [[ -f "$log" ]] || return 0
+    local n
+    n=$(wc -l < "$log" 2>/dev/null | tr -d ' ')
+    [[ -n "$n" && "$n" -gt 500 ]] || return 0
+    local tmp
+    tmp=$(mktemp) || return 0
+    tail -500 "$log" > "$tmp" && mv "$tmp" "$log"
+}
+
+_audit_log_summary() {
+    local log
+    log=$(_audit_log_path 2>/dev/null) || return 0
+    [[ -f "$log" ]] || return 0
+    local skips resolves
+    skips=$(grep -c "  auto-skipped  " "$log" 2>/dev/null || echo 0)
+    resolves=$(grep -c "  auto-resolved  " "$log" 2>/dev/null || echo 0)
+    skips="${skips//[^0-9]/}"; skips="${skips:-0}"
+    resolves="${resolves//[^0-9]/}"; resolves="${resolves:-0}"
+    [[ "$skips" -eq 0 && "$resolves" -eq 0 ]] && return 0
+    local sw="skips" rw="resolves"
+    [[ "$skips" -eq 1 ]] && sw="skip"
+    [[ "$resolves" -eq 1 ]] && rw="resolve"
+    echo "$skips $sw, $resolves $rw"
+}
+
 
 # Refresh the base ref to ensure targets branch from up-to-date base.
 # Handles both remote tracking refs (origin/master) and local branches (master).
@@ -1439,6 +1489,7 @@ cmd_sync() {
 cmd_apply() {
     _require_init
     _acquire_lock
+    _audit_log_truncate
 
     local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false
     local -a positional=()
@@ -2417,6 +2468,15 @@ cmd_status() {
             warn "$_all_count source commit(s) tagged 'all' may now live on base."
             warn "  Run 'git dispatch lint' to check for mis-tagged commits."
         fi
+    fi
+
+    local _audit_summary
+    _audit_summary=$(_audit_log_summary)
+    if [[ -n "$_audit_summary" ]]; then
+        local _audit_path
+        _audit_path=$(_audit_log_path 2>/dev/null)
+        echo ""
+        info "Auto-resolved entries: $_audit_summary. See ${_audit_path:-.git/dispatch-audit.log}"
     fi
 
 }
