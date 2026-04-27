@@ -5940,6 +5940,25 @@ test_autoresolve_dry_run_does_not_modify() {
     teardown
 }
 
+test_autoresolve_prompt_mode_yes_auto_resolves() {
+    echo "=== test: prompt mode with --yes auto-resolves (treated as skip) ==="
+    setup
+    _autoresolve_setup_squashed
+
+    git config "branch.source/feature.dispatchautoresolveall" "prompt"
+
+    local output
+    output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
+
+    assert_contains "$output" "Auto-skipped (all-trailer)" "prompt + --yes auto-skipped"
+
+    local actual
+    actual=$(git show target-2:shared.txt 2>/dev/null)
+    assert_eq "v2" "$actual" "target-2 shared.txt = v2 (auto-skipped)"
+
+    teardown
+}
+
 test_autoresolve_audit_log_truncates_to_500() {
     echo "=== test: audit log truncates to last 500 lines on apply start ==="
     setup
@@ -5975,6 +5994,7 @@ test_autoresolve_invalid_config_dies
 test_autoresolve_status_footer_shows_summary
 test_autoresolve_source_keep_wins_over_all_trailer
 test_autoresolve_dry_run_does_not_modify
+test_autoresolve_prompt_mode_yes_auto_resolves
 test_autoresolve_audit_log_truncates_to_500
 
 echo ""

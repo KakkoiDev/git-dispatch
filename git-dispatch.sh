@@ -1043,8 +1043,11 @@ _warn_source_keep_non_generated() {
 # Stages --ours per conflicted file and reports outcome.
 # Returns 0 with stdout "skip" (commit empty after --ours) or "continue" (non-empty).
 # Returns 1 silently when not eligible: mode off, non-all trailer, or conflicts spread
-# beyond the commit's own files. Sets _AUTO_RESOLVE_FILES (CSV) on success.
+# beyond the commit's own files. In prompt mode, asks the user once per apply (cached
+# in _AUTO_RESOLVE_PROMPT_DECIDED) before staging anything.
+# Sets _AUTO_RESOLVE_FILES (CSV) on success.
 _AUTO_RESOLVE_FILES=""
+_AUTO_RESOLVE_PROMPT_DECIDED=""
 _auto_resolve_all_check() {
     local wt="$1" hash="$2" mode="$3"
     _AUTO_RESOLVE_FILES=""
@@ -1068,6 +1071,24 @@ _auto_resolve_all_check() {
     for f in "${conflicted[@]}"; do
         printf '%s\n' "$commit_files" | grep -qxF -- "$f" || return 1
     done
+
+    if [[ "$mode" == "prompt" ]]; then
+        if [[ -z "${_AUTO_RESOLVE_PROMPT_DECIDED:-}" ]]; then
+            warn "" >&2
+            warn "  Detected 'all'-trailer cherry-pick conflict:" >&2
+            warn "    commit: $(git log -1 --oneline "$hash")" >&2
+            warn "    files:  ${conflicted[*]}" >&2
+            warn "  Auto-resolve uses --ours per file, then skips if empty or commits if non-empty." >&2
+            if _confirm "Apply auto-resolve here and for any subsequent 'all'-trailer conflicts in this apply?" >&2; then
+                _AUTO_RESOLVE_PROMPT_DECIDED="yes"
+            else
+                _AUTO_RESOLVE_PROMPT_DECIDED="no"
+                return 1
+            fi
+        elif [[ "$_AUTO_RESOLVE_PROMPT_DECIDED" == "no" ]]; then
+            return 1
+        fi
+    fi
 
     for f in "${conflicted[@]}"; do
         git -C "$wt" checkout --ours -- "$f" >/dev/null 2>&1 || return 1
