@@ -173,6 +173,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `branch.<source>.dispatchtargetalias-<tid>` | Per-target branch name override |
 | `branch.<source>.dispatchcheckoutbranch` | Active checkout branch |
 | `branch.<target>.dispatchsource` | Source branch reference |
+| `branch.<source>.dispatchprecheckbase` | Pre-skip commits whose patches already live on base (default `true`; set `false` to disable) |
 
 ## Flags
 
@@ -183,7 +184,8 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
 | `--all` | Include merged targets in sync/apply (skipped by default) |
 | `--force` | Safety override: `apply` rebuilds stale, `push` force-pushes, `checkout clear` discards |
-| `--strict` | Disable auto-resolve of `all`-trailer conflicts for one apply (overrides config) |
+| `--strict` | Disable auto-resolve of `all`-trailer conflicts AND base pre-skip for one apply (overrides config) |
+| `--verbose` | `apply`: list each commit pre-skipped because its patch is already on base |
 
 ## Conflict Handling
 
@@ -207,6 +209,19 @@ All propagation commands support `--resolve`/`--continue` to leave conflicts act
 2. Aborts cherry-pick/merge in dispatch worktrees
 3. Removes temp worktrees
 4. Returns to source branch
+
+## Auto-skipped commits during apply
+
+`apply` walks source commits in order. Two skip paths suppress noise when a commit's content already lives elsewhere:
+
+- **Pre-skip (patch on base)**: the commit's patch is already in base (typically a squash-merge of another target). Detected via `git cherry $base $source` at the start of apply. Silent by default. `apply --verbose` lists each pre-skipped commit; the final summary always reports the count. No audit-log entry. Disable per source with `git config branch.<source>.dispatchprecheckbase false` or for one run with `--strict`.
+- **Auto-skip (empty after --ours)**: an `all`-trailer commit conflicts during cherry-pick, but staging `--ours` per conflicted file leaves the index clean. Reported as `Auto-skipped (all-trailer, empty after --ours): <hash>`. Logged to `.git/dispatch-audit.log`. Mode via `branch.<source>.dispatchautoresolveall` (`skip` default / `prompt` / `off`). Override with `--strict`.
+
+`Auto-resolved (all-trailer, non-empty after --ours)` is the sibling case: `--ours` produced net-new diff for target, the commit is kept.
+
+If the same source commits keep auto-skipping every apply, they likely belong to a single target. Run `git dispatch lint` to detect them, then `git dispatch retarget --commit <hash> --to-target <N>` to move them permanently.
+
+Audit log (`.git/dispatch-audit.log`) is append-only, truncated to last 500 lines at the start of each apply. Pre-skips do not write to it.
 
 ## Divergence Detection
 
