@@ -1114,7 +1114,7 @@ _auto_resolve_all_check() {
 # Sets DISPATCH_LAST_PICKED / DISPATCH_LAST_SKIPPED globals.
 _cherry_pick_commits() {
     local resolve="$1" branch="$2"; shift 2
-    local add_trailer="" theirs_fallback=false no_x=false autoresolve_mode="off" target_tid=""
+    local add_trailer="" theirs_fallback=false no_x=false autoresolve_mode="off" target_tid="" _verbose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --add-trailer) add_trailer="$2"; shift 2 ;;
@@ -1122,6 +1122,7 @@ _cherry_pick_commits() {
             --theirs-fallback) theirs_fallback=true; shift ;;
             --autoresolve-mode) autoresolve_mode="$2"; shift 2 ;;
             --target) target_tid="$2"; shift 2 ;;
+            --verbose) _verbose=true; shift ;;
             *) break ;;
         esac
     done
@@ -1129,12 +1130,21 @@ _cherry_pick_commits() {
 
     DISPATCH_LAST_PICKED=0
     DISPATCH_LAST_SKIPPED=0
+    DISPATCH_LAST_PRESKIPPED=0
 
     _enter_branch "$branch" || die "Cannot access branch $branch (worktree conflict?)"
     local -a gcmd=(git -C "$_DISPATCH_WT_PATH")
 
     for (( _idx=0; _idx < ${#hashes[@]}; _idx++ )); do
         local hash="${hashes[$_idx]}"
+
+        # Pre-skip when patch is already on base (see _DISPATCH_PATCH_ON_BASE_FILE)
+        if [[ -n "${_DISPATCH_PATCH_ON_BASE_FILE:-}" && -f "${_DISPATCH_PATCH_ON_BASE_FILE:-}" ]] && \
+           grep -qxF "$hash" "$_DISPATCH_PATCH_ON_BASE_FILE" 2>/dev/null; then
+            $_verbose && warn "  Pre-skipped (patch on base): $(git log -1 --oneline "$hash")"
+            DISPATCH_LAST_PRESKIPPED=$((DISPATCH_LAST_PRESKIPPED + 1))
+            continue
+        fi
 
         # Decide: plain cherry-pick or trailer-rewrite cherry-pick
         local needs_trailer=false
@@ -1168,12 +1178,12 @@ _cherry_pick_commits() {
                     _ar_action=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
                     if [[ "$_ar_action" == "skip" ]]; then
                         "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
-                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        warn "  Auto-skipped (all-trailer, empty after --ours): $(git log -1 --oneline "$hash")"
                         _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
                         DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     elif [[ "$_ar_action" == "continue" ]]; then
-                        warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                        warn "  Auto-resolved (all-trailer, non-empty after --ours): $(git log -1 --oneline "$hash")"
                         _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
                         # Fall through to commit (files staged via --ours)
                     else
@@ -1219,12 +1229,12 @@ _cherry_pick_commits() {
                     _ar_action_nx=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
                     if [[ "$_ar_action_nx" == "skip" ]]; then
                         "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
-                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        warn "  Auto-skipped (all-trailer, empty after --ours): $(git log -1 --oneline "$hash")"
                         _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
                         DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     elif [[ "$_ar_action_nx" == "continue" ]]; then
-                        warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                        warn "  Auto-resolved (all-trailer, non-empty after --ours): $(git log -1 --oneline "$hash")"
                         _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
                         # Fall through to commit (files staged via --ours)
                     else
@@ -1271,13 +1281,13 @@ _cherry_pick_commits() {
                     _ar_action_x=$(_auto_resolve_all_check "$_DISPATCH_WT_PATH" "$hash" "$autoresolve_mode" || true)
                     if [[ "$_ar_action_x" == "skip" ]]; then
                         "${gcmd[@]}" cherry-pick --skip 2>/dev/null || "${gcmd[@]}" reset HEAD --quiet 2>/dev/null || true
-                        warn "  Auto-skipped (all-trailer): $(git log -1 --oneline "$hash")"
+                        warn "  Auto-skipped (all-trailer, empty after --ours): $(git log -1 --oneline "$hash")"
                         _log_audit "auto-skipped" "$hash" "${target_tid:-?}" "all-trailer + empty after --ours" "$_AUTO_RESOLVE_FILES"
                         DISPATCH_LAST_SKIPPED=$((DISPATCH_LAST_SKIPPED + 1))
                         continue
                     elif [[ "$_ar_action_x" == "continue" ]]; then
                         if GIT_EDITOR=true "${gcmd[@]}" cherry-pick --continue 2>/dev/null; then
-                            warn "  Auto-resolved (all-trailer): $(git log -1 --oneline "$hash")"
+                            warn "  Auto-resolved (all-trailer, non-empty after --ours): $(git log -1 --oneline "$hash")"
                             _log_audit "auto-resolved" "$hash" "${target_tid:-?}" "all-trailer + non-empty after --ours" "$_AUTO_RESOLVE_FILES"
                             DISPATCH_LAST_PICKED=$((DISPATCH_LAST_PICKED + 1))
                             continue
@@ -1610,7 +1620,7 @@ cmd_apply() {
     _acquire_lock
     _audit_log_truncate
 
-    local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false strict=false
+    local dry_run=false resolve=false force=false reset_target="" include_merged=false no_sync=false no_replay=false strict=false verbose=false
     local -a positional=()
 
     while [[ $# -gt 0 ]]; do
@@ -1622,6 +1632,7 @@ cmd_apply() {
             --no-sync)  no_sync=true; shift ;;
             --no-replay) no_replay=true; shift ;;
             --strict)   strict=true; shift ;;
+            --verbose)  verbose=true; shift ;;
             --base)     die "--base removed. Use: git dispatch sync" ;;
             --yes)      DISPATCH_YES=true; shift ;;
             -*)         die "Unknown flag: $1" ;;
@@ -1660,6 +1671,16 @@ cmd_apply() {
         *) die "Invalid dispatchautoresolveall value: '$autoresolve_mode' (expected: skip, prompt, off)" ;;
     esac
 
+    # Pre-skip commits whose patch is already on base. Default on; disable with
+    # branch.<source>.dispatchprecheckbase=false. --strict forces off.
+    local precheckbase=true precheckbase_mode
+    if $strict; then
+        precheckbase=false
+    else
+        precheckbase_mode=$(_get_config precheckbase)
+        [[ "$precheckbase_mode" == "false" ]] && precheckbase=false
+    fi
+
     # Ensure base ref is up-to-date before creating/updating targets (best-effort)
     _spinner_start "Refreshing base..."
     _refresh_base "$base" || true
@@ -1685,10 +1706,16 @@ cmd_apply() {
 
     # Parse trailer-tagged commits into temp file: "hash target-id" per line
     local commit_file patch_map_file replay_file
+    local _DISPATCH_PATCH_ON_BASE_FILE
     commit_file=$(mktemp)
     patch_map_file=$(mktemp)
     replay_file=$(mktemp)
-    trap "rm -f '$commit_file' '$patch_map_file' '$replay_file'" RETURN
+    _DISPATCH_PATCH_ON_BASE_FILE=$(mktemp)
+    trap "rm -f '$commit_file' '$patch_map_file' '$replay_file' '$_DISPATCH_PATCH_ON_BASE_FILE'" RETURN
+    if $precheckbase; then
+        git cherry "$base" "$source" 2>/dev/null \
+            | awk '/^-/{print $2}' > "$_DISPATCH_PATCH_ON_BASE_FILE" || true
+    fi
 
     while IFS= read -r _h; do
         # Skip merge commits (they have no Dispatch-Target-Id and that's expected)
@@ -2033,6 +2060,9 @@ cmd_apply() {
     fi
 
     local apply_merged_skipped=0
+    local DISPATCH_TOTAL_PRESKIPPED=0
+    local -a _vargs=()
+    $verbose && _vargs+=(--verbose)
 
     for tid in "${target_ids[@]}"; do
         # If applying to a specific target, skip others
@@ -2117,8 +2147,11 @@ cmd_apply() {
                     warn "  Source may have been rebased externally. Cherry-picking may conflict or duplicate."
                     warn "  If push fails (non-fast-forward), use: git dispatch push $tid --force"
                 fi
-                _cherry_pick_commits "$resolve" "$branch_name" --autoresolve-mode "$autoresolve_mode" --target "$tid" "${new_hashes[@]}"
-                info "  Updated $branch_name ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped)"
+                _cherry_pick_commits "$resolve" "$branch_name" ${_vargs[@]+"${_vargs[@]}"} --autoresolve-mode "$autoresolve_mode" --target "$tid" "${new_hashes[@]}"
+                DISPATCH_TOTAL_PRESKIPPED=$((DISPATCH_TOTAL_PRESKIPPED + ${DISPATCH_LAST_PRESKIPPED:-0}))
+                local _upd_msg="  Updated $branch_name ($DISPATCH_LAST_PICKED picked, $DISPATCH_LAST_SKIPPED skipped"
+                [[ ${DISPATCH_LAST_PRESKIPPED:-0} -gt 0 ]] && _upd_msg="$_upd_msg, $DISPATCH_LAST_PRESKIPPED pre-skipped"
+                info "$_upd_msg)"
                 updated=$((updated + 1))
             else
                 echo "  $branch_name: in sync"
@@ -2132,9 +2165,10 @@ cmd_apply() {
             git config "branch.${branch_name}.dispatchsource" "$source"
 
             local cherry_pick_failed=false
-            if ! _cherry_pick_commits "$resolve" "$branch_name" --theirs-fallback --autoresolve-mode "$autoresolve_mode" --target "$tid" "${hashes[@]}"; then
+            if ! _cherry_pick_commits "$resolve" "$branch_name" ${_vargs[@]+"${_vargs[@]}"} --theirs-fallback --autoresolve-mode "$autoresolve_mode" --target "$tid" "${hashes[@]}"; then
                 cherry_pick_failed=true
             fi
+            DISPATCH_TOTAL_PRESKIPPED=$((DISPATCH_TOTAL_PRESKIPPED + ${DISPATCH_LAST_PRESKIPPED:-0}))
 
             if $cherry_pick_failed; then
                 warn "  $branch_name created (cherry-pick conflicted)"
@@ -2150,9 +2184,10 @@ cmd_apply() {
                 done < "$replay_file"
                 if [[ ${#_replay_hashes[@]} -gt 0 ]]; then
                     info "  Replaying ${#_replay_hashes[@]} target-only commit(s)..."
-                    if ! _cherry_pick_commits "$resolve" "$branch_name" --autoresolve-mode "$autoresolve_mode" --target "$tid" "${_replay_hashes[@]}"; then
+                    if ! _cherry_pick_commits "$resolve" "$branch_name" ${_vargs[@]+"${_vargs[@]}"} --autoresolve-mode "$autoresolve_mode" --target "$tid" "${_replay_hashes[@]}"; then
                         warn "  Some target-only commits could not be replayed"
                     fi
+                    DISPATCH_TOTAL_PRESKIPPED=$((DISPATCH_TOTAL_PRESKIPPED + ${DISPATCH_LAST_PRESKIPPED:-0}))
                 fi
             fi
 
@@ -2182,6 +2217,11 @@ cmd_apply() {
                 warn "Note: source is $_base_ahead commit(s) behind $base."
                 warn "Run: git dispatch sync  (to merge base into source and targets)"
             fi
+        fi
+
+        if [[ $DISPATCH_TOTAL_PRESKIPPED -gt 0 ]]; then
+            info "Pre-skipped $DISPATCH_TOTAL_PRESKIPPED commit(s) whose patches are already on base."
+            $verbose || info "  Run with --verbose to list them."
         fi
     fi
 }
@@ -2610,6 +2650,9 @@ cmd_status() {
         _audit_path=$(_audit_log_path 2>/dev/null)
         echo ""
         info "Auto-resolved entries: $_audit_summary. See ${_audit_path:-.git/dispatch-audit.log}"
+        if [[ "$_audit_summary" == *skip* ]]; then
+            info "  Hint: run 'git dispatch lint' to identify mis-tagged commits that keep auto-skipping."
+        fi
     fi
 
 }
@@ -4192,6 +4235,8 @@ FLAGS
                 apply --force       Rebuild stale targets (tid reassigned)
                 push --force        Push with --force-with-lease
                 checkout clear --force  Discard unpicked commits
+  --verbose   apply: list commits pre-skipped (patch already on base)
+  --strict    apply: disable auto-resolve and base pre-skip for one run
 
 TRAILERS
   Dispatch-Target-Id (required): numeric integer or decimal (1, 2, 1.5), or "all"

@@ -5790,7 +5790,7 @@ test_autoresolve_skips_all_when_already_on_base() {
     local output
     output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    assert_contains "$output" "Auto-skipped (all-trailer)" "auto-skipped reported"
+    assert_contains "$output" "Auto-skipped (all-trailer" "auto-skipped reported"
 
     local actual
     actual=$(git show target-2:shared.txt 2>/dev/null)
@@ -5828,7 +5828,7 @@ test_autoresolve_strict_flag_disables() {
     local output
     output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync --strict 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    assert_not_contains "$output" "Auto-skipped (all-trailer)" "no auto-skip when --strict"
+    assert_not_contains "$output" "Auto-skipped (all-trailer" "no auto-skip when --strict"
 
     # With --theirs-fallback applying X, target-2 ends up with X's v1 (NOT master's v2)
     local actual
@@ -5848,7 +5848,7 @@ test_autoresolve_off_mode_disables() {
     local output
     output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    assert_not_contains "$output" "Auto-skipped (all-trailer)" "no auto-skip when config off"
+    assert_not_contains "$output" "Auto-skipped (all-trailer" "no auto-skip when config off"
 
     teardown
 }
@@ -5910,7 +5910,7 @@ test_autoresolve_source_keep_wins_over_all_trailer() {
     output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
     assert_contains "$output" "Force-accepted (Source-Keep)" "Source-Keep path runs"
-    assert_not_contains "$output" "Auto-skipped (all-trailer)" "auto-resolve does not fire when Source-Keep set"
+    assert_not_contains "$output" "Auto-skipped (all-trailer" "auto-resolve does not fire when Source-Keep set"
 
     # Source-Keep uses --theirs, so X overwrites target's v2 with v1
     local actual
@@ -5950,7 +5950,7 @@ test_autoresolve_prompt_mode_yes_auto_resolves() {
     local output
     output=$(bash "$DISPATCH" apply reset 2 --yes --no-sync 2>&1 | sed $'s/\033\\[[0-9;]*m//g') || true
 
-    assert_contains "$output" "Auto-skipped (all-trailer)" "prompt + --yes auto-skipped"
+    assert_contains "$output" "Auto-skipped (all-trailer" "prompt + --yes auto-skipped"
 
     local actual
     actual=$(git show target-2:shared.txt 2>/dev/null)
