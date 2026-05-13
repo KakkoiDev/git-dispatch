@@ -3,13 +3,40 @@ name: git-dispatch
 description: Stacked PRs without the stack. Multi-commit grouped PRs with no force-push. Code on source, apply into independent target branches, integration test with checkout, sync with checkin. Use when preparing grouped PRs from a source branch.
 ---
 
-# git-dispatch - Stacked PRs Without the Stack
+# git-dispatch
 
-Multi-commit grouped PRs. No force-push. No restack. No cascade.
+Multi-commit grouped PRs. No force-push, restack, or cascade.
 
-Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Target-Id into multi-commit PRs. Each target branches independently from base. `checkout <N>` provides the combined view for integration testing.
+vs ghstack/spr (1 commit = 1 PR): groups by `Dispatch-Target-Id` trailer. Targets branch independently from base. `checkout <N>` = integration view.
 
-**Source** = where all edits happen. **Targets** = read-only PR branches. **Checkout** = integration testing.
+Source = edit. Targets = read-only PRs. Checkout = integration test.
+
+## Agent Cheat Sheet
+
+On `source`, CI fails on target `N`:
+1. Source-owned file (lint/format/type-check): fix on source. `sync`. `apply <N>`. `push <N>`.
+2. Target-owned file (gen, swagger, codegen output): `checkout <N>`. Fix. `commit`. `checkin`. `checkout source`. `sync`. `apply <N>`. `push <N>`. `checkout clear`.
+3. Cross-target test failure: `checkout <N>` to verify, then route fix per 1 or 2.
+
+On `source`, ship new PRs:
+1. `commit --target <N>` per change.
+2. `sync` if base moved.
+3. `apply`.
+4. `push all`.
+
+Stuck: `git dispatch abort` returns to source clean.
+
+## Decision Triage
+
+| Symptom | Path |
+|---------|------|
+| `apply` refuses: "source behind base" | `sync` then `apply <N>` |
+| Target CI fails (lint/format/type-check), source CI green | `checkout <N>` -> fix -> `commit` -> `checkin` -> `apply <N>` -> `push <N>` |
+| Auto-gen file (gen/, swagger, prisma, openapi) diverges target<>source | `checkout <N>` -> run codegen -> `commit --source-keep` -> `checkin` -> `apply` -> `push <N>` |
+| Source `apply` produces no diff but target still broken | Target has divergent state source cannot reach. Use `checkout <N>` flow. |
+| Same change applies to every target | Commit on source with `--target all`, then `apply` |
+| Verify multi-target integration before shipping | `checkout <N>` -> run tests -> `checkout source` -> `checkout clear` |
+| Stuck mid-operation | `git dispatch abort` |
 
 ## Commands
 
@@ -37,42 +64,37 @@ Unlike ghstack/spr (1 commit = 1 PR), git-dispatch groups commits by Dispatch-Ta
 
 ## Trailers
 
-Use `dispatch commit` to tag commits with trailers:
+Tag via `dispatch commit`:
 ```bash
 git dispatch commit "Add user model" --target 1
 git dispatch commit "Update CI config" --target all
 git dispatch commit "Regen swagger" --target 3 --source-keep
 ```
 
-- Numeric: integer or decimal (1, 2, 1.5). Decimals enable mid-stack insertion.
+- Numeric: int or decimal (1, 2, 1.5). Decimals = mid-stack insertion.
 - `all`: commit included in every target during apply.
-- `--source-keep`: auto-resolve conflicts with incoming version (--theirs). Used for generated files. Works during both apply (source->target) and checkin (checkout->source).
-- On checkout branches, `--target` is auto-detected from branch name.
+- `--source-keep`: auto-resolve conflicts with incoming (`--theirs`). For gen files. Works in apply + checkin.
+- On checkout branches, `--target` auto-detected from branch name.
 
 ### When to use `Dispatch-Target-Id: all`
 
 USE for:
-- Shared config changes (`.github/`, root `package.json`, `CLAUDE.md`)
-- Utilities genuinely consumed by every target's code
-- Generated files (OpenAPI clients, protobuf) that every target rebuilds against
+- Shared config (`.github/`, root `package.json`, `CLAUDE.md`)
+- Utilities consumed by every target's code
+- Generated files (OpenAPI clients, protobuf) every target rebuilds against
 
 DO NOT USE for:
-- Formatting/lint fixes to one target's files (tag the target explicitly)
-- Test-file changes for tests that only exist in one target
-- "It felt easier" - if unsure, tag the specific target
+- Format/lint fixes to one target's files (tag target explicitly)
+- Test-file changes for tests only in one target
+- "Felt easier" - if unsure, tag specific target
 
-**Why it matters.** Once any target in the stack is squash-merged into base, `all`-tagged
-commits that semantically belonged to that target start conflicting when `apply` re-cherry-picks
-them onto the remaining targets. Remaining targets have the post-merge base content, which no
-longer diff-matches the original commit. Result: forced `apply reset <N>` (history rewrite + force-push).
+**Why.** Once any target squash-merges into base, `all`-tagged commits semantically belonging to that target conflict when `apply` re-cherry-picks onto remaining (post-merge) targets. Forces `apply reset <N>` (history rewrite + force-push).
 
-**Recovery.** `git dispatch retarget --commit <hash> --to-target <N>` rewrites the trailer.
-Safe while the target PR is still open. For an already-pushed target, requires `--force` push.
+**Recovery.** `git dispatch retarget --commit <hash> --to-target <N>` rewrites trailer. Safe while PR open; already-pushed needs `--force`.
 
 ### Ownership config (`.git-dispatch-targets`)
 
-Optional file at repo root. Maps paths to targets; powers `git dispatch lint` and informs the
-`git dispatch status` post-merge hint.
+Optional file at repo root. Maps paths to targets. Powers `git dispatch lint` + `status` post-merge hint.
 
 ```
 # .git-dispatch-targets
@@ -84,22 +106,16 @@ shared: .github/**
 shared: package.json
 ```
 
-- One `<tid-or-"shared">: <glob>` pairing per line.
-- `#` starts a comment.
-- Globs support `**` (span directories), `*` (single segment), `?` (single char).
-- Multiple globs per target allowed (repeat the `tid:` prefix).
-- Missing file: `lint` reports "No ownership config" and exits 0.
+One `<tid-or-"shared">: <glob>` per line. `#` = comment. Globs: `**` (dirs), `*` (segment), `?` (char). Repeat `tid:` for multiple globs. Missing file: `lint` exits 0.
 
-`git dispatch lint` walks every `all`-tagged source commit and flags those whose
-changed files all belong to a single target (and touch nothing shared or unmatched).
-It suggests the exact `git dispatch retarget` command to fix each.
+`git dispatch lint` walks every `all`-tagged source commit, flags those whose changed files all belong to one target (touch nothing shared/unmatched). Suggests exact `git dispatch retarget` fix per commit.
 
 ## Workflows
 
 ### Basic: develop and create PRs
 ```bash
 git dispatch init --base origin/master --target-pattern "feat/auth-{id}"
-# or just: git dispatch init  (prompts interactively)
+# or: git dispatch init  (prompts interactively)
 git dispatch commit "Add user model" --target 1
 git dispatch commit "Add auth middleware" --target 2
 git dispatch commit "Add login endpoint" --target 2
@@ -110,7 +126,7 @@ git dispatch push all
 ### Integration testing
 ```bash
 git dispatch checkout 3           # branch with targets 1..3 + all
-pnpm test                         # run tests
+<run tests>                       # e.g. pnpm test, cargo test, bazel test //...
 git dispatch checkout source      # back to source
 git dispatch checkout clear       # remove test branch
 ```
@@ -127,16 +143,26 @@ git dispatch push 2
 git dispatch checkout clear
 ```
 
-### Generated files (OpenAPI, protobuf)
+### Generated files (OpenAPI, protobuf, prisma, codegen)
+
+Trigger phrases (agent scan):
+- "regen", "regenerate", "auto-gen", "code-gen", "swagger", "openapi", "prisma"
+- "stale gen file on target", "drift between branches"
+- "target CI fails, source CI passes" on generated path
+- "no diff on source" but target needs fix
+- "force-update gen on target without touching source"
+
+Rule: auto-gen files owned by branch that ran generator. Source `apply` cannot push no-diff change. Target's gen file wrong -> regen on target.
+
 ```bash
 # Option A: regen on source with Source-Keep
-pnpm openapi
+<run codegen>                     # e.g. pnpm openapi, make proto, prisma generate
 git dispatch commit "regen" --target all --source-keep
 git dispatch apply
 
 # Option B: regen for failing target via checkout
 git dispatch checkout 3
-pnpm openapi
+<run codegen>
 git dispatch commit "regen swagger" --source-keep    # auto-detects target 3
 git dispatch checkin             # Source-Keep auto-resolves conflict
 git dispatch checkout source
@@ -147,17 +173,17 @@ git dispatch push 3
 ### Retarget commits (change Dispatch-Target-Id)
 ```bash
 git dispatch retarget --target 8 --to-target 15       # moves all commits from target 8 to 15
-git dispatch retarget --commit abc123 --to-target 15  # moves a single commit
+git dispatch retarget --commit abc123 --to-target 15  # moves single commit
 git dispatch apply                                     # updates both targets
 ```
 
-### Alias target branch names (map target-id to custom branch name)
+### Alias target branches (custom branch names)
 ```bash
 git dispatch alias 17 kakkoidev/fix/Ticket-1234    # target 17 -> ticket branch
 git dispatch alias                                 # list all aliases
 git dispatch alias clear 17                        # revert to pattern name
 ```
-Existing local branches are renamed. Remote push/delete is manual. Aliases survive `apply reset`; `delete`/`reset` clear them.
+Local branches renamed. Remote push/delete manual. Aliases survive `apply reset`; `delete`/`reset` clear them.
 
 ### Review feedback
 ```bash
@@ -172,24 +198,24 @@ git dispatch apply --base        # merges base into source AND existing targets
 git dispatch push all
 ```
 
-### Post-merge: continue work after a target merges
+### Post-merge: continue after a target merges
 
-When `git dispatch status` reports a target as `merged`, run this before editing other targets:
+When `git dispatch status` shows target `merged`, run before editing other targets:
 ```bash
-git dispatch status                                       # confirm merged target + any 'all' warning
-git dispatch sync                                         # pull base into source + remaining targets
-git dispatch lint                                         # flag 'all'-tagged commits whose content now lives on base
-git dispatch retarget --commit <hash> --to-target <N>     # fix each flagged commit, then re-apply
-git dispatch checkout <N>                                 # integration branch for the target you'll edit
-# make edits, run tests
-git dispatch commit "fix: ..."                            # auto-detects target N
-git dispatch checkin                                      # picks fixes back to source
+git dispatch status                # confirm merged target + 'all' warning
+git dispatch sync                  # pull base into source + remaining targets
+git dispatch lint                  # flag 'all' commits whose content now lives on base
+git dispatch retarget --commit <hash> --to-target <N>     # fix each, then re-apply
+git dispatch checkout <N>          # integration branch for target to edit
+# edits, tests
+git dispatch commit "fix: ..."     # auto-detects target N
+git dispatch checkin               # picks fixes back to source
 git dispatch checkout source
-git dispatch apply <N>                                    # incremental, fast-forward-friendly
+git dispatch apply <N>             # incremental, fast-forward
 git dispatch checkout clear
 git dispatch push <N>
 ```
-Use `apply <N>`, not `apply reset <N>` - reset rewrites history and forces `push --force`.
+Use `apply <N>`, not `apply reset <N>` (reset rewrites history -> `push --force`).
 
 ### Abort a stuck operation
 ```bash
@@ -206,11 +232,11 @@ git dispatch abort               # cleans up conflicts, worktrees, returns to so
 | Regenerate all targets from scratch | `git dispatch apply reset all` |
 | Merge base into source and targets | `git dispatch apply --base` |
 
-**Default to `apply <N>`** (incremental, fast-forward push). Reach for `apply reset <N>` only when `apply <N>` itself conflicts and neither `retarget` nor `--source-keep` resolves it - reset rewrites history and forces `push --force`. Never preemptively reset.
+**Default `apply <N>`** (incremental, fast-forward push). Use `apply reset <N>` only when `apply <N>` itself conflicts and neither `retarget` nor `--source-keep` resolves it. Reset rewrites history, forces `push --force`. Never preemptively reset.
 
 ## Config
 
-Config is branch-scoped (per-source-branch) to support multiple worktrees:
+Branch-scoped (per-source-branch) for multi-worktree support:
 
 | Key | Description |
 |-----|-------------|
@@ -225,7 +251,7 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 
 | Flag | Meaning |
 |------|---------|
-| `--dry-run` | Show plan, make no changes |
+| `--dry-run` | Show plan, no changes |
 | `--resolve`, `--continue` | Leave conflict active for manual resolution |
 | `--yes` | Skip confirmation prompts (required for scripting/CI) |
 | `--all` | Include merged targets in sync/apply (skipped by default) |
@@ -234,31 +260,30 @@ Config is branch-scoped (per-source-branch) to support multiple worktrees:
 
 ## Conflict Handling
 
-All propagation commands support `--resolve` (or `--continue`) to leave conflicts active for manual resolution.
+All propagation commands support `--resolve`/`--continue` to leave conflicts active for manual resolution.
 
-- **Default**: aborts cleanly, prints re-run hint
-- **`--resolve`/`--continue`**: leaves conflict active in worktree, shows remaining work
-- **`git dispatch abort`**: cancel operation, clean up, return to source
-- **Dispatch-Source-Keep**: auto-resolves keeping the source-originated version (apply/checkin: `--strategy-option theirs`; sync: file-scoped `--ours` on target)
-- **Auto-resolve `all`-trailer post-merge**: on `apply`, a `Dispatch-Target-Id: all` cherry-pick that conflicts only on its own files is resolved with `--ours` per file; empty result auto-skips the commit, non-empty result auto-commits. Per-source config: `branch.<source>.dispatchautoresolveall` (`skip` default / `prompt` / `off`). Per-invocation override: `--strict`. Audit: `.git/dispatch-audit.log` (last 500 entries; status footer summarises).
+- **Default**: abort cleanly, print re-run hint
+- **`--resolve`/`--continue`**: leave conflict active in worktree
+- **`git dispatch abort`**: cancel, clean up, return to source
+- **Dispatch-Source-Keep**: auto-resolves keeping source version (apply/checkin: `--strategy-option theirs`; sync: file-scoped `--ours` on target)
+- **Auto-resolve `all`-trailer post-merge**: on `apply`, `Dispatch-Target-Id: all` cherry-pick conflicting only on its own files resolved with `--ours` per file. Empty result auto-skips; non-empty auto-commits. Config: `branch.<source>.dispatchautoresolveall` = `skip` (default) / `prompt` / `off`. Override: `--strict`. Audit: `.git/dispatch-audit.log` (last 500).
 
 ### Sync conflict flow
 
 1. `git dispatch sync --resolve` hits conflict, leaves worktree at printed path.
-2. Resolve files there (`git -C <wt> checkout --ours <file>`, `--theirs <file>`, or edit).
-3. `git -C <wt> add <resolved>` - staging is enough; no `git commit` needed.
-4. `git dispatch continue` - auto-commits the merge, then resumes any remaining targets.
+2. Resolve files there (`git -C <wt> checkout --ours/--theirs <file>` or edit).
+3. `git -C <wt> add <resolved>` (staging enough; no commit needed).
+4. `git dispatch continue` auto-commits merge, resumes remaining targets.
 
-`Dispatch-Source-Keep: true` on a target commit auto-resolves sync conflicts on files
-that commit touched (keeps the target's side, same intent as apply/checkin: "source owns this file").
+`Dispatch-Source-Keep: true` on target commit auto-resolves sync conflicts on files that commit touched (keeps target's side; same intent as apply/checkin).
 
 ## Divergence Detection
 
 `status` tags targets:
-- `(DIVERGED)` - target has commits not traceable to source (e.g., manual push to target)
-- `(cosmetic)` - same logical changes, different SHAs or base drift (safe to ignore)
+- `(DIVERGED)` = target has commits not traceable to source (e.g., manual push)
+- `(cosmetic)` = same logical changes, different SHAs or base drift (safe to ignore)
 
-Base drift (source behind master) produces cosmetic differences, not false DIVERGED. The check uses commit-message traceability: if every target commit subject matches a source commit, the difference is from base drift or auto-conflict resolution.
+Check uses commit-message traceability: every target subject matching source subject = cosmetic, not DIVERGED. Base drift never produces false DIVERGED.
 
 ## Data Flow
 
@@ -271,12 +296,22 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 
 ## apply vs apply reset
 
-`apply <N>` = incremental (new commits only). Push stays fast-forward.
-`apply reset <N>` = recreate from scratch. Requires `push --force` (history rewritten).
+- `apply <N>` = incremental (new commits only). Push stays fast-forward.
+- `apply reset <N>` = recreate from scratch. Requires `push --force` (history rewritten).
 
-**Force-push trap**: source behind master -> `apply` creates targets with different SHAs (cosmetic) -> later `apply <N>` can't match SHAs, re-applies everything, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
+**Force-push trap**: source behind master -> `apply` creates targets w/ different SHAs (cosmetic) -> later `apply <N>` can't match SHAs, re-applies everything, conflicts -> forced into `apply reset <N>` -> needs `push --force`.
 
-**Prevention**: always `sync` before `apply` when source is behind master. Keeps SHAs stable so incremental `apply <N>` works and push stays fast-forward.
+**Prevention**: always `sync` before `apply` when source behind master. Keeps SHAs stable; incremental `apply <N>` works; push stays fast-forward.
+
+## Anti-Patterns
+
+| Don't | Why | Do instead |
+|-------|-----|------------|
+| Edit auto-gen file on source to push diff to target | Source has no real diff. Cherry-pick to target empty. | `checkout <N>` -> regen -> `checkin` |
+| Run `apply` while source behind base | Cosmetic SHA drift, future `apply` conflicts, forces `apply reset` + `push --force` | `sync` first |
+| Use `Dispatch-Target-Id: all` for one target's format fix | Once any target merges, `all` cherry-picks conflict on remaining targets | Tag specific target |
+| `apply reset <N>` preemptively | Rewrites history, forces `push --force`, breaks PR review comments | Only when `apply <N>` itself conflicts and `retarget`/`--source-keep` cannot fix |
+| Manually push target branches | Drift from source; `dispatch status` flags as `(DIVERGED)` | `git dispatch push <N>` |
 
 ## Common Fixes
 
@@ -297,7 +332,7 @@ Base drift (source behind master) produces cosmetic differences, not false DIVER
 | Clean up merged targets | `git dispatch delete <N>` or `delete --prune` |
 | Merged PR reverted on base | `git dispatch apply reset <N>` then `apply` |
 | Force sync/apply on merged targets | `--all` flag |
-| PR branch needs a ticket-based name | `git dispatch alias <N> <team>/fix/Ticket-1234` |
+| PR branch needs ticket-based name | `git dispatch alias <N> <team>/fix/Ticket-1234` |
 
 ## Installation
 
