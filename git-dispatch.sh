@@ -17,6 +17,7 @@ source "$SCRIPT_DIR/lib/cherry.sh"
 source "$SCRIPT_DIR/lib/state.sh"
 source "$SCRIPT_DIR/lib/project.sh"
 source "$SCRIPT_DIR/lib/absorb.sh"
+source "$SCRIPT_DIR/lib/combined.sh"
 
 # Get targets of a branch from git config
 get_targets() {
@@ -3652,6 +3653,7 @@ main() {
         repair)       cmd_repair "$@" ;;
         project)      cmd_project "$@" ;;
         absorb)       cmd_absorb "$@" ;;
+        combined)     cmd_combined "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
     esac

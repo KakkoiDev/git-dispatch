@@ -6347,6 +6347,96 @@ test_absorb_picks_external_commit
 test_absorb_skips_own_pushed_commits
 test_absorb_replace_mode
 
+# ---------- Phase 3b: combined tests ----------
+
+test_combined_creates_branch() {
+    echo "=== test: combined --include creates branch with subset commits ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    bash "$DISPATCH" combined --include 3,4 >/dev/null 2>&1
+
+    # Find combined branch name from state
+    local cname
+    cname=$(jq -r '.combined | keys[0]' .dispatch/state.json)
+    [[ -n "$cname" && "$cname" != "null" ]] && {
+        echo -e "  ${GREEN}PASS${NC} state.combined has entry: $cname"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} state.combined missing entry"; FAIL=$((FAIL + 1))
+    }
+
+    # Branch should exist
+    assert_branch_exists "$cname" "combined branch created"
+
+    # Should contain commits for tids 3 and 4 (3 total: 1 for tid 3 + 2 for tid 4)
+    local count
+    count=$(git rev-list --count "master..$cname")
+    assert_eq "3" "$count" "combined has 3 commits (1 from tid 3 + 2 from tid 4)"
+
+    teardown
+}
+
+test_combined_excludes_other_prs() {
+    echo "=== test: combined excludes commits from PRs not in --include ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    bash "$DISPATCH" combined --include 3 >/dev/null 2>&1
+
+    local cname
+    cname=$(jq -r '.combined | keys[0]' .dispatch/state.json)
+
+    # Should only have 1 commit (tid 3)
+    local count
+    count=$(git rev-list --count "master..$cname")
+    assert_eq "1" "$count" "combined --include 3 has only 1 commit"
+
+    teardown
+}
+
+test_combined_dissolve_removes_branch() {
+    echo "=== test: combined --dissolve removes branch + state entry ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" combined --include 3,4 >/dev/null 2>&1
+
+    local cname
+    cname=$(jq -r '.combined | keys[0]' .dispatch/state.json)
+
+    bash "$DISPATCH" combined --dissolve "$cname" >/dev/null 2>&1
+
+    assert_branch_not_exists "$cname" "combined branch deleted"
+
+    local remaining
+    remaining=$(jq -r '.combined | keys | length' .dispatch/state.json)
+    assert_eq "0" "$remaining" "state.combined entry removed"
+
+    teardown
+}
+
+test_combined_list_shows_active() {
+    echo "=== test: combined --list shows active branches ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" combined --include 3 >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" combined --list)
+    assert_contains "$output" "combined/" "list shows combined branch name"
+    assert_contains "$output" "includes=3" "list shows include set"
+
+    teardown
+}
+
+test_combined_creates_branch
+test_combined_excludes_other_prs
+test_combined_dissolve_removes_branch
+test_combined_list_shows_active
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
