@@ -1,0 +1,13 @@
+#!/bin/bash
+# bin/git-dispatch - entry point
+#
+# Phase 2a scaffold: thin wrapper over git-dispatch.sh while the monolith is
+# being progressively split into lib/. Phase 4b reverses this: this script
+# becomes the dispatcher and git-dispatch.sh is removed.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISPATCH_SH="$SCRIPT_DIR/../git-dispatch.sh"
+
+exec bash "$DISPATCH_SH" "$@"
