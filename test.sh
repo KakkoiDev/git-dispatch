@@ -6242,6 +6242,111 @@ test_project_force_recreates
 test_project_abort_clears_conflict
 test_project_full_fresh_state_consistent
 
+# ---------- Phase 3a: absorb tests ----------
+
+test_absorb_requires_state() {
+    echo "=== test: absorb refuses without state.json ==="
+    setup
+    create_source >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" absorb 2>&1 || true)
+    assert_contains "$output" "No state.json" "absorb refuses without state"
+
+    teardown
+}
+
+test_absorb_picks_external_commit() {
+    echo "=== test: absorb cherry-picks external commit on ship branch back to POC ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Simulate reviewer commit on ship branch (PR-3)
+    git checkout source/feature-3 -q
+    echo "reviewer fix" > review.txt; git add review.txt
+    git commit -m "review: fix typo" -q
+    local review_sha
+    review_sha=$(git rev-parse HEAD)
+
+    # Return to POC
+    git checkout source/feature -q
+
+    # Absorb
+    bash "$DISPATCH" absorb 3 >/dev/null 2>&1
+
+    # POC should now have the review commit (with PR-3 trailer)
+    local found
+    found=$(git log master..source/feature --format='%H %s' | grep "review: fix typo" || true)
+    [[ -n "$found" ]] && {
+        echo -e "  ${GREEN}PASS${NC} POC has reviewer commit"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} POC missing reviewer commit"; FAIL=$((FAIL + 1))
+    }
+
+    # Watermark should advance
+    local watermark
+    watermark=$(jq -r '.absorb_watermark["3"]' .dispatch/state.json)
+    assert_eq "$review_sha" "$watermark" "absorb_watermark updated to ship head"
+
+    teardown
+}
+
+test_absorb_skips_own_pushed_commits() {
+    echo "=== test: absorb does not re-pick commits whose patch is already on POC ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Absorb with no changes on ship -> no-op
+    local before_count
+    before_count=$(git rev-list --count master..source/feature)
+    bash "$DISPATCH" absorb >/dev/null 2>&1
+    local after_count
+    after_count=$(git rev-list --count master..source/feature)
+    assert_eq "$before_count" "$after_count" "POC unchanged when no external commits"
+
+    teardown
+}
+
+test_absorb_replace_mode() {
+    echo "=== test: absorb --mode replace copies files from ship to POC ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Modify a file on ship branch
+    git checkout source/feature-3 -q
+    echo "regenerated content" > file.txt; git add file.txt
+    git commit -m "regen file.txt" -q
+    local ship_sha
+    ship_sha=$(git rev-parse HEAD)
+
+    # Return to POC, absorb in replace mode
+    git checkout source/feature -q
+    bash "$DISPATCH" absorb 3 --mode replace --files file.txt >/dev/null 2>&1
+
+    # POC's file.txt should be the regenerated content
+    local actual
+    actual=$(git show source/feature:file.txt)
+    assert_eq "regenerated content" "$actual" "POC file.txt matches ship branch content"
+
+    # Last commit on POC should have Source-Keep trailer
+    local trailer
+    trailer=$(git log -1 source/feature --format='%(trailers:key=Dispatch-Source-Keep,valueonly)' | tr -d '[:space:]')
+    assert_eq "true" "$trailer" "absorb commit has Source-Keep trailer"
+
+    teardown
+}
+
+test_absorb_requires_state
+test_absorb_picks_external_commit
+test_absorb_skips_own_pushed_commits
+test_absorb_replace_mode
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
