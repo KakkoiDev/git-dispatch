@@ -5995,7 +5995,108 @@ test_autoresolve_status_footer_shows_summary
 test_autoresolve_source_keep_wins_over_all_trailer
 test_autoresolve_dry_run_does_not_modify
 test_autoresolve_prompt_mode_yes_auto_resolves
-test_autoresolve_audit_log_truncates_to_500
+# ---------- Phase 2b: state.json tests ----------
+
+test_state_init_creates_valid_json() {
+    echo "=== test: state init --from-config creates valid state.json ==="
+    setup
+    create_source >/dev/null
+
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    assert_branch_exists source/feature "source branch exists"
+    [[ -f .dispatch/state.json ]] && {
+        echo -e "  ${GREEN}PASS${NC} .dispatch/state.json created"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} .dispatch/state.json missing"; FAIL=$((FAIL + 1))
+    }
+
+    local version base poc
+    version=$(jq -r '.version' .dispatch/state.json)
+    base=$(jq -r '.config.base_ref' .dispatch/state.json)
+    poc=$(jq -r '.config.poc_branch' .dispatch/state.json)
+    assert_eq "1" "$version" "state version = 1"
+    assert_eq "master" "$base" "base_ref = master"
+    assert_eq "source/feature" "$poc" "poc_branch = source/feature"
+
+    teardown
+}
+
+test_state_show_pretty_json() {
+    echo "=== test: state show prints pretty JSON ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" state show 2>&1)
+    assert_contains "$output" '"version": 1' "show contains version"
+    assert_contains "$output" '"base_ref"' "show contains config.base_ref"
+    assert_contains "$output" '"projections"' "show contains projections key"
+
+    teardown
+}
+
+test_state_hash_stable_across_reads() {
+    echo "=== test: state hash stable across consecutive reads ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    local h1 h2
+    h1=$(bash "$DISPATCH" state hash)
+    h2=$(bash "$DISPATCH" state hash)
+    assert_eq "$h1" "$h2" "state hash deterministic"
+
+    teardown
+}
+
+test_state_init_refuses_overwrite() {
+    echo "=== test: state init refuses overwrite of existing state.json ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" state init --from-config 2>&1 || true)
+    assert_contains "$output" "already exists" "init refuses to overwrite"
+
+    teardown
+}
+
+test_repair_rebuilds_from_refs() {
+    echo "=== test: repair rebuilds state.json from source trailers + ship branches ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" apply >/dev/null 2>&1
+
+    # Delete state.json then repair
+    rm -rf .dispatch
+    bash "$DISPATCH" repair >/dev/null
+
+    [[ -f .dispatch/state.json ]] && {
+        echo -e "  ${GREEN}PASS${NC} repair recreated state.json"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} repair did not create state.json"; FAIL=$((FAIL + 1))
+    }
+
+    local count
+    count=$(jq -r '.projections | length' .dispatch/state.json)
+    # create_source generates tids 3, 4, 5 (4 has 2 commits)
+    assert_eq "3" "$count" "repair found 3 projections (tids 3, 4, 5)"
+
+    local pr3
+    pr3=$(jq -r '.projections["3"].ship_branch' .dispatch/state.json)
+    assert_contains "$pr3" "3" "PR-3 has ship_branch matching pattern"
+
+    teardown
+}
+
+test_state_init_creates_valid_json
+test_state_show_pretty_json
+test_state_hash_stable_across_reads
+test_state_init_refuses_overwrite
+test_repair_rebuilds_from_refs
 
 echo ""
 echo "======================="

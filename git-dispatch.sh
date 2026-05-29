@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/util.sh"
 source "$SCRIPT_DIR/lib/tag.sh"
 source "$SCRIPT_DIR/lib/cherry.sh"
+source "$SCRIPT_DIR/lib/state.sh"
 
 # Get targets of a branch from git config
 get_targets() {
@@ -3645,6 +3646,8 @@ main() {
         delete)       cmd_delete "$@" ;;
         reset)        cmd_reset "$@" ;;
         alias)        cmd_alias "$@" ;;
+        state)        cmd_state "$@" ;;
+        repair)       cmd_repair "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
     esac
