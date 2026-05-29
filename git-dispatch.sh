@@ -1727,6 +1727,16 @@ cmd_verify() {
 # ---------- status ----------
 
 cmd_status() {
+    # --json: emit state.json directly (or a stub when missing)
+    if [[ "${1:-}" == "--json" ]]; then
+        if _state_exists; then
+            _state_read
+        else
+            jq -n '{ error: "no state.json", hint: "run: git dispatch migrate" }'
+        fi
+        return 0
+    fi
+
     _require_init
 
     local base target_pattern source has_stale=false has_diverged=false

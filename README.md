@@ -2,9 +2,11 @@
 
 **Stacked PRs without the stack.**
 
-Multi-commit grouped PRs. Code on one source branch, group commits by `Dispatch-Target-Id`, apply into independent target branches for focused PRs. Integration test with `checkout`. No force-push. No restack. No cascade. Ever.
+Multi-commit grouped PRs. Code on one source branch (the "POC"), group commits by `Dispatch-Target-Id`, project into independent ship branches off base for focused PRs. Integration test with `combined`. No force-push. No restack. No cascade.
 
 Unlike ghstack/spr (1 commit = 1 PR), git-dispatch supports N commits = 1 PR.
+
+> **Recently redesigned (v2).** State now lives in `.dispatch/state.json` (authoritative, AI-introspectable). Command set renamed for clarity (`project` / `absorb` / `combined` / `update-base` / `clean`). Old commands (`apply` / `sync` / `checkout` / `checkin`) still work with deprecation warnings. See [`docs/migrate.md`](docs/migrate.md) for the one-shot `git dispatch migrate` bootstrap.
 
 ## Problem
 
@@ -18,18 +20,16 @@ Don't stack. Each target branches independently from base, carrying only its own
 
 Tag commits with `Dispatch-Target-Id` trailers to group them. `apply` creates target branches. `checkout` tests them together. `checkin` brings fixes back.
 
-## Quick Start
+## Quick Start (v2 commands)
 
 ```bash
 # Install
 curl -fsSL https://raw.githubusercontent.com/KakkoiDev/git-dispatch/master/install-remote.sh | bash
 
-# Init on your source branch (interactive - prompts for base and pattern)
+# Init on your POC (source) branch
 git checkout -b feature/auth master
-git dispatch init
-
-# Or with explicit flags
 git dispatch init --base origin/master --target-pattern "feature/auth-{id}"
+git dispatch state init --from-config
 
 # Code with dispatch commit
 git dispatch commit "Add user model"        --target 1
@@ -37,12 +37,28 @@ git dispatch commit "Add auth middleware"   --target 2
 git dispatch commit "Add login endpoint"    --target 2
 git dispatch commit "Add validation"        --target 3
 
-# Create target branches and push
-git dispatch apply
+# Project commits to ship branches off master, push
+git dispatch project
 git dispatch push all
 # feature/auth-1  (1 commit)
 # feature/auth-2  (2 commits)
 # feature/auth-3  (1 commit)
+
+# Master advances? Bring POC current, drop merged PRs, re-project
+git dispatch update-base
+git dispatch clean
+git dispatch project
+
+# Integration test PR-1 + PR-3 together
+git dispatch combined --include 1,3
+# run tests / codegen in the combined branch...
+git dispatch absorb       # pull any fixes back to POC
+git dispatch combined --dissolve
+
+# Inspect state at any point
+git dispatch status --json    # full machine-readable state
+git dispatch state show       # pretty-printed state.json
+git dispatch state hash       # stable hash for idempotency checks
 ```
 
 ## Commands

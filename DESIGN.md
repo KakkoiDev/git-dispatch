@@ -1,5 +1,51 @@
 # git-dispatch - Design Document
 
+> **v2 architecture summary.** State now lives in `.dispatch/state.json` (authoritative, AI-introspectable). Command set renamed: `apply` -> `project`, `sync` -> `update-base`, `checkout` -> `combined`, `checkin` -> `absorb`. The philosophy (POC = source of truth, ship branches = derived projections, no force-push cascade) is unchanged from v1. See [`docs/migrate.md`](docs/migrate.md) for the old->new command mapping and the one-shot `git dispatch migrate` bootstrap.
+
+## Architecture (v2)
+
+```
+POC (tagged commits)  --project-->  ship/PR-1, ship/PR-2, ship/PR-3  --push-->  PRs
+                       <--absorb--  (reviewer commits on ship branch)
+```
+
+POC is the source of truth. Ship branches are derived projections; they can be
+regenerated at any time via `project`. The `Dispatch-Target-Id` trailer remains
+the canonical PR grouping mechanism.
+
+### State files
+
+| File | Purpose |
+|---|---|
+| `.dispatch/state.json` | authoritative state: config, projections, watermarks, merged PRs |
+| `.dispatch/state.json.bak` | backup written before every mutation |
+| `.dispatch/conflict.json` | present when paused for conflict resolution (project/absorb/update-base/combined) |
+| `.dispatch/lock` | per-worktree process lock |
+
+### Library layout
+
+```
+bin/git-dispatch              # entry point (thin wrapper)
+lib/
+  util.sh        # logging, color codes, worktree lifecycle, lock
+  state.sh       # state.json read/write/hash/repair, conflict.json
+  tag.sh         # trailer parsing + branch-scoped git config
+  cherry.sh      # cherry-pick engine + auto-resolve
+  project.sh     # cmd_project: POC -> ship branches
+  absorb.sh      # cmd_absorb: ship branches -> POC (watermarked)
+  combined.sh    # cmd_combined: arbitrary include set integration branch
+  base.sh        # cmd_update_base + cmd_clean
+  migrate.sh     # cmd_migrate: bootstrap state.json from existing config
+```
+
+Each lib/*.sh is < 500 lines. The remaining cmd_* implementations (init, commit,
+push, status, verify, lint, retarget, continue, abort) still live in
+`git-dispatch.sh` and will be progressively extracted in future iterations.
+
+---
+
+## v1 design (historical reference)
+
 ## Intent
 
 git-dispatch bridges the gap between "AI built the whole feature on one branch" and "humans need to review it in focused pieces."

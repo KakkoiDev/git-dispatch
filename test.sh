@@ -6618,6 +6618,39 @@ test_migrate_dry_run_no_write
 test_migrate_idempotent
 test_deprecation_warning_on_apply
 
+# ---------- Phase 4b: status --json + docs ----------
+
+test_status_json_with_state() {
+    echo "=== test: status --json emits state.json when present ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" status --json)
+    assert_contains "$output" '"version"' "json status has version"
+    assert_contains "$output" '"config"' "json status has config"
+    assert_contains "$output" '"projections"' "json status has projections"
+
+    teardown
+}
+
+test_status_json_without_state() {
+    echo "=== test: status --json emits hint when no state.json ==="
+    setup
+    create_source >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" status --json)
+    assert_contains "$output" '"error"' "json status reports error"
+    assert_contains "$output" "migrate" "json status hints at migrate"
+
+    teardown
+}
+
+test_status_json_with_state
+test_status_json_without_state
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
