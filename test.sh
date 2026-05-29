@@ -6437,6 +6437,100 @@ test_combined_excludes_other_prs
 test_combined_dissolve_removes_branch
 test_combined_list_shows_active
 
+# ---------- Phase 3c: update-base + clean tests ----------
+
+test_update_base_noop_when_current() {
+    echo "=== test: update-base no-op when POC already current ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" update-base 2>&1)
+    assert_contains "$output" "up to date" "update-base reports current"
+
+    teardown
+}
+
+test_update_base_merges_advances_master() {
+    echo "=== test: update-base merges base into POC when master advances ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    # Advance master
+    git checkout master -q
+    echo "master-advance" > master.txt; git add master.txt
+    git commit -m "master moved" -q
+
+    git checkout source/feature -q
+    bash "$DISPATCH" update-base >/dev/null 2>&1
+
+    # POC should now contain master.txt
+    [[ -f master.txt ]] && {
+        echo -e "  ${GREEN}PASS${NC} POC has master's new file"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} POC missing master file"; FAIL=$((FAIL + 1))
+    }
+
+    # state.last_master_sha should be current
+    local sha state_sha
+    sha=$(git rev-parse master)
+    state_sha=$(jq -r '.last_master_sha' .dispatch/state.json)
+    assert_eq "$sha" "$state_sha" "last_master_sha updated"
+
+    teardown
+}
+
+test_clean_noop_when_nothing_merged() {
+    echo "=== test: clean reports nothing when no PRs merged ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    local output
+    output=$(bash "$DISPATCH" clean 2>&1)
+    assert_contains "$output" "No merged" "clean reports no merged PRs"
+
+    teardown
+}
+
+test_clean_drops_merged_pr() {
+    echo "=== test: clean drops PR whose patches are on master ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Simulate PR-3's content landing on master by cherry-picking source/feature-3's commit
+    git checkout master -q
+    git cherry-pick source/feature-3 >/dev/null 2>&1
+    git checkout source/feature -q
+
+    bash "$DISPATCH" clean >/dev/null 2>&1
+
+    # ship/PR-3 should be deleted (master has the patch)
+    assert_branch_not_exists "source/feature-3" "ship/PR-3 deleted after clean"
+
+    # state.merged_prs should contain PR-3
+    local merged
+    merged=$(jq -r '[.merged_prs[].id] | join(",")' .dispatch/state.json)
+    assert_contains "$merged" "3" "state.merged_prs has PR-3"
+
+    # state.projections should no longer have PR-3
+    local has_3
+    has_3=$(jq -r '.projections | has("3")' .dispatch/state.json)
+    assert_eq "false" "$has_3" "state.projections no longer has PR-3"
+
+    teardown
+}
+
+test_update_base_noop_when_current
+test_update_base_merges_advances_master
+test_clean_noop_when_nothing_merged
+test_clean_drops_merged_pr
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

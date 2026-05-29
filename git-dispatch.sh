@@ -18,6 +18,7 @@ source "$SCRIPT_DIR/lib/state.sh"
 source "$SCRIPT_DIR/lib/project.sh"
 source "$SCRIPT_DIR/lib/absorb.sh"
 source "$SCRIPT_DIR/lib/combined.sh"
+source "$SCRIPT_DIR/lib/base.sh"
 
 # Get targets of a branch from git config
 get_targets() {
@@ -3654,6 +3655,8 @@ main() {
         project)      cmd_project "$@" ;;
         absorb)       cmd_absorb "$@" ;;
         combined)     cmd_combined "$@" ;;
+        update-base)  cmd_update_base "$@" ;;
+        clean)        cmd_clean "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
     esac
