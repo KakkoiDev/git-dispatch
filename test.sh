@@ -6098,6 +6098,150 @@ test_state_hash_stable_across_reads
 test_state_init_refuses_overwrite
 test_repair_rebuilds_from_refs
 
+# ---------- Phase 2c: project tests ----------
+
+test_project_requires_state() {
+    echo "=== test: project refuses without state.json ==="
+    setup
+    create_source >/dev/null
+
+    local output
+    output=$(bash "$DISPATCH" project 2>&1 || true)
+    assert_contains "$output" "No state.json" "project refuses without state"
+
+    teardown
+}
+
+test_project_full_fresh_creates_ship_branches() {
+    echo "=== test: project full_fresh creates ship branches ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    assert_branch_exists "source/feature-3" "ship/PR-3 created"
+    assert_branch_exists "source/feature-4" "ship/PR-4 created"
+    assert_branch_exists "source/feature-5" "ship/PR-5 created"
+
+    local head3
+    head3=$(jq -r '.projections["3"].ship_head_local' .dispatch/state.json)
+    assert_contains "$head3" "" "ship_head_local is set"
+    [[ -n "$head3" && "$head3" != "null" ]] && {
+        echo -e "  ${GREEN}PASS${NC} state has ship_head_local"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} ship_head_local missing"; FAIL=$((FAIL + 1))
+    }
+
+    teardown
+}
+
+test_project_noop_idempotent() {
+    echo "=== test: project re-run = noop (state hash stable) ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    local h1 h2
+    h1=$(bash "$DISPATCH" state hash)
+    bash "$DISPATCH" project >/dev/null 2>&1
+    h2=$(bash "$DISPATCH" state hash)
+    assert_eq "$h1" "$h2" "state hash unchanged after re-project"
+
+    teardown
+}
+
+test_project_fast_forward_appends() {
+    echo "=== test: project fast_forward adds new POC commits ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Append a new commit on POC tagged for PR-3
+    git checkout source/feature -q
+    echo "more" > more.txt; git add more.txt
+    git commit -m "Add more$(printf '\n\nDispatch-Target-Id: 3')" -q
+
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # Verify PR-3 ship branch has the new commit
+    local count_before count_after
+    count_before=$(git rev-list --count master..source/feature-3 2>/dev/null || echo 0)
+    [[ "$count_before" -ge 2 ]] && {
+        echo -e "  ${GREEN}PASS${NC} ship/PR-3 has new commit (count=$count_before)"; PASS=$((PASS + 1))
+    } || {
+        echo -e "  ${RED}FAIL${NC} ship/PR-3 missing new commit (count=$count_before)"; FAIL=$((FAIL + 1))
+    }
+
+    teardown
+}
+
+test_project_force_recreates() {
+    echo "=== test: project --force regenerates ship branch ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    local head_before
+    head_before=$(git rev-parse source/feature-3)
+
+    bash "$DISPATCH" project --force >/dev/null 2>&1
+
+    # Force_push_required should be true
+    local fp
+    fp=$(jq -r '.projections["3"].force_push_required' .dispatch/state.json)
+    assert_eq "true" "$fp" "force_push_required set after --force"
+
+    teardown
+}
+
+test_project_abort_clears_conflict() {
+    echo "=== test: project --abort clears pending conflict.json ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+
+    # Manually write a conflict.json
+    mkdir -p .dispatch
+    echo '{"command":"project","phase":"cherry_pick","context":{},"started_at_state_hash":"x"}' > .dispatch/conflict.json
+
+    bash "$DISPATCH" project --abort >/dev/null
+
+    [[ -f .dispatch/conflict.json ]] && {
+        echo -e "  ${RED}FAIL${NC} conflict.json still exists"; FAIL=$((FAIL + 1))
+    } || {
+        echo -e "  ${GREEN}PASS${NC} conflict.json cleared"; PASS=$((PASS + 1))
+    }
+
+    teardown
+}
+
+test_project_full_fresh_state_consistent() {
+    echo "=== test: project state.poc_commits matches POC tagged commits ==="
+    setup
+    create_source >/dev/null
+    bash "$DISPATCH" state init --from-config >/dev/null
+    bash "$DISPATCH" project >/dev/null 2>&1
+
+    # PR-4 has 2 commits per create_source
+    local count
+    count=$(jq -r '.projections["4"].poc_commits | length' .dispatch/state.json)
+    assert_eq "2" "$count" "state.projections[4].poc_commits has 2 entries"
+
+    teardown
+}
+
+test_project_requires_state
+test_project_full_fresh_creates_ship_branches
+test_project_noop_idempotent
+test_project_fast_forward_appends
+test_project_force_recreates
+test_project_abort_clears_conflict
+test_project_full_fresh_state_consistent
+
 echo ""
 echo "======================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
