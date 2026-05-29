@@ -19,6 +19,7 @@ source "$SCRIPT_DIR/lib/project.sh"
 source "$SCRIPT_DIR/lib/absorb.sh"
 source "$SCRIPT_DIR/lib/combined.sh"
 source "$SCRIPT_DIR/lib/base.sh"
+source "$SCRIPT_DIR/lib/migrate.sh"
 
 # Get targets of a branch from git config
 get_targets() {
@@ -3636,13 +3637,13 @@ main() {
     case "$cmd" in
         init)         cmd_init "$@" ;;
         commit)       cmd_commit "$@" ;;
-        sync)         cmd_sync "$@" ;;
-        apply)        cmd_apply "$@" ;;
+        sync)         warn_deprecated "sync" "update-base + project"; cmd_sync "$@" ;;
+        apply)        warn_deprecated "apply" "project"; cmd_apply "$@" ;;
         push)         cmd_push "$@" ;;
         verify)       cmd_verify "$@" ;;
         status)       cmd_status "$@" ;;
-        checkout)     cmd_checkout "$@" ;;
-        checkin)      cmd_checkin "$@" ;;
+        checkout)     warn_deprecated "checkout" "combined"; cmd_checkout "$@" ;;
+        checkin)      warn_deprecated "checkin" "absorb"; cmd_checkin "$@" ;;
         continue)     cmd_continue "$@" ;;
         abort)        cmd_abort "$@" ;;
         retarget)     cmd_retarget "$@" ;;
@@ -3657,6 +3658,7 @@ main() {
         combined)     cmd_combined "$@" ;;
         update-base)  cmd_update_base "$@" ;;
         clean)        cmd_clean "$@" ;;
+        migrate)      cmd_migrate "$@" ;;
         help|--help|-h) cmd_help ;;
         *)            die "Unknown command: $cmd" ;;
     esac

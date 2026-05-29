@@ -179,3 +179,12 @@ _acquire_lock() {
 _release_lock() {
     [[ -n "${DISPATCH_LOCKFILE:-}" ]] && rm -f "$DISPATCH_LOCKFILE"
 }
+
+# Emit deprecation notice to stderr. Old command still runs.
+# Usage: warn_deprecated <old-name> <replacement>
+warn_deprecated() {
+    local old="$1" new="$2"
+    if [[ -t 2 ]]; then
+        echo -e "${YELLOW}deprecated:${NC} 'git dispatch $old' will be removed. Use 'git dispatch $new'. See docs/migrate.md" >&2
+    fi
+}
