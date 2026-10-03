@@ -23,7 +23,7 @@ body {
 }
 
 header, main, footer {
-  max-width: 42rem;
+  max-width: 44rem;
   margin: 0 auto;
   padding: 0 16px;
 }
