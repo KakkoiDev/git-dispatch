@@ -2,6 +2,8 @@
 
 **Stacked PRs without the stack.**
 
+Website: https://kakkoidev.github.io/git-dispatch/
+
 Multi-commit grouped PRs. Code on one source branch (the "POC"), group commits by `Dispatch-Target-Id`, project into independent ship branches off base for focused PRs. Integration test with `combined`. No force-push. No restack. No cascade.
 
 Unlike ghstack/spr (1 commit = 1 PR), git-dispatch supports N commits = 1 PR.
