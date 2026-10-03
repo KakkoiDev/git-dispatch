@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>git-dispatch | Stacked PRs without the stack</title>
+<meta name="description" content="git-dispatch turns one feature branch into independent, multi-commit pull requests. Each PR branch starts from base, so when one merges the others need no rebase and no force-push.">
+<meta name="color-scheme" content="light">
+<link rel="canonical" href="https://kakkoidev.github.io/git-dispatch/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="git-dispatch | Stacked PRs without the stack">
+<meta property="og:description" content="Code a feature on one branch, ship it as independent multi-commit PRs. No force-push. No restack. No cascade.">
+<meta property="og:url" content="https://kakkoidev.github.io/git-dispatch/">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>git-dispatch</h1>
+  <p class="tagline">Stacked PRs without the stack.</p>
+  <p>Code a feature on one branch, tag each commit with the PR it belongs to, and git-dispatch builds one independent branch per PR off base. A PR can hold any number of commits. No force-push. No restack. No cascade.</p>
+  <ul class="links">
+    <li><a href="#install">Install</a></li>
+    <li><a href="#example">Example</a></li>
+    <li><a href="https://github.com/KakkoiDev/git-dispatch#readme">README</a></li>
+    <li><a href="https://github.com/KakkoiDev/git-dispatch">GitHub</a></li>
+  </ul>
+</header>
+
+<main>
+  <section aria-labelledby="problem">
+    <h2 id="problem">The problem</h2>
+    <p>You code the whole feature on one branch, then need focused PRs for review. Stacked PR tools such as Graphite, ghstack and spr put each branch on top of the one before. When a parent PR merges, every child has to be rebased and force-pushed, and review context is lost.</p>
+    <p>ghstack and spr also map one commit to one PR. With git-dispatch, a PR is as many commits as it needs.</p>
+  </section>
+
+  <section aria-labelledby="how">
+    <h2 id="how">How it works</h2>
+    <p>Don't stack. Each PR branch starts from base and carries only its own commits, so when one PR merges, the others are unaffected.</p>
+    <ol>
+      <li><strong>Tag.</strong> Commit with <code>git dispatch commit</code> and a <code>--target</code> number. The number is stored in a <code>Dispatch-Target-Id</code> trailer and decides which PR the commit goes to.</li>
+      <li><strong>Project.</strong> <code>git dispatch project</code> builds one branch per PR off base, ready to push.</li>
+      <li><strong>Test together.</strong> CI needs the code combined? <code>git dispatch combined</code> makes a throwaway branch from the PRs you pick, without stacking them for good.</li>
+    </ol>
+    <p>State lives in <code>.dispatch/state.json</code>, readable by people, scripts and AI agents through <code>git dispatch status --json</code>.</p>
+  </section>
+
+  <section aria-labelledby="install">
+    <h2 id="install">Install</h2>
+    <p>Needs Git 2.x+ and Bash 3.2+ (macOS compatible).</p>
+<pre tabindex="0"><code>git clone git@github.com:KakkoiDev/git-dispatch.git
+cd git-dispatch
+bash install.sh</code></pre>
+    <p><code>install.sh</code> adds a global <code>git dispatch</code> alias that runs the script from the clone.</p>
+  </section>
+
+  <section aria-labelledby="example">
+    <h2 id="example">Example: one feature, three PRs</h2>
+<pre tabindex="0"><code><span class="c"># Start the feature branch and point it at master</span>
+git checkout -b feature/auth master
+git dispatch init --base origin/master --target-pattern "feature/auth-{id}"
+git dispatch state init --from-config
+
+<span class="c"># Commit as usual, naming the PR each commit belongs to</span>
+git dispatch commit "Add user model"        --target 1
+git dispatch commit "Add auth middleware"   --target 2
+git dispatch commit "Add login endpoint"    --target 2
+git dispatch commit "Add validation"        --target 3
+
+<span class="c"># Build one branch per PR off master</span>
+git dispatch project
+<span class="c"># feature/auth-1  (1 commit)</span>
+<span class="c"># feature/auth-2  (2 commits)</span>
+<span class="c"># feature/auth-3  (1 commit)</span>
+
+<span class="c"># Push each branch, then open the PRs</span>
+git dispatch push 1
+git dispatch push 2
+git dispatch push 3</code></pre>
+    <p>Later, as the PRs move through review:</p>
+<pre tabindex="0"><code><span class="c"># Review commits pushed to a PR branch? Bring them back</span>
+git dispatch absorb
+
+<span class="c"># Test PR 1 and PR 3 together on a throwaway branch</span>
+git dispatch combined --include 1,3
+git dispatch combined --dissolve
+
+<span class="c"># master moved on? Catch up, drop merged PRs, rebuild</span>
+git dispatch update-base
+git dispatch clean
+git dispatch project</code></pre>
+    <p>Coming from the old commands? <code>apply</code>, <code>sync</code>, <code>checkout</code> and <code>checkin</code> still work and print a deprecation warning in a terminal. The migration guide maps each one to its new name.</p>
+  </section>
+
+  <section aria-labelledby="docs">
+    <h2 id="docs">Docs</h2>
+    <ul class="doclist">
+      <li><a href="https://github.com/KakkoiDev/git-dispatch#readme">README</a><span>Every command, flag and workflow, plus troubleshooting.</span></li>
+      <li><a href="https://github.com/KakkoiDev/git-dispatch/blob/master/docs/migrate.md">Migration guide</a><span>Old command names to new ones, and the one-time <code>git dispatch migrate</code>.</span></li>
+      <li><a href="https://github.com/KakkoiDev/git-dispatch/blob/master/DESIGN.md">Design document</a><span>Why one branch is the source of truth and PR branches are derived from it.</span></li>
+      <li><a href="https://github.com/KakkoiDev/git-dispatch/blob/master/AGENTS.md">AGENTS.md</a><span>Drop-in instructions for AI coding agents.</span></li>
+      <li><a href="https://github.com/KakkoiDev/git-dispatch">Source on GitHub</a><span>MIT licensed.</span></li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>MIT license. Made by <a href="https://kakkoi.dev">KakkoiDev</a>.</p>
+</footer>
+</body>
+</html>
